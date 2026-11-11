@@ -157,13 +157,13 @@ min+gzip, as measured by `pnpm size` (budget: 40 KB for core):
 
 | Entry                                                            |                     Size |
 | ---------------------------------------------------------------- | -----------------------: |
-| `@scanoficus/core` (all exports)                                 |                  23.0 KB |
-| `@scanoficus/core/controller` (camera, detection, render, PDF)   |                  21.7 KB |
-| `@scanoficus/core/detect`                                        |                   7.0 KB |
+| `@scanoficus/core` (all exports)                                 |                  24.0 KB |
+| `@scanoficus/core/controller` (camera, detection, render, PDF)   |                  22.7 KB |
+| `@scanoficus/core/detect`                                        |                   8.1 KB |
 | `@scanoficus/core/render` (WebGL2 + CPU filters)                 |                   6.5 KB |
-| `@scanoficus/core/worker-entry` (detector worker)                |                   6.9 KB |
+| `@scanoficus/core/worker-entry` (detector worker)                |                   7.9 KB |
 | `@scanoficus/core/warp` · `/filters` · `/camera` · `/pdf`        | 3.0 · 2.2 · 2.6 · 1.7 KB |
-| `@scanoficus/elements/define` (including core)                   |                  29.5 KB |
+| `@scanoficus/elements/define` (including core)                   |                  30.5 KB |
 | `@scanoficus/react` (own code, without elements, core and React) |                   1.4 KB |
 
 ## Detector quality (synthetic benchmark)
@@ -171,7 +171,8 @@ min+gzip, as measured by `pnpm size` (budget: 40 KB for core):
 `pnpm eval` renders 300 seeded synthetic scenes per class at 384×288. Each scene is a paper
 sheet with text-like strokes under a random camera pose, plus noise, blur and shadows. The eval
 reports the share of scenes with IoU ≥ 0.9 and the mean corner error as a percentage of the
-image diagonal (default options; the real-data timings below are the reference):
+image diagonal (default options, RGBA input as in the live pipeline; `--gray` passes the luma;
+the real-data timings below are the reference):
 
 | class                                                   | IoU ≥ 0.9 | mean IoU | corner error |
 | ------------------------------------------------------- | --------: | -------: | -----------: |
@@ -179,53 +180,58 @@ image diagonal (default options; the real-data timings below are the reference):
 | perspective (tilt ≤ 40°, roll ≤ 45°)                    |     100 % |    1.000 |      0.004 % |
 | noisy + blurred                                         |     100 % |    0.999 |      0.014 % |
 | shadow (gradient + cast shadow)                         |     100 % |    1.000 |      0.005 % |
-| low contrast (paper on light table)                     |      69 % |    0.979 |       0.45 % |
-| touching / crossing the frame border                    |      96 % |    0.991 |       0.25 % |
-| textured / cluttered background                         |    98.3 % |    0.999 |       0.02 % |
-| no document, with rectangular clutter (false positives) |     9.3 % |        – |            – |
+| low contrast (paper on light table)                     |    91.3 % |    0.980 |       0.46 % |
+| touching / crossing the frame border                    |    96.7 % |    0.985 |       0.37 % |
+| textured / cluttered background                         |    98.0 % |    0.996 |       0.09 % |
+| no document, with rectangular clutter (false positives) |     6.3 % |        – |            – |
 
 The synthetic sheets have perfectly straight edges, so these corner errors are far lower than
 real photos will give. Every false positive in the document-free class is a uniform
 rectangular object (a book, a box): an edge-based detector cannot tell such objects from
-paper. The default score threshold is calibrated on real photos (below). It drops the
-faintest synthetic low-contrast sheets, which scored 85 % before that calibration.
+paper. The default score threshold is calibrated on real photos (below). With gray input, the
+low-contrast class reaches 71.7 % and the false-positive rate 4.7 %.
 
 ## Detector quality (public datasets)
 
-`pnpm bench` runs the detector with default options on real video frames. The datasets are
-fetched with `pnpm bench:fetch` and stored outside the repository. The detector was tuned on
-half of the SmartDoc documents only. The other half and MIDV are held out, and 785 COCO photos
-of desks, tables and screens without documents measure false positives. The table shows the
-official SmartDoc Jaccard index (JI) at the default long side of 384 px, before and after
-that tuning:
+`pnpm bench` runs the detector with default options on real video frames and single photos.
+The datasets are fetched with `pnpm bench:fetch` (photo sets: a separate intake) and stored
+outside the repository. The detector was tuned on half of the SmartDoc documents and half of
+the MIDV-500 document types only. The other halves, MIDV-2019 and two single-photo sets (Dizaj,
+RWMD) are held out, and 785 COCO photos of desks, tables and screens without documents measure
+false positives (one half sets the thresholds, the other reports the rate). The table shows the
+SmartDoc Jaccard index (JI) at the default long side of 384 px with RGBA input, for v1 (before
+any tuning), v2 (round 1) and v3 (round 2), each at its default threshold:
 
-| dataset                                      | before | after |  best published, classic | best published, learned |
-| -------------------------------------------- | -----: | ----: | -----------------------: | ----------------------: |
-| SmartDoc 2015, held-out documents            |  0.652 | 0.786 |                        – |                       – |
-| SmartDoc 2015, held-out documents, bg 1–4    |  0.728 | 0.877 |    0.987 (Tropin et al.) |                       – |
-| SmartDoc 2015 Ch. 1, all 24,889 frames       |  0.636 | 0.772 |             0.972 (LRDE) |     0.992 (HU-PageScan) |
-| SmartDoc 2015, background 5 (clutter)        |  0.001 | 0.000 |             0.861 (LRDE) |          0.986 (LDRNet) |
-| MIDV-500, 10 of 50 types (held out)          |  0.789 | 0.622 | 0.906 (Tropin, 50 types) |                       – |
-| MIDV-2019, 10 of 50 types (held out)         |  0.690 | 0.587 |                        – |                       – |
-| photos without a document: share with a quad | 20.4 % | 6.5 % |                        – |                       – |
+| dataset                                      |     v1 |    v2 |    v3 | best published, classic | best published, learned |
+| -------------------------------------------- | -----: | ----: | ----: | ----------------------: | ----------------------: |
+| SmartDoc 2015, held-out documents            |  0.652 | 0.786 | 0.849 |                       – |                       – |
+| SmartDoc 2015, held-out documents, bg 1–4    |  0.728 | 0.877 | 0.947 |   0.987 (Tropin et al.) |                       – |
+| SmartDoc 2015 Ch. 1, background 5 (clutter)  |  0.001 | 0.000 | 0.000 |            0.861 (LRDE) |          0.986 (LDRNet) |
+| MIDV-500, held-out half (5 of 50 types)      |  0.785 | 0.620 | 0.710 |                       – |                       – |
+| MIDV-2019, 10 of 50 types                    |  0.690 | 0.588 | 0.655 |                       – |                       – |
+| Dizaj, 1,055 single photos                   |  0.700 | 0.515 | 0.659 |                       – |                       – |
+| RWMD, 1,975 single photos                    |  0.483 | 0.266 | 0.369 |                       – |                       – |
+| photos without a document: share with a quad | 18.8 % | 6.4 % | 6.9 % |                       – |                       – |
 
-The tuned detector takes 5.0 ms per frame at 384 px (4.6 ms before), and corners are accurate
-when it finds the document. It returns far fewer false quads, and on held-out SmartDoc
-backgrounds 1–4 the best candidate is right in 0.968 JI when no threshold is applied. Its
-calibrated threshold is too strict for ID cards that are held in the hand or leave the frame
-(MIDV), where it now misses more cards than before. `DEFAULT_MIN_SCORE` and `CONFIDENT_SCORE`
-document what a detection score means, so a hybrid can hand unsure frames to a learned
-detector. See [docs/benchmarks.md](docs/benchmarks.md) for the protocol, the experiment log,
-licenses, per-background tables, the comparison with published methods and the failure
-analysis.
+At an equal false-positive rate (5 % of the negatives), v3 beats v1 and v2 on every held-out
+set (SmartDoc held-out 0.836, MIDV-500 0.700, MIDV-2019 0.638, Dizaj 0.654, RWMD 0.356). v1
+looks better on MIDV and the photos at its own default only because it returns a quad on 19 %
+of the photos without a document. The largest gain came from colour edges: `detectDocument`
+accepts RGBA input (e.g. `ImageData`) and adds a yellow–blue chroma gradient, which finds white
+paper on a light table (SmartDoc background 4: 0.948 on held-out documents). Gray input still
+works. Detection takes 6.0 ms per frame at 384 px with RGBA input (3.6 ms with gray input; v2
+4.7 ms). `DEFAULT_MIN_SCORE` (0.74) and `CONFIDENT_SCORE` (0.80) document what a score means
+on video frames, so a hybrid can hand unsure frames to a learned detector; on single photos
+with several documents (RWMD) the score is much less reliable. See
+[docs/benchmarks.md](docs/benchmarks.md) for the protocol, the experiment log, licenses, the
+photo-set flags, the comparison with published methods and the failure analysis.
 
 ## Roadmap
 
 - Real-device testing and tuning on iOS and Android, following the release gate in the
   platform notes.
-- Detector tuning on a more diverse tuning split (hand-held and partly visible documents),
-  and an optional learned detector for clutter, occlusion and documents leaving the frame;
-  see [docs/benchmarks.md](docs/benchmarks.md).
+- An optional learned detector for clutter, stacked papers, books, occlusion and documents
+  leaving the frame; see [docs/benchmarks.md](docs/benchmarks.md).
 - OCR adapters, lazy-loaded: `@scanoficus/ocr-tesseract`, then PaddleOCR via
   `@scanoficus/ocr-onnx`, plus searchable PDFs with an invisible text layer.
 - An optional ML detector plugin (`@scanoficus/detector-ml`) behind the `DocumentDetector`
