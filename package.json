@@ -101,6 +101,19 @@
       "path": "packages/elements/dist/define.js",
       "gzip": true,
       "limit": "40 KB"
+    },
+    {
+      "name": "@scanoficus/react (own code)",
+      "path": "packages/react/dist/index.js",
+      "import": "*",
+      "ignore": [
+        "@scanoficus/core",
+        "@scanoficus/elements",
+        "react",
+        "react/jsx-runtime"
+      ],
+      "gzip": true,
+      "limit": "3 KB"
     }
   ]
 }

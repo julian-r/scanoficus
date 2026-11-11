@@ -1,0 +1,54 @@
+{
+  "name": "@scanoficus/react",
+  "version": "0.0.0",
+  "description": "React bindings for scanoficus: useDocumentScanner hook and scanner components.",
+  "license": "BSD-3-Clause",
+  "author": "Julian Rath",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/julian-r/scanoficus.git",
+    "directory": "packages/react"
+  },
+  "keywords": [
+    "document-scanner",
+    "react",
+    "pwa"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "src"
+  ],
+  "exports": {
+    ".": {
+      "@scanoficus/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsdown",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.test.json"
+  },
+  "dependencies": {
+    "@scanoficus/core": "workspace:*",
+    "@scanoficus/elements": "workspace:*"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "happy-dom": "21.0.4",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "tsdown": "0.23.7",
+    "typescript": "7.0.2",
+    "vitest": "5.1.0"
+  }
+}

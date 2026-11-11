@@ -144,7 +144,8 @@ export class ScannerController {
   private readonly now: () => number;
   private readonly ownsDetector: boolean;
   private readonly ownsRenderer: boolean;
-  private detector: DocumentDetector;
+  /** Created lazily so that constructing a controller has no side effects (SSR, StrictMode). */
+  private detector: DocumentDetector | null;
   private renderer: PageRenderer | null;
   private readonly tracker: QuadTracker;
   private readonly grabber = new FrameGrabber();
@@ -170,7 +171,7 @@ export class ScannerController {
     this.options = options;
     this.now = options.now ?? (() => performance.now());
     this.ownsDetector = !options.detector;
-    this.detector = options.detector ?? createDefaultDetector();
+    this.detector = options.detector ?? null;
     this.ownsRenderer = !options.renderer;
     this.renderer = options.renderer ?? null;
     this.tracker = new QuadTracker(options.tracker);
@@ -205,6 +206,11 @@ export class ScannerController {
 
   get pages(): readonly ScanPage[] {
     return this.snapshot.pages;
+  }
+
+  /** True after {@link ScannerController.dispose}; a disposed controller cannot be restarted. */
+  get isDisposed(): boolean {
+    return this.disposed;
   }
 
   /**
@@ -404,7 +410,7 @@ export class ScannerController {
     this.releaseCamera();
     this.unwatchVisibility?.();
     this.clear();
-    if (this.ownsDetector) this.detector.dispose();
+    if (this.ownsDetector) this.detector?.dispose();
     if (this.ownsRenderer) this.renderer?.dispose();
     this.grabber.dispose();
     this.setState('idle');
@@ -438,6 +444,7 @@ export class ScannerController {
   }
 
   private async detectWithFallback(frame: RgbaImage): Promise<Detection | null> {
+    this.detector ??= createDefaultDetector();
     try {
       return await this.detector.detect(frame, this.options.detection);
     } catch (error) {
