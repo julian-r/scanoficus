@@ -109,6 +109,13 @@ alone against the previous default (classic first, then round 1 + edge refinemen
 | photos without a document with a quad |   6.6 % |              10.7 % |
 | private iPhone receipt set (IoU)      |   0.888 |               0.814 |
 
+On a fresh held-out set scored once after these choices, RWMD-Extended (all 503 photos, JI with
+a 95 % interval), round 4 alone reached 0.707 [0.679–0.733], against 0.714 for round 3, 0.560
+for the hybrid with round 1 (the old default), 0.628 for the hybrid with round 4 and 0.450 for
+classic v3 alone. The hybrids are worse than the network alone, because the classic detector
+is confidently wrong on many single photos: on the photos where the hybrid keeps the classic
+quad, those quads have a JI of 0.634, against 0.777 for round 4 on the same photos.
+
 `createNnDetector()` without a `bundle` still loads round 1, so existing setups do not change.
 
 - **Bundle.** Main network `docquadnet4` (scanoficus-ml run `r4-m6`, fine-tuned from round 2's
@@ -116,7 +123,17 @@ alone against the previous default (classic first, then round 1 + edge refinemen
   fine-tuned from round 3's refiner; 3 outputs per crop: two offsets and the corner-confidence
   logit) and the decision of `export/docquadnet4/decision.json` (same features as round 3, new
   coefficients and threshold). The bundle module carries the decision's runtime fields inline
-  (no file is fetched for it); `models/docquadnet4/decision.json` is the copy for self-hosting.
+  (no file is fetched for it); `models/docquadnet4/decision.json` is the copy for self-hosting
+  (`exportFile` names its source).
+- **The decision is one swappable file.** scanoficus-ml also has a refit for the same networks,
+  `export/docquadnet4/decision-4b.json` (same features, new coefficients). It is not shipped: on
+  RWMD-Extended the two decisions differ on 1 of 503 photos, not a significant difference. To
+  ship another decision, run `package_model.py --decision docquadnet4=decision-4b.json` (it
+  pins the file to the weights and regenerates `decision.json` and the bundle module, nothing
+  else); a self-hosted bundle only needs the other `decision.json` next to its `bundle.json`.
+  `test/round4.test.ts` checks both paths with `test/fixtures/decision-4b-round4.json`
+  (decision-only vectors of the refit, from `make_decision_fixtures.py --decision
+  decision-4b.json`).
 - **Pipeline** (a port of `scanoficus_ml/refiner.py` and the `net:` step of
   `scanoficus_ml/pipeline.py`): main network → raw quad → the frame area-downscaled to a long
   side of 1600 (one `cv2.resize(INTER_AREA)`; smaller frames are used as they are) → a pyramid
@@ -237,15 +254,19 @@ alone against the previous default (classic first, then round 1 + edge refinemen
   only where the profiles sample. Cost per frame: +1.5 ms for 384-px frames, +11 ms for
   1280×720 RGBA frames (most of it is the full-frame gray conversion and downscale).
 - **Classic first, network on doubt** (`createHybridDetector`; the demo's default before round
-  4). Offline
-  (scanoficus-datasets `results/hybrid.md`), classic v3 with `CONFIDENT_SCORE` 0.80, else round 1
-  - edge refinement (presence > 0.85), had the best JI on every set with documents (SmartDoc
-    held-out 0.976, MIDV-500 0.872, MIDV-2019 0.844, Dizaj test 0.705, RWMD 0.654), at 10.7 %
-    false positives on photos without a document (network alone 7.4 %). The thresholds are
-    options for tuning: `confidentScore` (default `HYBRID_DEFAULTS.confidentScore`), the network
-    detector's `threshold` (`HYBRID_DEFAULTS.networkThreshold`), `fallbackMinScore` (classic
-    answer when the network fails) and `classicOptions` (e.g. `{ maxSide: 384 }` to keep the
-    classic stage at its calibrated size when the frames are larger for refinement):
+  4). Classic v3 answers when its score is at least `CONFIDENT_SCORE` (0.80), else round 1 with
+  edge refinement (presence > 0.85). Offline (scanoficus-datasets `results/hybrid.md`) it beat
+  round 1 alone on every set with documents (SmartDoc held-out 0.976, MIDV-500 0.872,
+  MIDV-2019 0.844, Dizaj test 0.705, RWMD 0.654), at 10.7 % false positives on photos without a
+  document (network alone 7.4 %). It is worse than round 4 alone, and on the fresh
+  RWMD-Extended set (503 single photos) worse than the network alone with either round: JI
+  0.560 with round 1 and 0.628 with round 4, against 0.707 for round 4 alone. The classic
+  detector is confidently wrong on many single photos (its kept quads: JI 0.634, round 4 on the
+  same photos 0.777). The thresholds are options for tuning: `confidentScore` (default
+  `HYBRID_DEFAULTS.confidentScore`), the network detector's `threshold`
+  (`HYBRID_DEFAULTS.networkThreshold`), `fallbackMinScore` (classic answer when the network
+  fails) and `classicOptions` (e.g. `{ maxSide: 384 }` to keep the classic stage at its
+  calibrated size when the frames are larger for refinement):
 
   ```ts
   import { createDetectorWorker } from '@scanoficus/core/worker';

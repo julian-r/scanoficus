@@ -13,7 +13,6 @@ The **Detector** menu in the top bar chooses the detector for the live scan (liv
 the re-detection on the captured still) and for the photo import. The choice is stored in
 localStorage:
 
-- **Classic**: the core's edge detector in a worker.
 - **Neural v4** (the default when WebGL2 can render to float32 textures, else Classic; a stored
   choice is kept): round 4 of `@scanoficus/detector-nn` (`DOCQUADNET4`) with its verified
   presence decision, on 768-px frames; the corner refiner runs on live frames, on the
@@ -23,7 +22,11 @@ localStorage:
   Why it replaced Hybrid as the default (held-out JI, round 4 alone vs Hybrid with round 1):
   SmartDoc 0.983 vs 0.976, MIDV-500 0.877 vs 0.872, MIDV-2019 0.860 vs 0.844, Dizaj test 0.882
   vs 0.705, RWMD 0.685 vs 0.654; false positives on photos without a document 6.6 % vs 10.7 %;
-  on a private iPhone receipt set (thin white receipts on white) IoU 0.888 vs 0.814. Its model
+  on a private iPhone receipt set (thin white receipts on white) IoU 0.888 vs 0.814. On the
+  fresh held-out RWMD-Extended set (all 503 photos, JI): round 4 0.707 [0.679–0.733], round 3
+  0.714, Hybrid with round 1 (the old default) 0.560, Hybrid with round 4 0.628, Classic 0.450.
+  It ships round 4's own `decision.json`; the refit `decision-4b.json` differed on 1 of the 503
+  photos (not significant). Its model
   files (main network 688 kB, refiner 244 kB) come from the package and are fetched when this
   option is used.
 - **Classic**: the core's edge detector in a worker.
@@ -35,7 +38,10 @@ localStorage:
   frames instead of 384.
 - **Hybrid** (the default before round 4): the classic detector first (at 384 px); when its
   score is below `CONFIDENT_SCORE` (0.80), "Neural + refine" (round 1, presence > 0.85, 768-px
-  frames).
+  frames). Kept for comparison, but worse than the network alone: on RWMD-Extended JI 0.560
+  (with round 4 as its network 0.628) against 0.707 for Neural v4, because the classic detector
+  is confidently wrong on many single photos (the quads it keeps have JI 0.634; round 4 on the
+  same photos 0.777).
 - **Neural v2 + refiner**: round 2 of the network (threshold 0.98) on live frames (raw quad),
   and the corner refiner on the full-resolution still after capture and on imported photos
   (`detectStill`). The Debug overlay shows the still's size and time. Its model files (930 kB)
