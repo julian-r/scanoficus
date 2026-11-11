@@ -1,4 +1,4 @@
-import { CONFIDENT_SCORE, DEFAULT_MIN_SCORE } from '@scanoficus/core/detect';
+import { CONFIDENT_SCORE, DEFAULT_MIN_SCORE, type DetectOptions } from '@scanoficus/core/detect';
 import { createMainThreadDetector, type DocumentDetector } from '@scanoficus/core/worker';
 import { isBitmap } from './detector.ts';
 
@@ -18,7 +18,30 @@ export interface HybridDetectorOptions {
    * detector if its score reaches `DEFAULT_MIN_SCORE` (its usual threshold), else with `null`.
    */
   onError?: (error: unknown) => void;
+  /**
+   * Minimum classic score for answering a frame the network failed on. Default: the frame's
+   * `minScore`, else `DEFAULT_MIN_SCORE`.
+   */
+  fallbackMinScore?: number;
+  /**
+   * Options for the classic stage, applied over the frame's options (`minScore` is always 0).
+   * E.g. `{ maxSide: 384 }` keeps the classic detector at the resolution its scores are
+   * calibrated for when the controller sends larger frames for the network's refinement.
+   */
+  classicOptions?: DetectOptions;
 }
+
+/**
+ * Thresholds of the hybrid in one place (for tuning): the classic confidence above which the
+ * classic quad is used, and the network's presence threshold (set on the network detector).
+ * Offline (scanoficus-datasets `results/hybrid.md`), classic v3 + round 1 with refinement at
+ * these values gave the best JI on every set with documents, at 10.7 % false positives on
+ * photos without a document.
+ */
+export const HYBRID_DEFAULTS: { confidentScore: number; networkThreshold: number } = {
+  confidentScore: CONFIDENT_SCORE,
+  networkThreshold: 0.85,
+};
 
 /**
  * Classic first, network on doubt: every frame goes to the classic detector (with
@@ -44,7 +67,11 @@ export function createHybridDetector(options: HybridDetectorOptions): DocumentDe
       const copy = isBitmap(frame) ? await createImageBitmap(frame) : frame;
       let first: Awaited<ReturnType<DocumentDetector['detect']>>;
       try {
-        first = await classic.detect(copy, { ...detectOptions, minScore: 0 });
+        first = await classic.detect(copy, {
+          ...detectOptions,
+          ...options.classicOptions,
+          minScore: 0,
+        });
       } catch (error) {
         if (isBitmap(frame)) frame.close();
         throw error;
@@ -57,7 +84,7 @@ export function createHybridDetector(options: HybridDetectorOptions): DocumentDe
         return await nn.detect(frame, detectOptions);
       } catch (error) {
         options.onError?.(error);
-        const minScore = detectOptions?.minScore ?? DEFAULT_MIN_SCORE;
+        const minScore = options.fallbackMinScore ?? detectOptions?.minScore ?? DEFAULT_MIN_SCORE;
         return first && first.score >= minScore ? first : null;
       }
     },

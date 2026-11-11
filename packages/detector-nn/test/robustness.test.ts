@@ -8,6 +8,7 @@ import {
   createHybridDetector,
   createNnDetector,
   fitQuadToFrame,
+  HYBRID_DEFAULTS,
   parseModel,
 } from '../src/index.ts';
 import { DOCQUADNET_GRAPH_URL, DOCQUADNET_WEIGHTS_URL } from './models.ts';
@@ -86,6 +87,26 @@ describe('createHybridDetector: network errors', () => {
     const hybrid = createHybridDetector({ classic: classic(score), nn: failing, onError });
     expect((await hybrid.detect(frame))?.score).toBe(score);
     expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: 'network down' }));
+  });
+
+  it('uses fallbackMinScore and classicOptions', async () => {
+    const seen: unknown[] = [];
+    const spy: DocumentDetector = {
+      detect: async (_f, o) => {
+        seen.push(o);
+        return { quad: quad([1, 1], [9, 1], [9, 9], [1, 9]), score: 0.5 };
+      },
+      dispose: () => {},
+    };
+    const hybrid = createHybridDetector({
+      classic: spy,
+      nn: failing,
+      fallbackMinScore: 0.4,
+      classicOptions: { maxSide: 384 },
+    });
+    expect((await hybrid.detect(frame, { maxSide: 768 }))?.score).toBe(0.5);
+    expect(seen[0]).toEqual({ maxSide: 384, minScore: 0 });
+    expect(HYBRID_DEFAULTS).toEqual({ confidentScore: CONFIDENT_SCORE, networkThreshold: 0.85 });
   });
 
   it('answers null below DEFAULT_MIN_SCORE or without a classic quad', async () => {

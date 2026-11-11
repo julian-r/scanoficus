@@ -54,7 +54,7 @@ export {
   type GlSupport,
   probeGl,
 } from './gl.ts';
-export { createHybridDetector, type HybridDetectorOptions } from './hybrid.ts';
+export { createHybridDetector, HYBRID_DEFAULTS, type HybridDetectorOptions } from './hybrid.ts';
 export {
   type Activation,
   type GraphNode,
