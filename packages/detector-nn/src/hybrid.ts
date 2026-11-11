@@ -1,5 +1,14 @@
-import { CONFIDENT_SCORE, DEFAULT_MIN_SCORE, type DetectOptions } from '@scanoficus/core/detect';
-import { createMainThreadDetector, type DocumentDetector } from '@scanoficus/core/worker';
+import {
+  CONFIDENT_SCORE,
+  DEFAULT_MIN_SCORE,
+  type Detection,
+  type DetectOptions,
+} from '@scanoficus/core/detect';
+import {
+  createMainThreadDetector,
+  type DetectorFrame,
+  type DocumentDetector,
+} from '@scanoficus/core/worker';
 import { isBitmap } from './detector.ts';
 
 /** Options for {@link createHybridDetector}. */
@@ -62,32 +71,47 @@ export function createHybridDetector(options: HybridDetectorOptions): DocumentDe
   const { nn } = options;
   const classic = options.classic ?? createMainThreadDetector();
   const confident = options.confidentScore ?? CONFIDENT_SCORE;
+  type Stage = (frame: DetectorFrame, o?: DetectOptions) => Promise<Detection | null>;
+  const run = async (
+    frame: DetectorFrame,
+    detectOptions: DetectOptions | undefined,
+    second: Stage,
+  ) => {
+    const copy = isBitmap(frame) ? await createImageBitmap(frame) : frame;
+    let first: Detection | null;
+    try {
+      first = await classic.detect(copy, {
+        ...detectOptions,
+        ...options.classicOptions,
+        minScore: 0,
+      });
+    } catch (error) {
+      if (isBitmap(frame)) frame.close();
+      throw error;
+    }
+    if (first && first.score >= confident) {
+      if (isBitmap(frame)) frame.close();
+      return first;
+    }
+    try {
+      return await second(frame, detectOptions);
+    } catch (error) {
+      options.onError?.(error);
+      const minScore = options.fallbackMinScore ?? detectOptions?.minScore ?? DEFAULT_MIN_SCORE;
+      return first && first.score >= minScore ? first : null;
+    }
+  };
+  const nnStill = nn.detectStill?.bind(nn);
   return {
-    async detect(frame, detectOptions) {
-      const copy = isBitmap(frame) ? await createImageBitmap(frame) : frame;
-      let first: Awaited<ReturnType<DocumentDetector['detect']>>;
-      try {
-        first = await classic.detect(copy, {
-          ...detectOptions,
-          ...options.classicOptions,
-          minScore: 0,
-        });
-      } catch (error) {
-        if (isBitmap(frame)) frame.close();
-        throw error;
-      }
-      if (first && first.score >= confident) {
-        if (isBitmap(frame)) frame.close();
-        return first;
-      }
-      try {
-        return await nn.detect(frame, detectOptions);
-      } catch (error) {
-        options.onError?.(error);
-        const minScore = options.fallbackMinScore ?? detectOptions?.minScore ?? DEFAULT_MIN_SCORE;
-        return first && first.score >= minScore ? first : null;
-      }
-    },
+    detect: (frame, detectOptions) => run(frame, detectOptions, (f, o) => nn.detect(f, o)),
+    // Stills: the classic stage reads the still at its own (downscaled) size; unsure stills go
+    // to the network's full-resolution still detection (e.g. the corner refiner).
+    ...(nnStill
+      ? {
+          detectStill: (still: DetectorFrame, detectOptions?: DetectOptions) =>
+            run(still, detectOptions, nnStill),
+        }
+      : {}),
     dispose() {
       classic.dispose();
       nn.dispose();

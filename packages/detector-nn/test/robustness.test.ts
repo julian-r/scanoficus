@@ -89,6 +89,29 @@ describe('createHybridDetector: network errors', () => {
     expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: 'network down' }));
   });
 
+  it('forwards detectStill: classic first, then the network still path', async () => {
+    const stills: string[] = [];
+    const nn: DocumentDetector = {
+      detect: async () => {
+        stills.push('detect');
+        return null;
+      },
+      detectStill: async () => {
+        stills.push('still');
+        return { quad: quad([2, 2], [8, 2], [8, 8], [2, 8]), score: 0.99 };
+      },
+      dispose: () => {},
+    };
+    const unsure = createHybridDetector({ classic: classic(0.5), nn });
+    expect((await unsure.detectStill?.(frame))?.score).toBe(0.99);
+    const confident = createHybridDetector({ classic: classic(0.95), nn });
+    expect((await confident.detectStill?.(frame))?.score).toBe(0.95);
+    expect(stills).toEqual(['still']);
+    expect(
+      createHybridDetector({ classic: classic(0.5), nn: failing }).detectStill,
+    ).toBeUndefined();
+  });
+
   it('uses fallbackMinScore and classicOptions', async () => {
     const seen: unknown[] = [];
     const spy: DocumentDetector = {
