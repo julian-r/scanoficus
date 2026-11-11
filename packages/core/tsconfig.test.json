@@ -5,5 +5,5 @@
     "types": ["node"],
     "isolatedDeclarations": false
   },
-  "include": ["src", "test", "eval", "tsdown.config.ts", "vitest.config.ts"]
+  "include": ["src", "test", "eval", "bench", "tsdown.config.ts", "vitest.config.ts"]
 }

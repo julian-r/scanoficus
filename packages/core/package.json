@@ -91,7 +91,11 @@
     "build": "tsdown",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.test.json",
-    "eval": "node eval/run.ts"
+    "eval": "node eval/run.ts",
+    "bench:fetch": "node bench/fetch.ts",
+    "bench": "node bench/run.ts",
+    "bench:report": "node bench/report.ts",
+    "bench:montage": "node bench/montage.ts"
   },
   "devDependencies": {
     "@types/node": "26.6.6",

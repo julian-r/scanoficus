@@ -1,0 +1,242 @@
+/**
+ * Dataset adapters for the real-data detector benchmark. Each adapter lists the clips of a
+ * dataset as {@link BenchClip}s: an ordered sequence of frame files with their ground-truth quad
+ * (TL, TR, BR, BL in frame pixels) and the size of the document's reference frame used by the
+ * SmartDoc Jaccard index.
+ */
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { gunzipSync } from 'node:zlib';
+import type { Quad } from '../src/geometry/index.ts';
+
+export type DatasetName = 'smartdoc' | 'midv500' | 'midv2019';
+export const DATASETS: readonly DatasetName[] = ['smartdoc', 'midv500', 'midv2019'];
+
+/** One frame with its ground truth. */
+export interface BenchFrame {
+  /** 1-based frame number within the clip. */
+  index: number;
+  /** Absolute path of the frame image. */
+  path: string;
+  /** Ground-truth document quad (TL, TR, BR, BL), corners may lie outside the frame. */
+  quad: Quad;
+}
+
+/** A video clip (consecutive frames of one document on one background / condition). */
+export interface BenchClip {
+  dataset: DatasetName;
+  /** Unique within the dataset, safe as a file name (e.g. `background01-datasheet001`). */
+  id: string;
+  /** Background (SmartDoc) or capture condition (MIDV). */
+  background: string;
+  /** Document type (SmartDoc) or ID document type (MIDV). */
+  docType: string;
+  /** Size of the document's reference frame (SmartDoc: model size in 0.1 mm). */
+  reference: { width: number; height: number };
+  frames: BenchFrame[];
+}
+
+/** All 50 MIDV-500 / MIDV-2019 document types (archive names). */
+export const MIDV_TYPES: readonly string[] = [
+  '01_alb_id',
+  '02_aut_drvlic_new',
+  '03_aut_id_old',
+  '04_aut_id',
+  '05_aze_passport',
+  '06_bra_passport',
+  '07_chl_id',
+  '08_chn_homereturn',
+  '09_chn_id',
+  '10_cze_id',
+  '11_cze_passport',
+  '12_deu_drvlic_new',
+  '13_deu_drvlic_old',
+  '14_deu_id_new',
+  '15_deu_id_old',
+  '16_deu_passport_new',
+  '17_deu_passport_old',
+  '18_dza_passport',
+  '19_esp_drvlic',
+  '20_esp_id_new',
+  '21_esp_id_old',
+  '22_est_id',
+  '23_fin_drvlic',
+  '24_fin_id',
+  '25_grc_passport',
+  '26_hrv_drvlic',
+  '27_hrv_passport',
+  '28_hun_passport',
+  '29_irn_drvlic',
+  '30_ita_drvlic',
+  '31_jpn_drvlic',
+  '32_lva_passport',
+  '33_mac_id',
+  '34_mda_passport',
+  '35_nor_drvlic',
+  '36_pol_drvlic',
+  '37_prt_id',
+  '38_rou_drvlic',
+  '39_rus_internalpassport',
+  '40_srb_id',
+  '41_srb_passport',
+  '42_svk_id',
+  '43_tur_id',
+  '44_ukr_id',
+  '45_ukr_passport',
+  '46_ury_passport',
+  '47_usa_bordercrossing',
+  '48_usa_passportcard',
+  '49_usa_ssn82',
+  '50_xpo_id',
+];
+
+/** Default MIDV subset: every 5th document type (01, 06, …, 46), 10 of 50. */
+export const DEFAULT_MIDV_TYPES: readonly string[] = MIDV_TYPES.filter((_, i) => i % 5 === 0).map(
+  (t) => t.slice(0, 2),
+);
+
+/** MIDV capture conditions, keyed by the first letter of the clip name. */
+const MIDV_CONDITIONS: Record<string, string> = {
+  T: 'table',
+  K: 'keyboard',
+  H: 'hand',
+  P: 'partial',
+  C: 'clutter',
+  D: 'distorted',
+  L: 'low-light',
+};
+
+/** Root directory of the downloaded datasets (`$SCANOFICUS_DATASETS` or `~/datasets/scanoficus`). */
+export function datasetsRoot(): string {
+  return process.env.SCANOFICUS_DATASETS ?? join(homedir(), 'datasets', 'scanoficus');
+}
+
+export function loadClips(dataset: DatasetName, root: string = datasetsRoot()): BenchClip[] {
+  return dataset === 'smartdoc'
+    ? loadSmartDoc(join(root, 'smartdoc15-ch1'))
+    : loadMidv(dataset, root);
+}
+
+/**
+ * SmartDoc 2015 Challenge 1 (frames release v2.0.0): `metadata.csv.gz` lists every frame with
+ * its model size and the GT corners in the order TL, BL, BR, TR.
+ */
+function loadSmartDoc(dir: string): BenchClip[] {
+  const file = join(dir, 'metadata.csv.gz');
+  if (!existsSync(file)) throw new Error(`SmartDoc not found in ${dir}; run pnpm bench:fetch`);
+  const lines = gunzipSync(readFileSync(file)).toString('utf8').trim().split('\n');
+  const header = lines[0].split(',');
+  const col = (name: string) => {
+    const i = header.indexOf(name);
+    if (i < 0) throw new Error(`metadata.csv: missing column ${name}`);
+    return i;
+  };
+  const c = {
+    bg: col('bg_name'),
+    model: col('model_name'),
+    type: col('modeltype_name'),
+    path: col('image_path'),
+    index: col('frame_index'),
+    width: col('model_width'),
+    height: col('model_height'),
+    tlx: col('tl_x'),
+    tly: col('tl_y'),
+    trx: col('tr_x'),
+    try: col('tr_y'),
+    brx: col('br_x'),
+    bry: col('br_y'),
+    blx: col('bl_x'),
+    bly: col('bl_y'),
+  };
+  const clips = new Map<string, BenchClip>();
+  for (const line of lines.slice(1)) {
+    const f = line.split(',');
+    const id = `${f[c.bg]}-${f[c.model]}`;
+    let clip = clips.get(id);
+    if (!clip) {
+      clip = {
+        dataset: 'smartdoc',
+        id,
+        background: f[c.bg],
+        docType: f[c.type],
+        reference: { width: Number(f[c.width]), height: Number(f[c.height]) },
+        frames: [],
+      };
+      clips.set(id, clip);
+    }
+    const p = (x: number, y: number) => ({ x: Number(f[x]), y: Number(f[y]) });
+    clip.frames.push({
+      index: Number(f[c.index]),
+      path: join(dir, f[c.path]),
+      quad: [p(c.tlx, c.tly), p(c.trx, c.try), p(c.brx, c.bry), p(c.blx, c.bly)],
+    });
+  }
+  const result = [...clips.values()];
+  for (const clip of result) clip.frames.sort((a, b) => a.index - b.index);
+  return result.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+/**
+ * MIDV-500 / MIDV-2019: `<type>/ground_truth/<clip>/<clip>_NN.json` holds `{ quad }` (TL, TR,
+ * BR, BL) per frame. The pixel size of the printed template `<type>/images/<type>.tif` is the
+ * document's reference frame. Only types unpacked completely by `pnpm bench:fetch` are listed.
+ */
+function loadMidv(dataset: 'midv500' | 'midv2019', root: string): BenchClip[] {
+  const dir = join(root, dataset === 'midv500' ? 'midv-500' : 'midv-2019');
+  if (!existsSync(dir)) throw new Error(`${dataset} not found in ${dir}; run pnpm bench:fetch`);
+  const clips: BenchClip[] = [];
+  for (const type of MIDV_TYPES) {
+    const gtDir = join(dir, type, 'ground_truth');
+    if (!existsSync(join(dir, type, '.complete'))) continue;
+    const reference = tiffSize(join(dir, type, 'images', `${type}.tif`));
+    for (const clipName of readdirSync(gtDir).sort()) {
+      if (clipName.endsWith('.json')) continue;
+      const frames: BenchFrame[] = [];
+      for (const file of readdirSync(join(gtDir, clipName)).sort()) {
+        const match = file.match(/_(\d+)\.json$/);
+        if (!match) continue;
+        const gt = JSON.parse(readFileSync(join(gtDir, clipName, file), 'utf8')) as {
+          quad: [number, number][];
+        };
+        const [tl, tr, br, bl] = gt.quad.map(([x, y]) => ({ x, y }));
+        frames.push({
+          index: Number(match[1]),
+          path: join(dir, type, 'images', clipName, file.replace(/\.json$/, '.tif')),
+          quad: [tl, tr, br, bl],
+        });
+      }
+      clips.push({
+        dataset,
+        id: `${type}-${clipName}`,
+        background: MIDV_CONDITIONS[clipName[0]] ?? clipName[0],
+        docType: type,
+        reference,
+        frames,
+      });
+    }
+  }
+  return clips;
+}
+
+/** Width and height from a baseline TIFF header (tags 256/257). */
+function tiffSize(file: string): { width: number; height: number } {
+  const buf = readFileSync(file);
+  const little = buf.toString('latin1', 0, 2) === 'II';
+  const u16 = (o: number) => (little ? buf.readUInt16LE(o) : buf.readUInt16BE(o));
+  const u32 = (o: number) => (little ? buf.readUInt32LE(o) : buf.readUInt32BE(o));
+  const ifd = u32(4);
+  const count = u16(ifd);
+  let width = 0;
+  let height = 0;
+  for (let i = 0; i < count; i++) {
+    const entry = ifd + 2 + 12 * i;
+    const tag = u16(entry);
+    const type = u16(entry + 2);
+    const value = type === 3 ? u16(entry + 8) : u32(entry + 8);
+    if (tag === 256) width = value;
+    if (tag === 257) height = value;
+  }
+  if (!width || !height) throw new Error(`${file}: cannot read TIFF size`);
+  return { width, height };
+}
