@@ -11,10 +11,36 @@ import { gunzipSync } from 'node:zlib';
 import type { Quad } from '../src/geometry/index.ts';
 import { loadNegatives } from './negatives.ts';
 
-export type DatasetName = 'smartdoc' | 'midv500' | 'midv2019' | 'negatives';
-export const DATASETS: readonly DatasetName[] = ['smartdoc', 'midv500', 'midv2019', 'negatives'];
+export type DatasetName = 'smartdoc' | 'midv500' | 'midv2019' | 'dizaj' | 'rwmd' | 'negatives';
+export const DATASETS: readonly DatasetName[] = [
+  'smartdoc',
+  'midv500',
+  'midv2019',
+  'dizaj',
+  'rwmd',
+  'negatives',
+];
+/**
+ * Kind of a dataset: `video` clips (consecutive frames of one document), `photo` sets (single
+ * photos in a `gt.jsonl`, see {@link PHOTO_DATASETS}) or the no-document `negatives`.
+ */
+export type DatasetKind = 'video' | 'photo' | 'negatives';
+export function datasetKind(dataset: DatasetName): DatasetKind {
+  if (dataset === 'negatives') return 'negatives';
+  return dataset in PHOTO_DATASETS ? 'photo' : 'video';
+}
+/**
+ * Single-photo test sets in the `gt.jsonl` format (`$SCANOFICUS_DATASETS/FORMAT.md`), keyed by
+ * dataset name: the directory below the datasets root. Frozen, evaluation only.
+ */
+export const PHOTO_DATASETS: Partial<Record<DatasetName, string>> = {
+  dizaj: 'dizaj-mendeley-v3',
+  rwmd: 'rwmd',
+};
 /** Images per negatives clip (images of one pixel size are grouped into clips). */
 const NEGATIVES_PER_CLIP = 100;
+/** Photos per photo-set clip (photos of one pixel size, in `gt.jsonl` order). */
+const PHOTOS_PER_CLIP = 50;
 
 /** One frame with its ground truth. */
 export interface BenchFrame {
@@ -27,6 +53,12 @@ export interface BenchFrame {
    * the no-document negatives.
    */
   quad: Quad | null;
+  /** Photo sets: the image id in `gt.jsonl`. */
+  id?: string;
+  /** Photo sets: the `gt.jsonl` flags (e.g. `partial`, `multi-document`). */
+  flags?: string[];
+  /** Photo sets: the image category, if the set has one (RWMD). */
+  category?: string;
 }
 
 /** A video clip (consecutive frames of one document on one background / condition). */
@@ -121,7 +153,64 @@ export function datasetsRoot(): string {
 export function loadClips(dataset: DatasetName, root: string = datasetsRoot()): BenchClip[] {
   if (dataset === 'smartdoc') return loadSmartDoc(join(root, 'smartdoc15-ch1'));
   if (dataset === 'negatives') return loadNegativeClips(root);
-  return loadMidv(dataset, root);
+  const photoDir = PHOTO_DATASETS[dataset];
+  if (photoDir) return loadPhotoClips(dataset, join(root, photoDir));
+  return loadMidv(dataset as 'midv500' | 'midv2019', root);
+}
+
+/**
+ * Single-photo sets (`gt.jsonl`, see `$SCANOFICUS_DATASETS/FORMAT.md`): photos of the same size
+ * (after EXIF orientation) are grouped into clips of at most {@link PHOTOS_PER_CLIP} in file
+ * order, with ids such as `3000x4000-01`. The frame index is the 1-based line number in
+ * `gt.jsonl`. The quad keeps the file's corner order (clockwise from the corner with the smallest
+ * x + y). Photos with a `null` quad are excluded from accuracy (the format allows them; neither
+ * current set has any). There is no document template, so the reference frame of the JI is
+ * derived per photo from its ground truth (see `photoReference` in `report-data.ts`).
+ */
+function loadPhotoClips(dataset: DatasetName, dir: string): BenchClip[] {
+  const file = join(dir, 'gt.jsonl');
+  if (!existsSync(file)) throw new Error(`${dataset} not found in ${dir} (no gt.jsonl)`);
+  const lines = readFileSync(file, 'utf8').split('\n');
+  const bySize = new Map<string, BenchFrame[]>();
+  lines.forEach((line, i) => {
+    if (!line.trim()) return;
+    const row = JSON.parse(line) as {
+      id: string;
+      image: string;
+      width: number;
+      height: number;
+      quad: [number, number][] | null;
+      flags?: string[];
+      category?: string;
+    };
+    if (!row.quad) return;
+    const key = `${row.width}x${row.height}`;
+    const [a, b, c, d] = row.quad.map(([x, y]) => ({ x, y }));
+    const frame: BenchFrame = {
+      index: i + 1,
+      path: join(dir, row.image),
+      quad: [a, b, c, d],
+      id: row.id,
+      flags: row.flags ?? [],
+    };
+    if (row.category) frame.category = row.category;
+    bySize.set(key, [...(bySize.get(key) ?? []), frame]);
+  });
+  const clips: BenchClip[] = [];
+  for (const [size, frames] of [...bySize].sort(([a], [b]) => a.localeCompare(b))) {
+    const [width, height] = size.split('x').map(Number);
+    for (let start = 0; start < frames.length; start += PHOTOS_PER_CLIP) {
+      clips.push({
+        dataset,
+        id: `${size}-${String(start / PHOTOS_PER_CLIP + 1).padStart(2, '0')}`,
+        background: 'photo',
+        docType: 'mixed',
+        reference: { width, height },
+        frames: frames.slice(start, start + PHOTOS_PER_CLIP),
+      });
+    }
+  }
+  return clips;
 }
 
 /**

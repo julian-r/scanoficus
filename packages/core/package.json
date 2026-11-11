@@ -95,7 +95,9 @@
     "bench:fetch": "node bench/fetch.ts",
     "bench": "node bench/run.ts",
     "bench:report": "node bench/report.ts",
-    "bench:montage": "node bench/montage.ts"
+    "bench:montage": "node bench/montage.ts",
+    "bench:tune": "node bench/tune.ts",
+    "bench:import": "node bench/import-photo-preds.ts"
   },
   "devDependencies": {
     "@types/node": "26.6.6",

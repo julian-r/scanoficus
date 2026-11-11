@@ -5,8 +5,9 @@
  *   [--midv-types 01,06,...] [--keep-archives]`
  *
  * Datasets go to `$SCANOFICUS_DATASETS` (default `~/datasets/scanoficus`), never into the repo.
- * Downloads resume (`curl -C -`) and are verified against the published checksums; finished
- * steps are skipped on re-runs. Requires `curl`, `tar`, `unzip` and `shasum`/`md5`.
+ * Downloads resume (`curl -C -`) and are verified against the published checksums (SmartDoc,
+ * MIDV); finished steps are skipped on re-runs. Requires `curl`, `tar`, `unzip` and
+ * `shasum`/`md5`.
  *
  * - SmartDoc 2015 Challenge 1 (CC BY 4.0): `frames.tar.gz` (1.0 GB) from the GitHub release of
  *   jchazalon/smartdoc15-ch1-dataset.
@@ -16,9 +17,13 @@
  * - No-document negatives: the COCO 2017 panoptic and caption annotations (0.86 + 0.25 GB zips,
  *   CC BY 4.0) are downloaded once to select 800 images (see `negatives.ts`), which are then
  *   fetched from images.cocodataset.org (≈ 130 MB). The selection is written to
- *   `manifest.json`; delete it to select again.
+ *   `manifest.json`; delete it to select again. COCO publishes no checksums and its host serves
+ *   no valid HTTPS certificate, so downloads use plain HTTP. Instead, the SHA-256 of the
+ *   resulting set (file names and contents, {@link NEGATIVES_DIGEST}) is checked after the
+ *   download, which also pins the selection made from the annotations.
  */
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
@@ -137,6 +142,11 @@ function fetchMidv(dataset: keyof typeof MIDV_FTP): void {
 }
 
 const COCO_ANNOTATIONS = 'http://images.cocodataset.org/annotations';
+/**
+ * SHA-256 over the lines `<file> <sha256 of the file>\n` of all 800 selected images, sorted by
+ * file name (the set used since round 1, 2026-11-11).
+ */
+const NEGATIVES_DIGEST = '4eb3369ed2d80e2cc322b3fefd572e2345926481997712fea9fa7a22342bd38b';
 
 async function fetchNegatives(): Promise<void> {
   const dir = negativesDir(root);
@@ -184,6 +194,16 @@ async function fetchNegatives(): Promise<void> {
       renameSync(join(images, `${image.file}.part`), join(images, image.file));
     }
     console.log(`negatives: ${Math.min(start + 50, missing.length)} / ${missing.length}`);
+  }
+  const digest = createHash('sha256');
+  for (const image of [...manifest.images].sort((a, b) => (a.file < b.file ? -1 : 1))) {
+    const file = createHash('sha256').update(readFileSync(join(images, image.file)));
+    digest.update(`${image.file} ${file.digest('hex')}\n`);
+  }
+  if (digest.digest('hex') !== NEGATIVES_DIGEST) {
+    throw new Error(
+      `negatives: the images differ from the benchmarked set (SHA-256 mismatch); delete ${dir} to fetch again`,
+    );
   }
   if (manifest.images.some((image) => image.uniformBorder === undefined)) {
     for (const image of manifest.images) {

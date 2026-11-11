@@ -19,7 +19,7 @@ import { parseArgs } from 'node:util';
 import { createRgba, type RgbaImage } from '../src/image.ts';
 import { encodePng } from '../test/support/png.ts';
 import { Random } from '../test/support/random.ts';
-import { type DatasetName, loadClips } from './datasets.ts';
+import { type DatasetName, datasetKind, loadClips } from './datasets.ts';
 import { decodeFrames } from './frames.ts';
 import { frameScore } from './report-data.ts';
 import { type ClipResult, loadRun, type PackedQuad } from './results.ts';
@@ -39,6 +39,9 @@ const { values } = parseArgs({
   },
 });
 const dataset = values.dataset as DatasetName;
+if (datasetKind(dataset) === 'photo') {
+  throw new Error(`${dataset} is a frozen photo test set; montages are for video datasets only`);
+}
 const size = Number(values.size);
 const k = Number(values.k);
 const perClip = Number(values['per-clip']);

@@ -2,8 +2,15 @@
  * Markdown tables from the raw results of `pnpm bench`.
  *
  * Usage: `pnpm bench:report [--run full] [--datasets smartdoc,midv500,midv2019] [--detail 384]
- *   [--diagnostic <run>] [--thresholds 0.6,0.7,0.8]`
- *   or `pnpm bench:report --runs full,relaxed,nn-x@256 [--out <file>]`
+ *   [--diagnostic <run>] [--thresholds 0.6,0.7,0.8] [--at recorded,0.85] [--fp 0.05]`
+ *   or `pnpm bench:report --runs full,relaxed,nn-x@256 [--at 0.75,0.85] [--out <file>]`
+ *
+ * `--fp` lists false-positive rates for comparing runs at an equal rate (threshold set per run
+ * on the calibration half of the negatives; runs made with `--min-score 0`). `--at` lists post-hoc score thresholds for the summaries (`recorded` = the runs as they are);
+ * a threshold is exact for runs made with a lower `minScore`, e.g. `--min-score 0` runs. The
+ * summaries show the tuning subsets (SmartDoc tuning split, MIDV-500 tuning half) next to the
+ * held-out ones (SmartDoc held-out, MIDV-500 held-out half, MIDV-2019, Dizaj, RWMD) and the
+ * negatives. Photo sets (Dizaj, RWMD) are reported per `gt.jsonl` flag group.
  *
  * With `--run`, writes `eval-out/bench/<run>/report.md` (summary by split, negatives, then the
  * detailed tables per dataset) and prints it. With `--runs`, compares several runs side by side
@@ -22,7 +29,8 @@
 import { writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { DATASETS, type DatasetName } from './datasets.ts';
+import { PARAMS } from '../src/detect/params.ts';
+import { DATASETS, type DatasetName, datasetKind } from './datasets.ts';
 import {
   aggregate,
   clipMetrics,
@@ -45,13 +53,17 @@ const { values } = parseArgs({
     runs: { type: 'string' },
     out: { type: 'string' },
     thresholds: { type: 'string', default: '0.6,0.7,0.8' },
+    at: { type: 'string', default: 'recorded' },
+    fp: { type: 'string', default: '0.05' },
   },
 });
 const detail = Number(values.detail);
 const thresholds = values.thresholds.split(',').map(Number);
+const at = values.at.split(',').map((t) => (t === 'recorded' ? undefined : Number(t)));
+const summaryOptions = { thresholds, at, fp: values.fp.split(',').map(Number) };
 if (values.runs) {
   const specs = values.runs.split(',').map(parseRunSpec);
-  const markdown = `${['# Detector comparison', ...summarySections(specs, detail, thresholds)].join('\n\n')}\n`;
+  const markdown = `${['# Detector comparison', ...summarySections(specs, detail, summaryOptions)].join('\n\n')}\n`;
   const out = values.out
     ? resolve(process.env.INIT_CWD ?? process.cwd(), values.out)
     : new URL('../eval-out/bench/compare.md', import.meta.url);
@@ -59,12 +71,20 @@ if (values.runs) {
   console.log(markdown);
   process.exit(0);
 }
-/** `detectDocument`'s default `minArea` (fraction of the frame). */
-const DEFAULT_MIN_AREA = 0.04;
+/**
+ * `minArea` (fraction of the frame) of the main run: as recorded with its results, else the
+ * detector's current default.
+ */
+const recordedMinArea = DATASETS.flatMap((d) => loadRun(values.run, d).slice(0, 1)).map(
+  (clip) => clip.minArea ?? clip.detector?.minArea,
+)[0];
+const DEFAULT_MIN_AREA = typeof recordedMinArea === 'number' ? recordedMinArea : PARAMS.minArea;
 const TITLES: Record<DatasetName, string> = {
   smartdoc: 'SmartDoc 2015 Challenge 1',
   midv500: 'MIDV-500',
   midv2019: 'MIDV-2019',
+  dizaj: 'Dizaj',
+  rwmd: 'RWMD',
   negatives: 'No-document negatives',
 };
 
@@ -130,10 +150,11 @@ function causes(main: FrameMetrics[], relaxed: FrameMetrics[], smartdoc: boolean
 
 const sections: string[] = [
   `# Detector benchmark — run \`${values.run}\``,
-  ...summarySections([{ name: values.run }], detail, thresholds),
+  ...summarySections([{ name: values.run }], detail, summaryOptions),
 ];
 for (const dataset of values.datasets.split(',') as DatasetName[]) {
-  if (dataset === 'negatives') continue; // in the summary
+  // In the summary (the photo sets per flag group).
+  if (dataset === 'negatives' || datasetKind(dataset) === 'photo') continue;
   const clips = loadRun(values.run, dataset);
   if (!clips.length) continue;
   const smartdoc = dataset === 'smartdoc';

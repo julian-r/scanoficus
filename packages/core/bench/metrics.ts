@@ -97,3 +97,27 @@ export function visibleFraction(truth: Quad, width: number, height: number): num
 export function cornerError(truth: Quad, detected: Quad, width: number, height: number): number {
   return meanCornerError(truth, detected) / Math.hypot(width, height);
 }
+
+/**
+ * Reference frame of the JI for single photos, which have no document template: the mean
+ * lengths of the ground-truth quad's opposite sides (corners in `gt.jsonl` order). The JI does
+ * not depend on this choice (two reference rectangles differ by an axis scaling, which keeps area
+ * ratios); it matches the Python photo scorer in scanoficus-datasets (`bench/metrics.py`).
+ */
+export function photoReference(truth: Quad): { width: number; height: number } {
+  const side = (a: Point, b: Point) => Math.hypot(a.x - b.x, a.y - b.y);
+  return {
+    width: Math.max(1, 0.5 * (side(truth[0], truth[1]) + side(truth[3], truth[2]))),
+    height: Math.max(1, 0.5 * (side(truth[1], truth[2]) + side(truth[0], truth[3]))),
+  };
+}
+
+/**
+ * Image-space IoU of the full quads for single photos, not clipped to the image (corners outside
+ * the image count), as the Python photo scorer computes it. 0 without a detection or for a
+ * self-intersecting detection.
+ */
+export function photoIoU(truth: Quad, detected: Quad | null): number {
+  if (!detected || isSelfIntersectingQuad(detected)) return 0;
+  return convexIoU(truth, detected);
+}

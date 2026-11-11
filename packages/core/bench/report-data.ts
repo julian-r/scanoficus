@@ -1,7 +1,15 @@
 /** Per-frame metrics, their aggregation and table formatting for the benchmark reports. */
 import { QuadTracker } from '../src/detect/index.ts';
 import { type Quad, quadArea } from '../src/geometry/index.ts';
-import { cornerError, smartDocJaccard, visibleFraction, visibleIoU } from './metrics.ts';
+import { datasetKind } from './datasets.ts';
+import {
+  cornerError,
+  photoIoU,
+  photoReference,
+  smartDocJaccard,
+  visibleFraction,
+  visibleIoU,
+} from './metrics.ts';
 import { type ClipResult, type FrameResult, unpackQuad } from './results.ts';
 
 /** Nominal frame interval (ms) for the tracked variant: SmartDoc ≈ 17–20 fps, MIDV 10 fps. */
@@ -30,6 +38,11 @@ export interface FrameMetrics {
   oracleIou: number;
   /** Detector confidence (0 if nothing was found). */
   score: number;
+  /** Confidence of the best candidate, also if a threshold rejected it (0 if none). */
+  bestScore: number;
+  /** Photo sets: the `gt.jsonl` flags and category. */
+  flags?: string[];
+  category?: string;
 }
 
 /**
@@ -41,6 +54,9 @@ export function frameScore(clip: ClipResult, frame: FrameResult, size: number): 
   if (!frame.truth) return run.quad ? 1 - run.score : 1;
   const truth = unpackQuad(frame.truth);
   const quad = run.quad ? unpackQuad(run.quad) : null;
+  if (datasetKind(clip.dataset) === 'photo') {
+    return smartDocJaccard(truth, quad, photoReference(truth));
+  }
   return clip.dataset === 'smartdoc'
     ? smartDocJaccard(truth, quad, clip.reference)
     : visibleIoU(truth, quad, clip.frameSize.width, clip.frameSize.height);
@@ -49,29 +65,47 @@ export function frameScore(clip: ClipResult, frame: FrameResult, size: number): 
 /**
  * Metrics of every frame of `clip` at processing size `size`, either per frame or after the
  * library's `QuadTracker` (default options) smoothed the detections over consecutive frames.
+ *
+ * `minScore` applies a score threshold after the fact: a returned quad below it counts as not
+ * found. This is exact for runs made with a lower `minScore` (e.g. 0), because the detector
+ * returns its best candidate or nothing. It throws if the run used a higher threshold.
+ *
+ * Photo sets use the per-photo reference of {@link photoReference} for the JI and the IoU of the
+ * full quads ({@link photoIoU}); video datasets use the template size and the visible-region IoU.
  */
 export function clipMetrics(
   clip: ClipResult,
   size: number,
   variant: 'frame' | 'tracked',
+  minScore?: number,
 ): FrameMetrics[] {
   const { width, height } = clip.frameSize;
   const tracker = new QuadTracker();
   const interval = frameIntervalMs(clip);
+  const photo = datasetKind(clip.dataset) === 'photo';
+  // Runs with the detector's default threshold record `null`; the caller must know it.
+  if (minScore !== undefined && clip.minScore !== null && clip.minScore > minScore) {
+    throw new Error(`${clip.dataset}/${clip.id}: run made with minScore ${clip.minScore}`);
+  }
   return clip.frames.map((frame) => {
     if (!frame.truth) throw new Error(`${clip.dataset}/${clip.id} has no ground-truth quads`);
     const truth = unpackQuad(frame.truth);
+    const reference = photo ? photoReference(truth) : clip.reference;
+    const iouOf = (q: Quad | null) =>
+      photo ? photoIoU(truth, q) : visibleIoU(truth, q, width, height);
     const run = frame.runs[size];
-    let quad: Quad | null = run.quad ? unpackQuad(run.quad) : null;
+    const accepted = run.quad !== null && (minScore === undefined || run.score >= minScore);
+    let quad: Quad | null = accepted && run.quad ? unpackQuad(run.quad) : null;
     if (variant === 'tracked') quad = tracker.update(quad, frame.index * interval).quad;
-    const ji = smartDocJaccard(truth, quad, clip.reference);
-    const iou = visibleIoU(truth, quad, width, height);
-    let oracleJi = ji;
-    let oracleIou = iou;
+    const ji = smartDocJaccard(truth, quad, reference);
+    const iou = iouOf(quad);
+    const best = run.quad ? unpackQuad(run.quad) : null;
+    let oracleJi = Math.max(ji, smartDocJaccard(truth, best, reference));
+    let oracleIou = Math.max(iou, best ? iouOf(best) : 0);
     for (const packed of run.candidates) {
       const candidate = unpackQuad(packed);
-      oracleJi = Math.max(oracleJi, smartDocJaccard(truth, candidate, clip.reference));
-      oracleIou = Math.max(oracleIou, visibleIoU(truth, candidate, width, height));
+      oracleJi = Math.max(oracleJi, smartDocJaccard(truth, candidate, reference));
+      oracleIou = Math.max(oracleIou, iouOf(candidate));
     }
     return {
       ji,
@@ -85,7 +119,10 @@ export function clipMetrics(
       area: quadArea(truth) / (width * height),
       oracleJi,
       oracleIou,
-      score: run.score,
+      score: quad ? run.score : 0,
+      bestScore: run.quad ? run.score : 0,
+      ...(frame.flags ? { flags: frame.flags } : {}),
+      ...(frame.category ? { category: frame.category } : {}),
     };
   });
 }
@@ -133,6 +170,8 @@ export function quantile(values: readonly number[], q: number): number {
 
 /** Outcome of the detector on a no-document frame: any returned quad is a false positive. */
 export interface NegativeMetrics {
+  /** COCO image id. */
+  index: number;
   found: boolean;
   /** Confidence of the returned quad (0 if none). */
   score: number;
@@ -142,13 +181,48 @@ export interface NegativeMetrics {
 export function negativeMetrics(clip: ClipResult, size: number): NegativeMetrics[] {
   return clip.frames.map((frame) => {
     const run = frame.runs[size];
-    return { found: run.quad !== null, score: run.quad ? run.score : 0, ms: run.ms };
+    return {
+      index: frame.index,
+      found: run.quad !== null,
+      score: run.quad ? run.score : 0,
+      ms: run.ms,
+    };
   });
 }
 
 /** Share of negative frames with a returned quad of confidence ≥ `threshold`. */
 export function falsePositiveRate(metrics: readonly NegativeMetrics[], threshold = 0): number {
   return metrics.filter((m) => m.found && m.score >= threshold).length / metrics.length;
+}
+
+/**
+ * Lowest score threshold at which at most `rate` of the negatives keep a quad (runs with
+ * `minScore` 0; quads need a score ≥ the threshold).
+ */
+export function thresholdAtFalsePositiveRate(
+  negatives: readonly NegativeMetrics[],
+  rate: number,
+): number {
+  const scores = negatives.map((m) => (m.found ? m.score : 0)).sort((a, b) => b - a);
+  const allowed = Math.floor(rate * scores.length);
+  return allowed < scores.length ? scores[allowed] + 1e-6 : 0;
+}
+
+/** Wilson score interval (95 %) of a proportion `k / n`. */
+export function wilson(k: number, n: number): [number, number] {
+  if (!n) return [Number.NaN, Number.NaN];
+  const z = 1.96;
+  const p = k / n;
+  const center = (p + (z * z) / (2 * n)) / (1 + (z * z) / n);
+  const half = (z / (1 + (z * z) / n)) * Math.sqrt((p * (1 - p)) / n + (z * z) / (4 * n * n));
+  return [Math.max(0, center - half), Math.min(1, center + half)];
+}
+
+/** False-positive rate with its 95 % interval, e.g. `6.1 % (4.1–8.9)`. */
+export function rateWithInterval(metrics: readonly NegativeMetrics[], threshold = 0): string {
+  const k = metrics.filter((m) => m.found && m.score >= threshold).length;
+  const [lo, hi] = wilson(k, metrics.length);
+  return `${pct(k / metrics.length)} (${(100 * lo).toFixed(1)}–${(100 * hi).toFixed(1)})`;
 }
 
 export const pct = (v: number, digits = 1) =>

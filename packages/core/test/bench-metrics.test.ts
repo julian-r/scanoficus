@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   isSelfIntersectingQuad,
+  photoIoU,
+  photoReference,
   smartDocJaccard,
   visibleFraction,
   visibleIoU,
@@ -151,5 +153,36 @@ describe('visibleIoU and visibleFraction', () => {
     expect(visibleIoU(truth, visibleHalf, 200, 200)).toBeCloseTo(1, 12);
     expect(visibleFraction(truth, 200, 200)).toBeCloseTo(0.5, 12);
     expect(visibleIoU(truth, null, 200, 200)).toBe(0);
+  });
+});
+
+describe('photo metrics', () => {
+  const truth: Quad = [
+    { x: 10, y: 10 },
+    { x: 110, y: 20 },
+    { x: 100, y: 220 },
+    { x: 0, y: 200 },
+  ];
+
+  it('derives the JI reference from the ground-truth side lengths; the JI does not depend on it', () => {
+    const reference = photoReference(truth);
+    expect(reference.width).toBeCloseTo(0.5 * (Math.hypot(100, 10) + Math.hypot(100, 20)), 9);
+    expect(reference.height).toBeCloseTo(0.5 * (Math.hypot(10, 200) + Math.hypot(10, 190)), 9);
+    const detected: Quad = [
+      { x: 14, y: 6 },
+      { x: 112, y: 24 },
+      { x: 96, y: 224 },
+      { x: 2, y: 196 },
+    ];
+    expect(smartDocJaccard(truth, detected, reference)).toBeCloseTo(
+      smartDocJaccard(truth, detected, { width: 2100, height: 2970 }),
+      9,
+    );
+  });
+
+  it('takes the IoU of the full quads, also outside the image, and 0 for bow ties', () => {
+    expect(photoIoU(truth, truth)).toBeCloseTo(1, 12);
+    expect(photoIoU(truth, null)).toBe(0);
+    expect(photoIoU(truth, [truth[0], truth[2], truth[1], truth[3]])).toBe(0);
   });
 });

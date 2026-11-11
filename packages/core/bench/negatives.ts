@@ -21,6 +21,10 @@
  * added in photo editing, see {@link hasUniformBorder}) are marked and skipped, as a camera frame
  * never has one. The images are only used locally for evaluation and are never committed.
  * Neither filter is perfect: a few images may still show a sheet of paper or an edited border.
+ * Known gaps of the caption words (round-2 review): napkins, tablets / iPads / Kindles, labels,
+ * stickers and photos / pictures are not excluded. The set is kept frozen (pinned by a SHA-256
+ * in `fetch.ts`) so that false-positive rates stay comparable across versions; a stricter word
+ * list would select a different set.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';

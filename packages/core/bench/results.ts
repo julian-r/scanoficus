@@ -20,6 +20,10 @@ export interface FrameResult {
   index: number;
   /** Ground truth; `null` for the no-document negatives. */
   truth: PackedQuad | null;
+  /** Photo sets: image id, `gt.jsonl` flags and category (see `BenchFrame`). */
+  id?: string;
+  flags?: string[];
+  category?: string;
   /** Keyed by processing long side. */
   runs: Record<number, DetectorRun>;
 }
@@ -40,7 +44,10 @@ export interface ClipResult {
   minArea: number | null;
   /**
    * Detector that produced the run (absent in runs of the classic detector made before this
-   * field existed). `options` are the detector options that differ from its defaults.
+   * field existed). `options` are the detector options that differ from its defaults. Runs made
+   * since round 2 also record the `decode` mode, the effective `minScore` and `minArea` (defaults
+   * resolved), the tunable `params` and the git `commit` of the benchmark checkout (with
+   * `+dirty` for uncommitted changes; a `source` option names the detector's source instead).
    */
   detector?: { name: string; options?: Record<string, unknown>; [key: string]: unknown };
   frames: FrameResult[];
