@@ -1,34 +1,48 @@
 # Detector benchmarks on public datasets
 
 This page measures the classic detector (`detectDocument` with default options) on real,
-publicly available video frames. Its purpose is to find out how good the detector is before
-deciding whether a neural-network detector is worth adding. Nothing in the detector was changed
-for these measurements.
+publicly available video frames and on photos without documents. It covers the detector before
+tuning (v1, commit `5d6b0a3`) and after tuning on a fixed tuning split (v2). The baseline
+sections further down describe v1 and were the starting point of the tuning.
 
 ## Summary
 
-| dataset (frames)                    | official / main metric |   256 |   384 |   512 | 384 tracked |
-| ----------------------------------- | ---------------------- | ----: | ----: | ----: | ----------: |
-| SmartDoc 2015 Ch. 1 (24,889, all)   | SmartDoc JI            | 0.585 | 0.636 | 0.658 |       0.670 |
-| SmartDoc 2015, backgrounds 1–4      | SmartDoc JI            | 0.653 | 0.709 | 0.734 |       0.746 |
-| MIDV-500 subset (3,000)             | SmartDoc-style JI      | 0.731 | 0.789 | 0.806 |       0.788 |
-| MIDV-2019 subset (1,200, 4K frames) | SmartDoc-style JI      | 0.670 | 0.690 | 0.694 |       0.686 |
+Default options, long side 384, SmartDoc Jaccard index (JI). Held-out data was not used for
+any decision (see the [protocol](#method)):
 
-- On SmartDoc the detector is far below published methods. They reach 0.95–0.99 overall (classic
-  and learned alike) on backgrounds 1–4, and only learned models reach above 0.95 on the
-  cluttered background 5. scanoficus scores 0.942 on background 1 but 0.001 on background 5.
-- About 40 % of the SmartDoc failures are not caused by missing edge evidence. In 24 % the
-  document covers less than the default `minArea` of 8 % of the frame. SmartDoc documents
-  cover a median of 9–14 %. In 8.5 % the right quad was the best candidate but was rejected by
-  the `minScore` threshold, and in 7.6 % the right quad lost to a larger rectangle, usually the
-  table top. A diagnostic run with `minArea: 0.02, minScore: 0` raises SmartDoc JI from 0.636
-  to 0.807, with backgrounds 1–3 at 0.95–0.96.
-- The remaining failures produce no right candidate at all: 51 % on SmartDoc, 67 % on MIDV-500
-  and 68 % on MIDV-2019. The causes are clutter, stacked papers and objects on the page
-  (SmartDoc background 5), very low contrast with glare (background 4), fingers covering an
-  edge, documents leaving the frame, and background lines.
-- Detector time per frame: 2.4 / 4.3 / 7.2 ms (mean) at long side 256 / 384 / 512, single
-  thread, Node 26 on an Apple M5 Pro.
+| data (frames)                                          | v1 (before) | v2 (after) | v2, best candidate without threshold |
+| ------------------------------------------------------ | ----------: | ---------: | -----------------------------------: |
+| **SmartDoc held-out documents (12,267)**               |   **0.652** |  **0.786** |                                0.877 |
+| **SmartDoc held-out documents, backgrounds 1–4**       |   **0.728** |  **0.877** |                                0.968 |
+| SmartDoc tuning documents (12,622)                     |       0.620 |      0.758 |                                0.869 |
+| SmartDoc all (24,889)                                  |       0.636 |      0.772 |                                0.873 |
+| **MIDV-500 subset, held out (3,000)**                  |   **0.789** |  **0.622** |                                0.786 |
+| **MIDV-2019 subset, held out (1,200)**                 |   **0.690** |  **0.587** |                                0.755 |
+| **Photos without a document (785): share with a quad** |  **20.4 %** |  **6.5 %** |                                    – |
+
+- On held-out SmartDoc documents, v2 raises JI from 0.652 to 0.786 (backgrounds 1–4: 0.728
+  to 0.877) and returns a quad on 6.5 % instead of 20.4 % of photos of desks, tables and
+  screens without a document. Without a score threshold, its best candidate reaches 0.968 on
+  held-out backgrounds 1–4 (backgrounds 1–3: 0.977–0.990), close to the best classic methods
+  (0.97–0.99). Background 4 (white on white, glare) is at 0.557 (0.897 without threshold),
+  and background 5 (clutter) stays at 0.
+- **MIDV regressed** (0.789 → 0.622 and 0.690 → 0.587). The calibrated threshold rejects many
+  ID cards that are held in the hand or partly outside the frame, because their quads score
+  lower (frame-border sides, fingers over an edge). The precision of the returned MIDV quads
+  rose (IoU ≥ 0.9 among returned: 82 % → 91 % on MIDV-500), the recall fell. Without a
+  threshold, MIDV-500 dropped from 0.820 to 0.786 and MIDV-2019 rose from 0.747 to 0.755. A
+  diagnostic ablation (on held-out data, not used for any decision) attributes the MIDV-500
+  ranking loss to the weaker size preference (see the [experiment log](#experiment-log)). The
+  tuning split holds only SmartDoc, whose documents cover about 10 % of the frame. It needs
+  hand-held, larger and partly visible documents before the size preference and the threshold
+  can be tuned without trading MIDV for SmartDoc.
+- The score is calibrated: `DEFAULT_MIN_SCORE` (0.75) returns a quad on 6.5 % of the negatives,
+  and 97–98 % of the returned SmartDoc quads are right (MIDV: 88 %). At `CONFIDENT_SCORE`
+  (0.85) the negatives rate is 1.8 %, and 99.9–100 % of the SmartDoc quads are right (MIDV:
+  95.5 %). See
+  [Score semantics](#score-semantics-and-hybrid-escalation).
+- Detector time per frame at 384: 5.0 ms (v1: 4.6 ms in the same session), single thread,
+  Node 26 on an Apple M5 Pro. `@scanoficus/core` grew from 22.5 to 23.0 KB min+gz.
 
 ## Datasets
 
@@ -150,7 +164,166 @@ run resumes and skips finished clips. Delete a run directory to recompute it. Mo
 show the ground truth in green, the detection in red and the best runner-up candidate in thin
 blue.
 
-## Results
+## Score semantics and hybrid escalation
+
+`Detection.score` is in [0, 1]. It is the share of each side's length that is supported by
+edge pixels along the side (0.6 × length-weighted mean + 0.4 × weakest side), times 0.85 per
+side on the frame border, times `(area / 10 %)^0.25` for quads below 10 % of the frame, times
+`(inside / surrounding band)^0.5` if the inside is darker than the band around it. Two
+exported constants are calibrated at long side 384 on the tuning split and the negatives
+(the held-out columns confirm them):
+
+| `minScore`                 | negatives with a quad | SmartDoc tuning: right among returned / recall | SmartDoc held-out: right / recall | MIDV (both): right / recall |
+| -------------------------- | --------------------: | ---------------------------------------------: | --------------------------------: | --------------------------: |
+| 0.5                        |                49.6 % |                                91.1 % / 83.1 % |                   91.2 % / 82.5 % |             68.9 % / 67.6 % |
+| 0.6                        |                27.5 % |                                93.3 % / 82.3 % |                   92.4 % / 82.5 % |             73.5 % / 67.1 % |
+| 0.7                        |                13.5 % |                                96.5 % / 79.2 % |                   94.2 % / 80.7 % |             82.4 % / 63.3 % |
+| 0.75 (`DEFAULT_MIN_SCORE`) |                 6.5 % |                                98.4 % / 76.2 % |                   96.7 % / 77.4 % |             88.2 % / 57.7 % |
+| 0.8                        |                 3.2 % |                                99.7 % / 69.5 % |                   99.2 % / 72.3 % |             93.2 % / 47.3 % |
+| 0.85 (`CONFIDENT_SCORE`)   |                 1.8 % |                                99.9 % / 56.5 % |                  100.0 % / 62.3 % |             95.5 % / 34.5 % |
+| 0.9                        |                 1.0 % |                               100.0 % / 34.2 % |                  100.0 % / 40.3 % |             98.0 % / 17.2 % |
+
+"Right" is JI ≥ 0.9 (SmartDoc) or SmartDoc-style JI ≥ 0.9 (MIDV); recall is the share of all
+frames with a right quad (diagnostic run with `minArea 0.02`). The rates are per frame. Live,
+the `QuadTracker` and the auto-capture stability window (8 stable frames, then 1 s stable and
+sharp) suppress isolated false quads further.
+
+A hybrid scanner can call `detectDocument(gray, { minScore: 0 })` and accept the classic quad
+when its score is at least `CONFIDENT_SCORE`, and run a learned detector on the other frames
+(no quad or a lower score). On SmartDoc held-out frames that hands about 38 % of the frames to
+the learned detector, on MIDV about 64 %.
+
+## Results after tuning (v2)
+
+Runs `classic-v2` (all datasets, sizes 256/384/512, default options) and `classic-v2-relaxed`
+(384, `minArea 0.02, minScore 0`, diagnostic). Long side 384 unless noted.
+
+### By split
+
+| subset (frames)                    | version | JI    |  found | IoU ≥ 0.9 | IoU ≥ 0.95 | corner err | p90 err |
+| ---------------------------------- | ------- | ----- | -----: | --------: | ---------: | ---------: | ------: |
+| SmartDoc tuning (12,622)           | v1      | 0.620 | 66.8 % |    59.0 % |     57.7 % |     1.58 % |  3.40 % |
+|                                    | v2      | 0.758 | 77.4 % |    76.1 % |     74.3 % |     0.24 % |  0.28 % |
+| SmartDoc held-out (12,267)         | v1      | 0.652 | 70.2 % |    63.4 % |     63.3 % |     1.93 % |  0.33 % |
+|                                    | v2      | 0.786 | 80.0 % |    77.5 % |     77.0 % |     0.20 % |  0.20 % |
+| SmartDoc held-out, bg 1–4 (10,989) | v1      | 0.728 | 78.4 % |    70.8 % |     70.6 % |     1.92 % |  0.32 % |
+|                                    | v2      | 0.877 | 89.3 % |    86.5 % |     86.0 % |     0.20 % |  0.20 % |
+| SmartDoc all (24,889)              | v1      | 0.636 | 68.5 % |    61.1 % |     60.4 % |     1.75 % |  2.10 % |
+|                                    | v2      | 0.772 | 78.7 % |    76.8 % |     75.7 % |     0.22 % |  0.25 % |
+| MIDV-500, held out (3,000)         | v1      | 0.789 | 87.8 % |    72.2 % |     69.5 % |     3.06 % |  6.66 % |
+|                                    | v2      | 0.622 | 65.7 % |    59.7 % |     58.8 % |     1.26 % |  1.42 % |
+| MIDV-2019, held out (1,200)        | v1      | 0.690 | 85.8 % |    59.7 % |     58.6 % |     4.82 % | 22.85 % |
+|                                    | v2      | 0.587 | 64.4 % |    53.3 % |     52.2 % |     1.82 % |  2.49 % |
+
+SmartDoc JI per background and split:
+
+| split: version                                | bg 01 | bg 02 | bg 03 | bg 04 | bg 05 | bg 1–4 |   all |
+| --------------------------------------------- | ----: | ----: | ----: | ----: | ----: | -----: | ----: |
+| tuning: v1                                    | 0.924 | 0.618 | 0.835 | 0.260 | 0.003 |  0.691 | 0.620 |
+| tuning: v2                                    | 0.973 | 0.869 | 0.977 | 0.450 | 0.000 |  0.845 | 0.758 |
+| tuning: v2 best candidate without threshold   | 0.982 | 0.969 | 0.989 | 0.848 | 0.122 |  0.954 | 0.869 |
+| **held-out: v1**                              | 0.960 | 0.659 | 0.836 | 0.316 | 0.000 |  0.728 | 0.652 |
+| **held-out: v2**                              | 0.960 | 0.892 | 0.990 | 0.557 | 0.000 |  0.877 | 0.786 |
+| held-out: v2 best candidate without threshold | 0.982 | 0.977 | 0.990 | 0.897 | 0.099 |  0.968 | 0.877 |
+
+Other sizes (all SmartDoc frames, JI): 256: 0.585 → 0.680, 512: 0.658 → 0.799. With the
+`QuadTracker` at 384: 0.670 → 0.791.
+
+MIDV-500 per condition (v1 → v2): table 0.990 → 0.984, keyboard 0.978 → 0.955, clutter
+0.884 → 0.637, hand 0.755 → 0.436, partial (out of frame) 0.338 → 0.095. MIDV-2019: low
+light 0.981 → 0.920, distorted 0.399 → 0.254.
+
+### No-document negatives
+
+785 COCO photos of tables, desks, rooms, screens, laptops and keyboards (see
+[Datasets](#datasets)); share of photos with a returned quad, at 384:
+
+| version            | any quad (default `minScore`) | score ≥ 0.6 | score ≥ 0.7 | score ≥ 0.8 | score ≥ 0.85 |
+| ------------------ | ----------------------------: | ----------: | ----------: | ----------: | -----------: |
+| v1 (minScore 0.5)  |                        20.4 % |       7.0 % |       3.1 % |       1.0 % |        1.0 % |
+| v2 (minScore 0.75) |                         6.5 % |       6.5 % |       6.5 % |       3.2 % |        1.8 % |
+
+v2 scores are on a different scale (no polarity requirement, weaker size preference), so
+equal thresholds are not comparable across versions; compare the default columns. The
+remaining v2 false positives are mostly real rectangles: laptop and TV screens, microwave
+doors, cabinet fronts and picture frames.
+
+### Synthetic eval (300 seeds per class, default options)
+
+| class                            | v1 IoU ≥ 0.9 | v2 IoU ≥ 0.9 |
+| -------------------------------- | -----------: | -----------: |
+| easy, perspective, noisy, shadow |        100 % |        100 % |
+| low contrast                     |         85 % |         69 % |
+| border                           |         99 % |         96 % |
+| textured                         |       97.7 % |       98.3 % |
+| none (false positives)           |        6.3 % |        9.3 % |
+
+The low-contrast class loses mostly to the calibrated threshold (79 % of its documents are
+found as the best candidate without a threshold, 86 % in v1) and to the weaker size preference
+(text blocks inside the synthetic page are not penalized for being smaller).
+
+### Runtime
+
+Single thread, every 10th SmartDoc frame (2,555 frames), v1 and v2 measured back to back in
+one session (another job was using the machine, so absolute numbers are about 0.3 ms above
+the v1 measurement below):
+
+| long side | v1 mean / p95 ms | v2 mean / p95 ms |
+| --------- | ---------------: | ---------------: |
+| 256       |        2.4 / 3.7 |        2.6 / 3.9 |
+| 384       |        4.6 / 5.7 |        5.0 / 6.4 |
+| 512       |        7.6 / 9.3 |       8.1 / 10.0 |
+
+### Failure causes after tuning (384)
+
+| dataset  | failures | right quad ranked below a wrong one | right quad below `minScore` | right quad only among relaxed runner-ups | no right candidate |
+| -------- | -------: | ----------------------------------: | --------------------------: | ---------------------------------------: | -----------------: |
+| SmartDoc |    5,783 |                               4.6 % |                      26.0 % |                                    7.5 % |             61.9 % |
+| – bg 01  |      145 |                               5.5 % |                      23.4 % |                                    2.8 % |             68.3 % |
+| – bg 02  |      668 |                               5.8 % |                      67.7 % |                                   11.5 % |             15.0 % |
+| – bg 03  |       38 |                               0.0 % |                     100.0 % |                                    0.0 % |              0.0 % |
+| – bg 04  |    2,355 |                               9.4 % |                      41.5 % |                                   14.9 % |             34.2 % |
+| – bg 05  |    2,577 |                               0.0 % |                       0.1 % |                                    0.0 % |             99.9 % |
+| MIDV-500 |    1,208 |                               8.6 % |                      30.0 % |                                   12.6 % |             48.8 % |
+
+No failure is caused by `minArea` anymore. Most remaining SmartDoc failures are background 5
+(clutter, 45 % of the failures, no right candidate) and background 4, where the faint paper
+edge often loses to a text column or picture edge on the page, or scores below the threshold.
+
+## Experiment log
+
+All experiments ran on the SmartDoc tuning split at 384 px plus the negatives, with
+`minArea 0.02, minScore 0`, so that ranking and calibration are measured separately from the
+thresholds. Each line gives the tuning-split JI of the best candidate without a threshold
+("any") and the JI at the score thresholds where 10 %, 5 % and 2 % of the negatives yield a
+quad ("FP10 / FP5 / FP2"). Held-out data was looked at once, after the defaults were frozen
+(commit `e95991f`).
+
+| #   | hypothesis → change                                                                                                                        | tuning result (any / FP10 / FP5 / FP2)                                                      | decision                     |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------- | ---------------------------- |
+| 0   | baseline v1 (default run: JI 0.620, negatives 20.4 %)                                                                                      | 0.791 / 0.626 / 0.397 / 0.017                                                               | –                            |
+| 1   | 24 % of failures are documents below `minArea` 0.08 → 0.02 (default thresholds)                                                            | default run 0.620 → 0.687, negatives 21.7 %                                                 | keep (0.04, see #12)         |
+| 2   | extended sides and inner text columns lack support near their ends → add the weakest end-quarter support to the score                      | 0.783 / 0.605 / 0.537 / 0.021                                                               | revert (see #4)              |
+| 3   | the size preference (full score from 40 % of the frame) lets the table outline beat a 10 % document → full score from 10 %                 | 0.793 / 0.627 / 0.596 / 0.456 (3 %: 0.767 / … / 0.433; 20 %: 0.796 / 0.622 / 0.579 / 0.148) | keep 10 %                    |
+| 4   | end support (#2) with #3: weight 0 vs 0.1                                                                                                  | 0.804 / 0.669 / 0.624 / 0.450 vs 0.801 / 0.647 / 0.611 / 0.480                              | drop the end term            |
+| 5   | text-column sides have mixed contrast polarity in one bin → count only single-polarity bins                                                | 0.804 / 0.668 / 0.623 / 0.448                                                               | revert (no effect)           |
+| 6   | glare flips the contrast along a side on bg 04 → count opposite-polarity support with weight 0.5 / 0.75 / 1                                | 0.839 / 0.706 / 0.649 / 0.440; 0.855 / 0.746 / 0.661 / 0.436; 0.864 / 0.783 / 0.672 / 0.289 | weight 1 (see #7, #8)        |
+| 7   | paper is brighter than what it lies on, screens and doors are not → score × (inside / band)^e if the inside is darker                      | e 0.5: 0.865 / 0.780 / 0.732 / 0.585; e 1: 0.861 / 0.769 / 0.716 / 0.556                    | keep e 0.5                   |
+| 8   | with weight 1, polarity is irrelevant → drop the polarity bookkeeping                                                                      | 0.866 / 0.781 / 0.729 / 0.581                                                               | keep (simpler, same result)  |
+| 9   | a quad bounded by a text column should grow onto the faint paper edge beyond a bright margin → move sides outwards onto parallel lines     | 0.836–0.867 / 0.736–0.785 / 0.696–0.742 / 0.603–0.638, bg 01 0.982 → 0.940–0.971            | revert (bright table strips) |
+| 10  | more candidates or lines, other Canny thresholds (refine 10, 40 lines, high = 2 or 3 × median)                                             | 0.865–0.870 / 0.778–0.782 / 0.721–0.728 / 0.553–0.582                                       | revert (flat)                |
+| 11  | score weights mean / weakest 0.75 / 0.25 or 0.5 / 0.5 instead of 0.6 / 0.4                                                                 | 0.868 / 0.792 / 0.742 / 0.535; 0.865 / 0.772 / 0.721 / 0.583                                | keep 0.6 / 0.4 (trade-off)   |
+| 12  | `minArea` 0.02 / 0.04 / 0.06 with #8                                                                                                       | 0.866 / 0.781 / 0.729 / 0.581 (0.02 = 0.04); 0.864 / 0.778 / 0.724 / 0.581                  | 0.04                         |
+| 13  | calibrate `minScore` on the negatives (precision and recall per threshold on the tuning split)                                             | 0.75: negatives 6.6 %, 98 % of returned quads right; 0.85: 1.9 %, 99.9 %                    | 0.75 default, 0.85 confident |
+| 14  | a page wins over a block of its own content if it encloses it, scores ≥ 0.85 × the block and the margin is at least as bright as the block | 0.869 / 0.781 / 0.731 / 0.606 (bg 04 0.832 → 0.848); margin ≥ 0.9 × block: bg 01 0.970      | keep (≥ 1 × block)           |
+| 15  | full score from 20 % of the frame with #14 (to recover the synthetic low-contrast class)                                                   | 0.864 / 0.743 / 0.635 / 0.348                                                               | revert                       |
+
+After freezing, one diagnostic ablation was run on the held-out MIDV data to explain the MIDV
+regression (best candidate without threshold, MIDV-500 / MIDV-2019; v2: 0.786 / 0.755): size
+preference back to 40 %: 0.844 / 0.725; without the brightness factor: 0.772 / 0.749;
+without the page-over-content rule: 0.784 / 0.751. It was not used to change the detector.
+
+## Baseline results (v1, before tuning)
 
 ### SmartDoc 2015 Challenge 1 (all 24,889 frames)
 
@@ -265,26 +438,29 @@ SmartDoc 2015 Challenge 1, Jaccard index (official protocol, mean over frames). 
 marks trained neural networks. Values are copied from the cited tables. Where two sources
 disagree, both are given.
 
-| method                                                 | learned? | bg 1   | bg 2   | bg 3   | bg 4   | bg 5   | all                   | source of the numbers |
-| ------------------------------------------------------ | -------- | ------ | ------ | ------ | ------ | ------ | --------------------- | --------------------- |
-| HU-PageScan (das Neves Jr. et al. 2020)                | yes      | –      | –      | –      | –      | –      | 0.9923                | [T22]                 |
-| LDRNet-1.4 (Teng et al. 2022)                          | yes      | 0.9877 | 0.9838 | 0.9862 | 0.9802 | 0.9858 | 0.9849                | [T22]                 |
-| JCD+CSR (Zhu et al. 2019)                              | yes      | 0.988  | 0.984  | 0.983  | 0.984  | 0.961  | 0.982                 | [Tr20]                |
-| Recursive CNN (Javed & Shafait 2017, "SEECS-NUST-2")   | yes      | 0.9832 | 0.9724 | 0.9830 | 0.9695 | 0.9478 | 0.9743                | [T22]; [Tr20]: 0.978  |
-| Advanced Hough (Tropin et al. 2021)                    | no       | 0.9886 | 0.9858 | 0.9896 | 0.9806 | –      | 0.9866 (bg 1–4)       | [Tr21]                |
-| LRDE (2015 entry)                                      | no       | 0.9869 | 0.9775 | 0.9889 | 0.9837 | 0.8613 | 0.9716                | [T22] (from [B15])    |
-| Ngoc et al. 2019 ("LRDE-3")                            | no       | 0.985  | 0.982  | 0.987  | 0.980  | 0.848  | 0.970                 | [Tr20]                |
-| Smart Engines (2015 entry; Zhukovsky et al. 2017)      | no       | 0.9885 | 0.9833 | 0.9897 | 0.9785 | 0.6884 | 0.9548                | [T22] (from [B15])    |
-| Contours and contrasts (Tropin et al. 2020)            | no       | 0.983  | 0.974  | 0.983  | 0.970  | 0.319  | 0.910                 | [Tr20]                |
-| GOP (Leal & Bezerra 2016)                              | no       | 0.961  | 0.944  | 0.965  | 0.930  | 0.412  | 0.896                 | [Tr20]                |
-| NetEase (2015 entry)                                   | n/v      | 0.9624 | 0.9552 | 0.9621 | 0.9511 | 0.2218 | 0.8820                | [T22] (from [B15])    |
-| Puybareau & Géraud 2018 (real-time, 40 ms)             | no       | 0.905  | 0.936  | 0.859  | 0.903  | –      | –                     | [P18]                 |
-| RPPDI-UPE (2015 entry)                                 | n/v      | 0.8274 | 0.9104 | 0.9697 | 0.3649 | 0.2163 | 0.7408                | [T22] (from [B15])    |
-| SEECS-NUST (2015 entry)                                | n/v      | 0.8875 | 0.8264 | 0.7832 | 0.7811 | 0.0113 | 0.7393                | [T22] (from [B15])    |
-| Average of the 2015 entries                            | –        | 0.947  | 0.903  | 0.938  | 0.812  | 0.404  | 0.855                 | [Tr20]                |
-| **scanoficus, default, 384**                           | no       | 0.942  | 0.639  | 0.836  | 0.287  | 0.001  | 0.636 (bg 1–4: 0.709) | this page             |
-| scanoficus, default, 512                               | no       | 0.956  | 0.676  | 0.852  | 0.321  | 0.001  | 0.658                 | this page             |
-| scanoficus, diagnostic (minArea 0.02, minScore 0), 384 | no       | 0.947  | 0.949  | 0.960  | 0.619  | 0.092  | 0.807                 | this page             |
+| method                                                    | learned? | bg 1   | bg 2   | bg 3   | bg 4   | bg 5   | all                   | source of the numbers |
+| --------------------------------------------------------- | -------- | ------ | ------ | ------ | ------ | ------ | --------------------- | --------------------- |
+| HU-PageScan (das Neves Jr. et al. 2020)                   | yes      | –      | –      | –      | –      | –      | 0.9923                | [T22]                 |
+| LDRNet-1.4 (Teng et al. 2022)                             | yes      | 0.9877 | 0.9838 | 0.9862 | 0.9802 | 0.9858 | 0.9849                | [T22]                 |
+| JCD+CSR (Zhu et al. 2019)                                 | yes      | 0.988  | 0.984  | 0.983  | 0.984  | 0.961  | 0.982                 | [Tr20]                |
+| Recursive CNN (Javed & Shafait 2017, "SEECS-NUST-2")      | yes      | 0.9832 | 0.9724 | 0.9830 | 0.9695 | 0.9478 | 0.9743                | [T22]; [Tr20]: 0.978  |
+| Advanced Hough (Tropin et al. 2021)                       | no       | 0.9886 | 0.9858 | 0.9896 | 0.9806 | –      | 0.9866 (bg 1–4)       | [Tr21]                |
+| LRDE (2015 entry)                                         | no       | 0.9869 | 0.9775 | 0.9889 | 0.9837 | 0.8613 | 0.9716                | [T22] (from [B15])    |
+| Ngoc et al. 2019 ("LRDE-3")                               | no       | 0.985  | 0.982  | 0.987  | 0.980  | 0.848  | 0.970                 | [Tr20]                |
+| Smart Engines (2015 entry; Zhukovsky et al. 2017)         | no       | 0.9885 | 0.9833 | 0.9897 | 0.9785 | 0.6884 | 0.9548                | [T22] (from [B15])    |
+| Contours and contrasts (Tropin et al. 2020)               | no       | 0.983  | 0.974  | 0.983  | 0.970  | 0.319  | 0.910                 | [Tr20]                |
+| GOP (Leal & Bezerra 2016)                                 | no       | 0.961  | 0.944  | 0.965  | 0.930  | 0.412  | 0.896                 | [Tr20]                |
+| NetEase (2015 entry)                                      | n/v      | 0.9624 | 0.9552 | 0.9621 | 0.9511 | 0.2218 | 0.8820                | [T22] (from [B15])    |
+| Puybareau & Géraud 2018 (real-time, 40 ms)                | no       | 0.905  | 0.936  | 0.859  | 0.903  | –      | –                     | [P18]                 |
+| RPPDI-UPE (2015 entry)                                    | n/v      | 0.8274 | 0.9104 | 0.9697 | 0.3649 | 0.2163 | 0.7408                | [T22] (from [B15])    |
+| SEECS-NUST (2015 entry)                                   | n/v      | 0.8875 | 0.8264 | 0.7832 | 0.7811 | 0.0113 | 0.7393                | [T22] (from [B15])    |
+| Average of the 2015 entries                               | –        | 0.947  | 0.903  | 0.938  | 0.812  | 0.404  | 0.855                 | [Tr20]                |
+| **scanoficus v2, default, 384**                           | no       | 0.967  | 0.880  | 0.984  | 0.500  | 0.000  | 0.772 (bg 1–4: 0.861) | this page             |
+| scanoficus v2, default, 512                               | no       | 0.967  | 0.971  | 0.989  | 0.526  | 0.000  | 0.799                 | this page             |
+| scanoficus v2, best candidate without threshold, 384      | no       | 0.982  | 0.973  | 0.990  | 0.871  | 0.110  | 0.873 (bg 1–4: 0.961) | this page             |
+| scanoficus v1, default, 384                               | no       | 0.942  | 0.639  | 0.836  | 0.287  | 0.001  | 0.636 (bg 1–4: 0.709) | this page             |
+| scanoficus v1, default, 512                               | no       | 0.956  | 0.676  | 0.852  | 0.321  | 0.001  | 0.658                 | this page             |
+| scanoficus v1, diagnostic (minArea 0.02, minScore 0), 384 | no       | 0.947  | 0.949  | 0.960  | 0.619  | 0.092  | 0.807                 | this page             |
 
 n/v: the method type was not verified (the 2015 competition paper was not accessible).
 The A2iA and ISPL-CVML entries of the 2015 competition are missing because no accessible
@@ -299,8 +475,9 @@ MIDV-500, SmartDoc-style JI ([Tr20], [Tr21]). The published numbers use all 50 t
 | Contours and contrasts (Tropin et al. 2020)                      | no       |      0.870 |              0.961 |            0.972 |
 | Recursive CNN (Javed & Shafait), SmartDoc-trained, run by [Tr20] | yes      |      0.626 |              0.705 |            0.739 |
 | OctHU-PageScan, pretrained, run by [Tr20]                        | yes      |      0.319 |              0.374 |            0.403 |
-| **scanoficus, default, 384**                                     | no       |      0.789 |              0.886 |            0.918 |
-| scanoficus, diagnostic, 384                                      | no       |      0.820 |              0.908 |            0.932 |
+| **scanoficus v2, default, 384**                                  | no       |      0.622 |              0.733 |            0.795 |
+| scanoficus v1, default, 384                                      | no       |      0.789 |              0.886 |            0.918 |
+| scanoficus v1, diagnostic, 384                                   | no       |      0.820 |              0.908 |            0.932 |
 
 No published MIDV-2019 result with the same metric was found.
 
@@ -324,8 +501,9 @@ Sources:
   Neves Jr. et al., IET Image Processing 14(15), 2020; A. Zhu et al. 2019; N. Ngoc et al.
   2019; P. Leal, B. Bezerra 2016; A. Zhukovsky et al. 2017.
 
-## Failure analysis
+## Failure analysis (baseline v1)
 
+This analysis of v1 guided the tuning; see [Failure causes after tuning](#failure-causes-after-tuning-384) for v2.
 A failure is a frame with JI < 0.9 (SmartDoc) or IoU < 0.9 (MIDV) at long side 384. There are
 two complementary views.
 
@@ -388,7 +566,7 @@ card (7/12, about 55 %), and a wrong rectangle or a side on background lines fro
 and books behind it (5/12, about 40 %). The 23 low-light failures (5 %) are almost all ranking
 errors (87 %).
 
-### What this means for an NN detector
+### What this meant for an NN detector (v1)
 
 1. **About 40 % of the SmartDoc failures are parameter and scoring problems, not missing
    evidence.** These are documents below `minArea`, correct quads below `minScore` (the
@@ -423,3 +601,19 @@ or objects. The evidence therefore supports an optional NN detector for those sc
 the classic tuning, rather than as a replacement for the classic path. Tuning should be
 validated with this benchmark, preferably with a split by clip so that no parameters are
 fitted to the frames they are scored on.
+
+### What remains for an NN detector (after v2)
+
+1. **Clutter, stacked papers and occlusion.** Background 5 is still at 0.000 (0.11 without a
+   threshold, no right candidate in 99.9 % of its failures), and fingers over an edge (MIDV
+   "hand", MIDV-2019 "distorted") remain weak. Learned models reach 0.95–0.99 there.
+2. **Documents leaving the frame.** MIDV "partial" is at 0.095. The frame-border penalty and
+   the threshold reject most of these quads, and a classic detector cannot know where the
+   hidden corners are.
+3. **White paper on a white table with glare (background 4)** improved from 0.287 to 0.500
+   (held out: 0.316 to 0.557; 0.897 without threshold), but its true quads score low and the
+   faint edge sometimes loses to content on the page. Color or chroma gradients (the frame is
+   decoded to gray before detection) are the classic fix still untried.
+4. **Escalation.** With `CONFIDENT_SCORE`, a hybrid would run the NN on about 38 % of
+   SmartDoc held-out frames and about 64 % of MIDV frames, and keep the 5 ms classic result
+   on the rest (99.9–100 % right on SmartDoc, 95.5 % on MIDV).
