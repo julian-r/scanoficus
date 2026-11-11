@@ -234,4 +234,29 @@ describe('camera startup and capture fencing', () => {
     await session.setTorch(true);
     expect(order).toEqual(['still returned', 'photo settled', 'torch applied']);
   });
+
+  it('does not let a never-settling takePhoto() block later frame captures', async () => {
+    const { video, track } = setup(async () => {});
+    vi.stubGlobal(
+      'ImageCapture',
+      class {
+        takePhoto(): Promise<Blob> {
+          return new Promise(() => {}); // the native request never settles
+        }
+      },
+    );
+    const session = await openCamera(video, { stillCapture: 'photo', photoTimeoutMs: 10 });
+    expect((await session.captureStill()).method).toBe('video-frame');
+    expect((await session.captureStill()).method).toBe('video-frame');
+    let torchApplied = false;
+    track.applyConstraints = async () => {
+      torchApplied = true;
+    };
+    const torch = session.setTorch(true);
+    // Frame captures still complete while the torch change stays fenced.
+    expect((await session.captureStill()).method).toBe('video-frame');
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(torchApplied).toBe(false);
+    void torch;
+  });
 });

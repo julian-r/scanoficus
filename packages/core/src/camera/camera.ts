@@ -220,18 +220,17 @@ export async function openCamera(
   let torchOn = false;
   const photoTimeoutMs = options.photoTimeoutMs ?? 5000;
   // Serializes takePhoto() and applyConstraints(): overlapping calls reconfigure the capture
-  // session concurrently, which older Safari versions handle badly. `fence` additionally holds
-  // the queue until an abandoned (timed-out) native takePhoto() has settled.
+  // session concurrently, which older Safari versions handle badly. `fence` additionally delays
+  // reconfiguration (only) until an abandoned, timed-out native takePhoto() has settled; it is
+  // awaited outside the queue, so frame captures never wait for a photo that may never settle.
   let queue: Promise<unknown> = Promise.resolve();
   let fence: Promise<unknown> = Promise.resolve();
   const serialized = <T>(task: () => Promise<T>): Promise<T> => {
     const run = queue.then(task, task);
-    queue = run.then(
-      () => fence,
-      () => fence,
-    );
+    queue = run.catch(() => undefined);
     return run;
   };
+  const reconfigure = <T>(task: () => Promise<T>): Promise<T> => fence.then(() => serialized(task));
 
   const frameStill = async (): Promise<StillCapture> => {
     const image = await captureVideoFrame(video);
@@ -251,7 +250,7 @@ export async function openCamera(
     },
     setTorch(on) {
       if (!features.torch) return Promise.resolve(false);
-      return serialized(async () => {
+      return reconfigure(async () => {
         await track.applyConstraints({ advanced: [{ torch: on } as MediaTrackConstraintSet] });
         torchOn = on;
         return on;
