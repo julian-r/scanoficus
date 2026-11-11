@@ -12,7 +12,7 @@ this graph, with a plain TypeScript CPU fallback. It plugs into the scanner as a
   **round 2 with a corner refiner** (`DOCQUADNET2` from `@scanoficus/detector-nn/docquadnet2`):
   a second, 124k-parameter network that moves each corner onto the true corner from 64×64
   crops of the full-resolution still (see "Round 2 and the corner refiner").
-- The JavaScript is 17.3 KB min+gzip without the weights. The weights (fp16; round 1 688 kB,
+- The JavaScript is 18.1 KB min+gzip without the weights. The weights (fp16; round 1 688 kB,
   round 2 688 kB + refiner 244 kB) ship in the package (`models/<bundle>/`) and are fetched at
   runtime; bundlers emit them as content-hashed assets. Each graph names its weights file,
   length and SHA-256, so a graph and weights from different versions never run together.
@@ -148,6 +148,38 @@ hybrid) stays the default until round 2 does at least as well on real phone phot
   URLs and refiner settings) or the URL of a self-hosted `bundle.json` (in each
   `models/<bundle>/` folder). Pass the source or the loaded bundle as `bundle`.
 
+## Round 3: the verified presence decision
+
+```ts
+import { createNnDetectorWorker } from '@scanoficus/detector-nn';
+import { DOCQUADNET3 } from '@scanoficus/detector-nn/docquadnet3';
+
+createDetector: () => createNnDetectorWorker({ bundle: DOCQUADNET3 }),
+```
+
+- **Bundle.** The round-2 main network (its files in `models/docquadnet2/` are shared, not
+  copied), a refiner with a third output per crop, the corner-confidence logit
+  (`docquadnet3-refiner`; offsets as round 2), and `decision.json` from scanoficus-ml.
+- **Decision** (`scanoficus_ml/detectors.py` `OwnPipeline3`, features of
+  `scanoficus_ml/verify.py`): `score = bias + Σ weights[k] · features[k]`, a document if
+  `score > threshold`, with the features `z` (main presence logit, clipped to ±12), `cl_min` /
+  `cl_mean` (min / mean of the 4 pass-2 corner logits) and `cl1_min` (min of the pass-1
+  logits). It is the bundle's built-in presence rule, built from the file at load time
+  (`createDecision`): new coefficients or a new threshold are a file swap; a feature this
+  runtime cannot compute is refused with an error naming it. `Detection.score` is
+  `sigmoid(score)` and the bundle's threshold `sigmoid(threshold)` (0.222), as in Python. A
+  `presence` option still replaces the rule.
+- **The refiner runs on live frames too** (the decision needs its corner scores), so round 3
+  costs about 7 ms more per live frame than round 1 on the M5 Pro (see the speed table). Round 3
+  starts the refiner from the network's normalized corners times the work-image size and maps
+  the result back per axis, as `verify.run_pipeline` does (round 2: frame pixels times one
+  scale, as `pipeline.py`); `RefinerSettings.coordinates` selects this.
+- **Precision.** With float16 activations the corner logits move by up to 0.03 and the score by
+  up to 0.26 (float32: 0.01): use float32 render targets for round 3 where available (the
+  default).
+- Vite inlines files below 4 kB, so `decision.json` becomes a `data:` URL in the bundle; a
+  Content-Security-Policy must then allow `connect-src data:`.
+
 ### Options (`createNnDetector`, `createNnDetectorWorker`)
 
 | option                                               | default      | meaning                                                                                                                                                                                                                                                                            |
@@ -223,10 +255,11 @@ hybrid) stays the default until round 2 does at least as well on real phone phot
 
 By default the models come from the package, one folder per bundle:
 
-| folder                | files                                                                                                                                 | raw / gzip      |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
-| `models/docquadnet/`  | `docquadnet.json`, `docquadnet-9bc8c22c6a4c.bin`, `bundle.json`                                                                       | 702 kB / 645 kB |
-| `models/docquadnet2/` | `docquadnet2.json`, `docquadnet2-6ea1c21d6f87.bin`, `docquadnet2-refiner.json`, `docquadnet2-refiner-ed145db94b95.bin`, `bundle.json` | 955 kB / 874 kB |
+| folder                | files                                                                                                                                                    | raw / gzip      |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
+| `models/docquadnet/`  | `docquadnet.json`, `docquadnet-9bc8c22c6a4c.bin`, `bundle.json`                                                                                          | 702 kB / 645 kB |
+| `models/docquadnet2/` | `docquadnet2.json`, `docquadnet2-6ea1c21d6f87.bin`, `docquadnet2-refiner.json`, `docquadnet2-refiner-ed145db94b95.bin`, `bundle.json`                    | 955 kB / 874 kB |
+| `models/docquadnet3/` | `docquadnet3-refiner.json`, `docquadnet3-refiner-216d024894ca.bin`, `decision.json`, `bundle.json`, `coco-credits.csv` (main network: `../docquadnet2/`) | 807 kB / 364 kB |
 
 They are referenced as `new URL('../models/…', import.meta.url)`. Vite, webpack 5 and other
 bundlers that understand this pattern emit the files as content-hashed assets, so caches
@@ -286,7 +319,41 @@ it is still needed, for example in the demo's `public/` folder, loaded with
 
 ## Parity and speed
 
-**Round 2 + refiner** (`test/refiner.test.ts`, `test/pipeline.test.ts`, `pnpm check:nn`;
+**Round 3** (`test/round3.test.ts`, `pnpm check:nn`; fixtures from
+`scripts/make_round3_fixtures.py`: `verify.run_pipeline` + `features` + the decision with the
+NumPy interpreter as main network and refiner, and `OwnPipeline3` itself with the fp32 ONNX
+exports, on the 12 scenes of the round-2 fixtures):
+
+| path                                                      | result                                                        |
+| --------------------------------------------------------- | ------------------------------------------------------------- |
+| CPU: crops from Python's pass inputs                      | bit-exact (SHA-256)                                           |
+| CPU / WebGL2 float32: 3 refiner outputs from those inputs | 6.2·10⁻⁶ / 9.5·10⁻⁶                                           |
+| CPU, end to end: corner-logit features / score vs NumPy   | 0.031 / 0.020 (score vs ONNX: 0.10, incl. no-document frames) |
+| WebGL2 float32, end to end: score vs NumPy / ONNX         | 0.011 / 0.052 (documents); quad 0.020 px / 0.23 px            |
+| WebGL2 float16, end to end: score vs NumPy                | 0.26                                                          |
+| accept / reject (12 scenes, CPU, float32, float16)        | all equal to NumPy and ONNX                                   |
+
+End to end, the main network's 10⁻⁶ differences move the crops by about 10⁻³ px, which flips
+a few 8-bit crop levels and moves the corner logits by up to a few hundredths; from identical
+crops they agree to 10⁻⁵. All test scenes score far from the threshold (−1.25; documents +2.1
+to +8.1, no-document frames −8.3 to −8.8), so the decisions near the threshold are not
+covered by these fixtures.
+
+Live cost of round 3 (main network + 2 refiner passes + decision on every frame; same machine
+and run as the table below, WebGL2 float32, warm p50 / p95 ms):
+
+| frame      | main thread | worker      |
+| ---------- | ----------- | ----------- |
+| 384 × 216  | 9.5 / 12.4  | 10.7 / 13.3 |
+| 768 × 432  | 10.2 / 13.1 | 11.7 / 14.8 |
+| 1280 × 720 | 11.1 / 15.5 | 12.9 / 18.0 |
+
+For comparison in the same run: round 1 alone 1.9 (384) to 5.5 ms, round 1 + edge refinement
+4.9 (384) to 13.9 ms (1280), round 2 + live refiner 9.1–12.0 ms. The hybrid default sends only
+frames with a classic score below 0.80 to the network (35–69 % of the frames offline).
+
+**Round 2 + refiner**
+(`test/refiner.test.ts`, `test/pipeline.test.ts`, `pnpm check:nn`;
 fixtures from `scripts/make_refiner_fixtures.py`, which runs `pipeline.py` with the NumPy
 refiner and with the exported ONNX refiner on the 10 test scenes plus 2000×1500 and
 3200×1800 frames):
@@ -395,7 +462,7 @@ this notice with the weights:
 > (github.com/jchazalon/smartdoc15-ch1-dataset); attribution must be kept with the weights.
 > License: https://creativecommons.org/licenses/by/4.0/
 
-Round 2 (`models/docquadnet2/`, main network and refiner) was also trained on the training
+Rounds 2 and 3 (`models/docquadnet2/`, `models/docquadnet3/`) were also trained on the training
 part of the Dizaj photos, which are CC BY 4.0 as well; keep this notice with those weights:
 
 > "A New Image Dataset for Document Corner Localization" by Shima Dizaj, Mendeley Data v3,
@@ -405,6 +472,20 @@ part of the Dizaj photos, which are CC BY 4.0 as well; keep this notice with tho
 >
 > Note (Mendeley Data): the dataset's license does not cover content shown in the photos, which
 > can belong to third parties.
+
+Round 3 (`models/docquadnet3/`: its refiner and decision; the main network is round 2's) also
+used COCO photos; keep this notice and `models/docquadnet3/coco-credits.csv` (the image list)
+with those files:
+
+> Images from COCO train2017 (Lin et al., "Microsoft COCO: Common Objects in Context", ECCV
+> 2014; https://cocodataset.org; annotations CC BY 4.0, used to select the images), originally
+> from Flickr under CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/) or "no known
+> copyright restrictions" (https://flickr.com/commons/usage/): 6,329 photos without documents;
+> 3,921 trained the round-3 refiner (corner crops), 1,637 fitted the presence decision and 771
+> were used for validation. Changes: cropped (corner crops), resized, rotated and augmented. The
+> list with each image's COCO id, role, license and Flickr source URL is
+> `docquadnet3/coco-credits.csv`. The Flickr photographers are the authors; COCO does not
+> record their names.
 
 The other training inputs need no attribution: procedural pages, CC0 textures and HDRIs from
 Poly Haven, and OFL fonts that were only rendered into images. The data manifests are in the

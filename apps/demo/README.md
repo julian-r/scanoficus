@@ -28,6 +28,9 @@ localStorage:
   and the corner refiner on the full-resolution still after capture and on imported photos
   (`detectStill`). The Debug overlay shows the still's size and time. Its model files (930 kB)
   are only fetched when this option is used.
+- **Neural v3**: round 3 with its verified presence decision; the refiner runs on live frames
+  (768 px) and on stills. Its refiner (244 kB) is fetched when this option is used; the main
+  network is round 2's.
 
 The network runs in a worker when WebGL2 works on an `OffscreenCanvas` there, else on the main
 thread. If the model or WebGL2 is unavailable, or the network fails, the demo falls back to

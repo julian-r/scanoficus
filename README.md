@@ -166,7 +166,7 @@ min+gzip, as measured by `pnpm size` (budget: 40 KB for core):
 | `@scanoficus/core/warp` · `/filters` · `/camera` · `/pdf`        | 3.0 · 2.2 · 2.6 · 1.7 KB |
 | `@scanoficus/elements/define` (including core)                   |                  30.5 KB |
 | `@scanoficus/react` (own code, without elements, core and React) |                   1.4 KB |
-| `@scanoficus/detector-nn` (optional; own code, without weights)  |                  17.3 KB |
+| `@scanoficus/detector-nn` (optional; own code, without weights)  |                  18.1 KB |
 
 ## Detector quality (synthetic benchmark)
 
@@ -256,7 +256,12 @@ const scanner = new ScannerController({
   (2 passes). The controller gives detectors the full still through the new optional
   `DocumentDetector.detectStill`. Offline: SmartDoc held-out 0.978, Dizaj test 0.788 at
   threshold 0.98. The presence decision is pluggable (`presence` option).
-- **Size.** The package is 17.3 KB min+gzip. The fp16 weights (round 1 688 kB; round 2
+- **Round 3** (`@scanoficus/detector-nn/docquadnet3`, optional): the round-2 network with a
+  refiner that also scores each corner, and the verified presence decision of scanoficus-ml
+  (`decision.json`, loaded as data). Offline at 5 % false positives on COCO calibration photos:
+  SmartDoc held-out 0.981, Dizaj test 0.893, RWMD 0.705. The refiner runs on every live frame
+  (about 10–13 ms per frame on an M5 Pro).
+- **Size.** The package is 18.1 KB min+gzip. The fp16 weights (round 1 688 kB; round 2
   688 kB + refiner 244 kB) ship in its `models/<bundle>/` folders with their license and
   attribution and are fetched at runtime; each graph names its weights' SHA-256, so mismatched
   files are rejected.
@@ -266,8 +271,9 @@ const scanner = new ScannerController({
 - **Parity.** On the same input, the outputs match the NumPy reference within 5·10⁻⁶ (CPU and
   WebGL2 with float32 activations). End to end with GPU preprocessing, the corners match within
   2·10⁻⁵ (float32) and 7·10⁻⁴ (float16 activations).
-- **License.** The weights are BSD-3. They require the SmartDoc CC BY 4.0 attribution (round 2
-  also the Dizaj CC BY 4.0 attribution); see the package README.
+- **License.** The weights are BSD-3. They require the SmartDoc CC BY 4.0 attribution (rounds 2
+  and 3 also Dizaj, CC BY 4.0; round 3 also COCO / Flickr photos, CC BY 2.0, with an image list);
+  see the package README.
 
 ## Roadmap
 
