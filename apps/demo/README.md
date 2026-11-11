@@ -14,17 +14,21 @@ the re-detection on the captured still) and for the photo import. The choice is 
 localStorage:
 
 - **Classic**: the core's edge detector in a worker.
-- **Neural network**: DocQuadNet from `@scanoficus/detector-nn`, loaded lazily. The weights
-  (688 kB) come from `public/models/docquadnet/`.
-- **Neural + refine** (the default when WebGL2 is available, else Classic): the network, then
-  classic edge refinement near its quad.
+- **Neural network**: DocQuadNet from `@scanoficus/detector-nn`, loaded lazily. The model
+  files (688 kB) come from the package and are emitted with content hashes, so the service
+  worker never serves an old graph or old weights. The footer links their license and the
+  SmartDoc attribution.
+- **Neural + refine** (the default when float WebGL2 rendering works, else Classic): the
+  network, then classic edge refinement near its quad, on 768-px frames instead of 384.
 - **Hybrid**: the classic detector first, and the network only when the classic score is
   below `CONFIDENT_SCORE`.
 
 The network runs in a worker when WebGL2 works on an `OffscreenCanvas` there, else on the main
-thread. If the model or WebGL2 is unavailable, the demo falls back to Classic. With **Debug**
+thread. If the model or WebGL2 is unavailable, or the network fails, the demo falls back to
+Classic. A WebGL context loss only skips frames: the network recovers after the browser
+restores the context. With **Debug**
 on, the overlay shows the detector and its backend (worker or main thread, WebGL2 float32 or
-float16), the reason for any fallback, the cold start (module, model download, shader
+float16), the reason for any fallback, context-loss notices, the cold start (module, model download, shader
 compilation, weight upload) and the median detect time over the last 60 frames. The edge map
 in the overlay is always the classic detector's, with its quad in blue. The active detector's
 quad is drawn in orange.

@@ -1,6 +1,6 @@
 import type { ScanDocumentElement } from '@scanoficus/elements';
 import { attachDebugOverlay } from './debug.ts';
-import { createDemoDetector, type DetectorChoice } from './detector.ts';
+import { createDemoDetector, type DetectorChoice, detectionMaxSide } from './detector.ts';
 import { button, renderResults } from './results.ts';
 
 /** Live scanning with the full `<scan-document>` flow in a full-screen overlay. */
@@ -30,6 +30,7 @@ change filters, crop, rotate and save a PDF.</p>`;
     scanner.options = {
       camera: { resolution: highRes.checked ? 'max' : 'hd' },
       createDetector: () => createDemoDetector(detector),
+      detection: { maxSide: detectionMaxSide(detector) },
     };
     overlay.append(scanner);
     document.body.append(overlay);

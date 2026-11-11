@@ -1,6 +1,6 @@
 import { ScannerController } from '@scanoficus/core/controller';
 import type { ScanCropEditorElement, ScanReviewElement } from '@scanoficus/elements';
-import { createDemoDetector, type DetectorChoice } from './detector.ts';
+import { createDemoDetector, type DetectorChoice, detectionMaxSide } from './detector.ts';
 import { button, renderResults } from './results.ts';
 
 /**
@@ -10,7 +10,10 @@ import { button, renderResults } from './results.ts';
  */
 export function mountPhoto(main: HTMLElement, choice: DetectorChoice): () => void {
   // Owns the chosen detector (created on first use); disposed when leaving the route.
-  const controller = new ScannerController({ createDetector: () => createDemoDetector(choice) });
+  const controller = new ScannerController({
+    createDetector: () => createDemoDetector(choice),
+    detection: { maxSide: detectionMaxSide(choice) },
+  });
   let clearResults = () => {};
   const intro = document.createElement('section');
   intro.innerHTML = `<h1>Scan from a photo</h1>

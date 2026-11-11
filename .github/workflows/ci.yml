@@ -25,5 +25,7 @@ jobs:
       - run: pnpm build
       - run: pnpm size
       - run: pnpm check:pack
+      # detector-nn WebGL2 parity in headless Chrome (SwiftShader without a GPU).
+      - run: pnpm check:nn
       # Uses the runner's Google Chrome with a fake camera.
       - run: pnpm check:browser

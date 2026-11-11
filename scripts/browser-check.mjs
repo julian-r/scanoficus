@@ -16,7 +16,7 @@
  * camera that plays a synthetic page (the `page-640x480` scene of the detector-nn fixtures).
  * Run after `pnpm build`: `pnpm check:browser`.
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { createServer as createHttpServer } from 'node:http';
 import { createRequire } from 'node:module';
@@ -115,6 +115,8 @@ const browser = await chromium.launch({
   args: [
     '--use-fake-ui-for-media-stream',
     '--use-fake-device-for-media-stream',
+    // Without a GPU (CI), WebGL (the demo's neural detectors) needs SwiftShader.
+    '--enable-unsafe-swiftshader',
     `--use-file-for-fake-video-capture=${videoFile}`,
   ],
 });
@@ -326,6 +328,38 @@ async function checkDetectorChoices(label, url) {
         : `corner error ${(live.error * 100).toFixed(2)} % of the diagonal; ${status.running}` +
             (network ? `, cold start ${Math.round(status.coldStartMs)} ms` : ''),
     );
+    if (!live.failed && choice === 'nn') {
+      // A context loss (simulated through the demo's fault hook) skips frames but keeps the
+      // network; any other failure falls back to Classic with the reason.
+      const after = async (fault, until) => {
+        await page.evaluate((f) => {
+          window.__scanoficusDemoFault = f;
+        }, fault);
+        return page
+          .waitForFunction(until, null, { timeout: 15000 })
+          .then(() => page.evaluate(() => window.scanoficusDetector))
+          .catch(async () => ({
+            failed: true,
+            ...(await page.evaluate(() => window.scanoficusDetector)),
+          }));
+      };
+      const lost = await after('WebGL context lost', () =>
+        /context lost/.test(window.scanoficusDetector?.notice ?? ''),
+      );
+      check(
+        `${label}: a context loss keeps the network ("${choice}")`,
+        !lost.failed && !lost.error && /Neural network · worker/.test(lost.running),
+        `${lost.running}; ${lost.notice}`,
+      );
+      const broken = await after('shader exploded', () =>
+        /shader exploded/.test(window.scanoficusDetector?.error ?? ''),
+      );
+      check(
+        `${label}: another network failure falls back to Classic ("${choice}")`,
+        !broken.failed && /Classic/.test(broken.running),
+        `${broken.running}: ${broken.error}`,
+      );
+    }
     if (!live.failed) {
       check(
         `${label}: debug overlay shows the detector ("${choice}")`,
@@ -431,11 +465,21 @@ async function checkDetectorChoices(label, url) {
   await vite.build({ ...options, build: { outDir, emptyOutDir: true } });
   const server = await vite.preview({ ...options, build: { outDir }, preview: { port: 0 } });
   const url = server.resolvedUrls.local[0];
+  // The model files are emitted with content hashes (safe for the cache-first service worker).
+  const assets = readdirSync(join(outDir, 'assets'));
+  const hashed = (re) => assets.filter((f) => re.test(f));
+  check(
+    'vite build /scanoficus/: model graph, weights and license are content-hashed assets',
+    hashed(/^docquadnet-[\w-]+\.json$/).length >= 1 &&
+      hashed(/^docquadnet-[\w-]+\.bin$/).length >= 1 &&
+      hashed(/^LICENSE-[\w-]+\.md$/).length === 1,
+    [...hashed(/^docquadnet/), ...hashed(/^LICENSE/)].join(', '),
+  );
   await checkDetectorChoices('vite build /scanoficus/', url);
   // Fallback: without the weights, the network choice falls back to Classic and says why.
   {
     const page = await browser.newPage();
-    await page.route('**/docquadnet.bin', (route) => route.fulfill({ status: 404, body: '' }));
+    await page.route('**/docquadnet-*.bin', (route) => route.fulfill({ status: 404, body: '' }));
     await page.addInitScript(() => localStorage.setItem('scanoficus-detector', 'nn-refine'));
     await page.goto(`${url}#/live`);
     await page.getByText('Start scanning').click();

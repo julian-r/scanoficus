@@ -159,3 +159,11 @@ button.primary {
   margin: 8px 0 12px;
   font-size: 15px;
 }
+.credits {
+  max-width: 820px;
+  margin: 0 auto;
+  padding: 0 max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom))
+    max(16px, env(safe-area-inset-left));
+  font-size: 12px;
+  opacity: 0.7;
+}

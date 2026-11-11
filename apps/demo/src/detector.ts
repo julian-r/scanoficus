@@ -23,27 +23,50 @@ export const DETECTOR_LABELS: Record<DetectorChoice, string> = {
 
 const STORAGE_KEY = 'scanoficus-detector';
 
-/** True if this page can render to float textures with WebGL2 (what the network needs). */
+let webGl2: boolean | null = null;
+
+/**
+ * True if this page can render to a float texture with WebGL2 (what the network needs): the
+ * extension alone is not enough, the framebuffer must be complete. Probed once per page.
+ */
 export function hasWebGl2(): boolean {
+  if (webGl2 !== null) return webGl2;
+  webGl2 = false;
   try {
-    const canvas = document.createElement('canvas');
-    const gl = canvas.getContext('webgl2');
-    const ok =
-      !!gl &&
-      !!(
-        gl.getExtension('EXT_color_buffer_float') || gl.getExtension('EXT_color_buffer_half_float')
-      );
-    gl?.getExtension('WEBGL_lose_context')?.loseContext();
-    return ok;
+    const gl = document.createElement('canvas').getContext('webgl2');
+    if (!gl) return false;
+    for (const [extension, format] of [
+      ['EXT_color_buffer_float', gl.RGBA32F],
+      ['EXT_color_buffer_half_float', gl.RGBA16F],
+    ] as const) {
+      if (webGl2 || !gl.getExtension(extension)) continue;
+      const texture = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, format, 1, 1);
+      const framebuffer = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+      webGl2 = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+    }
+    gl.getExtension('WEBGL_lose_context')?.loseContext();
   } catch {
-    return false;
+    webGl2 = false;
   }
+  return webGl2;
 }
 
 export function loadChoice(): DetectorChoice {
   const stored = localStorage.getItem(STORAGE_KEY);
-  if (stored && stored in DETECTOR_LABELS) return stored as DetectorChoice;
+  if (stored && Object.hasOwn(DETECTOR_LABELS, stored)) return stored as DetectorChoice;
   return hasWebGl2() ? 'nn-refine' : 'classic';
+}
+
+/**
+ * Detection size for a choice: refinement was tuned on frames with a long side of 1024 px, so
+ * "Neural + refine" gets 768-px frames (live and stills); the others keep the default 384.
+ */
+export function detectionMaxSide(choice: DetectorChoice): number | undefined {
+  return choice === 'nn-refine' ? 768 : undefined;
 }
 
 export function saveChoice(choice: DetectorChoice): void {
@@ -61,6 +84,8 @@ export interface DetectorStatus {
   p50Ms: number | null;
   /** Why the network is not used (fallback to Classic), if it is not. */
   error: string | null;
+  /** Transient trouble that did not end the network: context losses, failed frames. */
+  notice: string | null;
 }
 
 let current: DetectorStatus | null = null;
@@ -71,11 +96,6 @@ export function onDetectorStatus(listener: (status: DetectorStatus) => void): ()
   listeners.add(listener);
   if (current) listener(current);
   return () => listeners.delete(listener);
-}
-
-/** URL of a file in the demo's public folder (works under `/scanoficus/` and in dev). */
-function publicUrl(path: string): string {
-  return new URL(`${import.meta.env.BASE_URL}${path}`, location.href).href;
 }
 
 /**
@@ -90,7 +110,9 @@ export function createDemoDetector(choice: DetectorChoice): DocumentDetector {
     coldStartMs: null,
     p50Ms: null,
     error: null,
+    notice: null,
   };
+  let lostFrames = 0;
   current = status;
   const publish = () => {
     if (current !== status) return;
@@ -117,9 +139,9 @@ export function createDemoDetector(choice: DetectorChoice): DocumentDetector {
     } catch (error) {
       return fallback(`Could not load the detector module: ${message(error)}`);
     }
+    // The model files come with the package (`models/`); Vite emits them as content-hashed
+    // assets, so the service worker's cache-first strategy can never serve a stale pair.
     const options = {
-      graphUrl: publicUrl('models/docquadnet/docquadnet.json'),
-      weightsUrl: publicUrl('models/docquadnet/docquadnet.bin'),
       refine: choice === 'nn-refine',
       backend: 'webgl2' as const, // never the slow CPU path in a live loop
     };
@@ -149,7 +171,15 @@ export function createDemoDetector(choice: DetectorChoice): DocumentDetector {
     }
     status.coldStartMs = performance.now() - started;
     if (choice === 'hybrid') {
-      network = nn.createHybridDetector({ nn: network, classic: createDetectorWorker() });
+      network = nn.createHybridDetector({
+        nn: network,
+        classic: createDetectorWorker(),
+        // The hybrid answers such frames with the classic result; just report it.
+        onError: (error) => {
+          status.notice = `network error (classic answered): ${message(error)}`;
+          publish();
+        },
+      });
       status.running = status.running.replace('Hybrid', 'Hybrid (classic first)');
     }
     publish();
@@ -169,7 +199,11 @@ export function createDemoDetector(choice: DetectorChoice): DocumentDetector {
       if (disposed) throw new Error('Detector disposed');
       const t = performance.now();
       try {
-        const result = await d.detect(frame, options);
+        // Test hook for the browser check: make the next detection fail with this message.
+        const hook = globalThis as { __scanoficusDemoFault?: string };
+        const fault = hook.__scanoficusDemoFault;
+        if (fault) delete hook.__scanoficusDemoFault;
+        const result = await (fault ? Promise.reject(new Error(fault)) : d.detect(frame, options));
         times.push(performance.now() - t);
         if (times.length > 60) times.shift();
         status.p50Ms = [...times].sort((a, b) => a - b)[Math.floor(times.length / 2)];
@@ -177,6 +211,14 @@ export function createDemoDetector(choice: DetectorChoice): DocumentDetector {
         return result;
       } catch (error) {
         if (choice === 'classic' || status.error || disposed) throw error;
+        if (/context lost/i.test(message(error))) {
+          // Transient: the library rebuilds its GPU state after the browser restores the
+          // context. Skip this frame and keep the network.
+          lostFrames++;
+          status.notice = `WebGL context lost: ${lostFrames} frame(s) skipped`;
+          publish();
+          return null;
+        }
         // The network failed at runtime: continue with the classic detector.
         d.dispose();
         detector = fallback(`Neural network failed: ${message(error)}`);

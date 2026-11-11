@@ -1,3 +1,4 @@
+import modelLicenseUrl from '@scanoficus/detector-nn/models/LICENSE.md?url&no-inline';
 import { defineScanElements } from '@scanoficus/elements';
 import {
   DETECTOR_LABELS,
@@ -39,6 +40,13 @@ detectorSelect.addEventListener('change', () => {
 onDetectorStatus((status) => {
   (window as unknown as { scanoficusDetector: unknown }).scanoficusDetector = status;
 });
+
+// Attribution that must travel with the neural detector's weights (SmartDoc, CC BY 4.0).
+const credits = document.createElement('footer');
+credits.className = 'credits';
+credits.innerHTML = `Neural detector: DocQuadNet weights (BSD-3-Clause), trained with SmartDoc 2015
+frames (CC BY 4.0, © Chazalon et al.). <a href="${modelLicenseUrl}">Model license and attribution</a>.`;
+document.body.append(credits);
 
 let unmount: (() => void) | null = null;
 

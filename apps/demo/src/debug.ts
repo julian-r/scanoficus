@@ -91,5 +91,6 @@ function detectorLines(status: DetectorStatus | null): string[] {
     `cold start   ${status.coldStartMs === null ? '–' : `${status.coldStartMs.toFixed(0)} ms`}`,
     `detect p50   ${status.p50Ms === null ? '–' : `${status.p50Ms.toFixed(1)} ms`} (last 60)`,
     status.error ? `fallback     ${status.error}` : '',
+    status.notice ? `notice       ${status.notice}` : '',
   ];
 }
