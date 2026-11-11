@@ -8,7 +8,8 @@ A bundle is a main network plus an optional corner refiner, in its own folder `m
   - `weights`: `{ file, byteLength, sha256 }`, so a graph never pairs with other weights
     (`loadModel` checks length and SHA-256 and resolves `file` relative to the graph URL);
   - `selfTest`: the outputs of `scanoficus_ml.rawgraph.run_graph` for a constant input of 0.5
-    (one batch item), which the WebGL2 runtime reproduces after initialization;
+    (one batch item) and, for batched graphs, `batch`: one different constant per item (0.0,
+    0.3, …), which the WebGL2 runtime reproduces after initialization;
 - `bundle.json`: the manifest for self-hosting (`loadBundle`): graph file names, presence
   threshold and, with a refiner, its crop scales, crop size and work-image side;
 - `src/bundle-<bundle>.ts`: the same bundle as `new URL('../models/…', import.meta.url)`
@@ -61,6 +62,14 @@ def package_graph(ml: Path, name: str, folder: Path, run_graph) -> dict:
     (folder / file).write_bytes(blob)
     graph["weights"] = {"file": file, "byteLength": len(blob), "sha256": sha}
     graph["selfTest"] = {"input": 0.5, "heads": [float(v) for v in heads]}
+    if graph["input"]["shape"][0] > 1:
+        # Batched graphs (the refiner): a different constant per batch item, so the self-test
+        # also catches items that are mixed up in the batch layout.
+        items = []
+        for value in (0.0, 0.3, 0.7, 1.0)[: graph["input"]["shape"][0]]:
+            out = run_graph(graph, weights, np.full(shape, value, np.float32))
+            items.append({"input": value, "heads": [float(v) for v in out]})
+        graph["selfTest"]["batch"] = items
     (folder / f"{name}.json").write_text(json.dumps(graph, indent=1) + "\n")
     print(f"{folder.name}/{file}: {len(blob)} bytes, self-test {np.round(heads, 4).tolist()}")
     return {"graph": f"{name}.json", "weights": file}

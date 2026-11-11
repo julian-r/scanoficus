@@ -47,7 +47,12 @@ export interface ModelGraph {
    */
   weights?: { file: string; byteLength: number; sha256: string };
   /** Expected outputs for a constant input, used by the WebGL2 self-test. */
-  selfTest?: { input: number; heads: number[] };
+  selfTest?: {
+    input: number;
+    heads: number[];
+    /** Batched graphs: a different constant input per batch item and its outputs. */
+    batch?: { input: number; heads: number[] }[];
+  };
 }
 
 /** Shape of an activation: channels, height, width (batch 1). */

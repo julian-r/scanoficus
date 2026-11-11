@@ -673,13 +673,22 @@ export class GlRunner {
     const test = net.model.graph.selfTest;
     if (!test) return;
     const { width, height, channels } = net.model;
-    const size = net.batch * channels * width * height;
-    const out = this.runTensorUnchecked(net, new Float32Array(size).fill(test.input));
+    const item = channels * width * height;
+    // One constant per batch item (a different one per item when the graph provides them).
+    const cases = Array.from(
+      { length: net.batch },
+      (_, n) => test.batch?.[n % test.batch.length] ?? test,
+    );
+    const input = new Float32Array(net.batch * item);
+    cases.forEach((c, n) => {
+      input.fill(c.input, n * item, (n + 1) * item);
+    });
+    const out = this.runTensorUnchecked(net, input);
     check('during the test inference');
     const tolerance = this.precision === 'float32' ? 1e-3 : 1e-2;
     const per = out.length / net.batch;
     for (let n = 0; n < net.batch; n++) {
-      test.heads.forEach((expected, i) => {
+      cases[n].heads.forEach((expected, i) => {
         const value = out[n * per + i];
         if (!(Math.abs(value - expected) <= tolerance * Math.max(1, Math.abs(expected)))) {
           throw new Error(

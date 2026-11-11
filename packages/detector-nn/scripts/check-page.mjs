@@ -467,6 +467,25 @@ export async function cpuStill() {
   }
 }
 
+/** The refiner's self-test uses a different constant per crop: swapped items are caught. */
+export async function batchSelfTest() {
+  const bundle = await loadBundle(DOCQUADNET2);
+  const graph = structuredClone(bundle.refiner.model.graph);
+  const [a, b] = graph.selfTest.batch;
+  graph.selfTest.batch[0] = { ...a, heads: b.heads };
+  graph.selfTest.batch[1] = { ...b, heads: a.heads };
+  const weights = new Uint8Array(bundle.refiner.model.weights.buffer.slice(0));
+  const swapped = parseModel(graph, weights);
+  const ok = new GlRunner(bundle.main, { refiner: bundle.refiner.model });
+  ok.dispose();
+  try {
+    new GlRunner(bundle.main, { refiner: swapped });
+    return { passed: true, swapped: null };
+  } catch (e) {
+    return { passed: true, swapped: String(e) };
+  }
+}
+
 /** A 4000×3000 (12 MP) still: the 640×480 page scene drawn large by the browser. */
 async function still12(meta) {
   const c = meta.cases.find((x) => x.name.startsWith('page'));

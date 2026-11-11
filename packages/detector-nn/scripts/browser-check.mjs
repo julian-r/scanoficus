@@ -233,6 +233,14 @@ for (const [label, arg] of [
 }
 
 {
+  const r = await inPage('batchSelfTest');
+  check(
+    "the refiner's self-test has one constant per crop (swapped batch items are caught)",
+    r.passed && /self-test failed/.test(r.swapped ?? ''),
+    r.swapped ?? 'swapped items were not detected',
+  );
+}
+{
   const r = await inPage('concurrency');
   report.concurrency = r;
   const worst = Math.max(...r.errors.flatMap((e) => [e.a, e.b]));
