@@ -1,6 +1,7 @@
 import { multiplyMatrix3, rectToQuadHomography } from '../geometry/homography.ts';
 import type { Quad } from '../geometry/quad.ts';
-import { createRgba, type RgbaImage } from '../image.ts';
+import type { RgbaImage } from '../image.ts';
+import { FULLSCREEN_VERTEX_SHADER, linkProgram, readFramebuffer } from '../internal/gl.ts';
 
 /** Sizes chosen by {@link planGlRectify} for one rectification under GPU limits. */
 export interface GlRectifyPlan {
@@ -96,10 +97,6 @@ export interface GlRectifier {
   dispose(): void;
 }
 
-const VERTEX_SHADER = `#version 300 es
-in vec2 a_position;
-void main() { gl_Position = vec4(a_position, 0.0, 1.0); }`;
-
 const FRAGMENT_SHADER = `#version 300 es
 precision highp float;
 uniform mat3 u_map;
@@ -124,7 +121,7 @@ export function createGlRectifier(canvas: HTMLCanvasElement | OffscreenCanvas): 
     antialias: false,
   }) as WebGL2RenderingContext | null;
   if (!gl) return null;
-  const program = linkProgram(gl, VERTEX_SHADER, FRAGMENT_SHADER);
+  const program = linkProgram(gl, FULLSCREEN_VERTEX_SHADER, FRAGMENT_SHADER);
   const buffer = gl.createBuffer();
   const texture = gl.createTexture();
   const vao = gl.createVertexArray();
@@ -209,7 +206,8 @@ export function createGlRectifier(canvas: HTMLCanvasElement | OffscreenCanvas): 
       return plan;
     },
     readPixels() {
-      return readCanvasPixels(gl, canvas.width, canvas.height);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      return readFramebuffer(gl, canvas.width, canvas.height);
     },
     dispose() {
       gl.deleteTexture(texture);
@@ -219,45 +217,4 @@ export function createGlRectifier(canvas: HTMLCanvasElement | OffscreenCanvas): 
       if (scratch) scratch.width = scratch.height = 0;
     },
   };
-}
-
-/** Reads the default framebuffer and flips it to top-row-first order. */
-function readCanvasPixels(gl: WebGL2RenderingContext, width: number, height: number): RgbaImage {
-  const out = createRgba(width, height);
-  const raw = new Uint8Array(width * height * 4);
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, raw);
-  const row = width * 4;
-  for (let y = 0; y < height; y++) {
-    out.data.set(raw.subarray((height - 1 - y) * row, (height - y) * row), y * row);
-  }
-  return out;
-}
-
-/** Compiles and links a vertex/fragment shader pair, throwing with the info log on failure. */
-function linkProgram(
-  gl: WebGL2RenderingContext,
-  vertexSource: string,
-  fragmentSource: string,
-): WebGLProgram {
-  const program = gl.createProgram();
-  for (const [type, source] of [
-    [gl.VERTEX_SHADER, vertexSource],
-    [gl.FRAGMENT_SHADER, fragmentSource],
-  ] as const) {
-    const shader = gl.createShader(type);
-    if (!shader) throw new Error('Failed to create shader');
-    gl.shaderSource(shader, source);
-    gl.compileShader(shader);
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-      throw new Error(`Shader compile error: ${gl.getShaderInfoLog(shader)}`);
-    }
-    gl.attachShader(program, shader);
-    gl.deleteShader(shader);
-  }
-  gl.linkProgram(program);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    throw new Error(`Program link error: ${gl.getProgramInfoLog(program)}`);
-  }
-  return program;
 }

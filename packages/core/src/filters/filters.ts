@@ -77,6 +77,23 @@ function levelsLut(
   low: number,
   high: number,
 ): Uint8ClampedArray {
+  const [black, white] = levelPoints(histogram, total, low, high);
+  const lut = new Uint8ClampedArray(256);
+  const k = 255 / (white - black);
+  for (let v = 0; v < 256; v++) lut[v] = (v - black) * k;
+  return lut;
+}
+
+/**
+ * Black and white points of a 256-bin histogram: the values below which `low` and above which
+ * `high` of the `total` samples lie. Falls back to `[0, 255]` for degenerate histograms.
+ */
+export function levelPoints(
+  histogram: Uint32Array,
+  total: number,
+  low: number,
+  high: number,
+): [number, number] {
   let black = 0;
   for (let acc = 0; black < 255 && acc + histogram[black] <= low * total; black++) {
     acc += histogram[black];
@@ -85,14 +102,7 @@ function levelsLut(
   for (let acc = 0; white > 0 && acc + histogram[white] <= high * total; white--) {
     acc += histogram[white];
   }
-  const lut = new Uint8ClampedArray(256);
-  if (white <= black) {
-    for (let v = 0; v < 256; v++) lut[v] = v;
-    return lut;
-  }
-  const k = 255 / (white - black);
-  for (let v = 0; v < 256; v++) lut[v] = (v - black) * k;
-  return lut;
+  return white > black ? [black, white] : [0, 255];
 }
 
 /** Options for {@link removeShadows}. */
@@ -117,21 +127,7 @@ export interface ShadowRemovalOptions {
  */
 export function removeShadows(rgba: RgbaImage, options: ShadowRemovalOptions = {}): RgbaImage {
   const { width, height, data } = rgba;
-  const size = options.backgroundSize ?? 96;
-  const radius = options.dilateRadius ?? 3;
-  const scale = Math.min(1, size / Math.max(width, height));
-  const bw = Math.max(1, Math.round(width * scale));
-  const bh = Math.max(1, Math.round(height * scale));
-  const channel = new Uint8Array(width * height);
-  const backgrounds = [0, 1, 2].map((c) => {
-    for (let i = 0, p = c; i < channel.length; i++, p += 4) channel[i] = data[p];
-    const small = new Float32Array(bw * bh);
-    if (bw === width && bh === height) small.set(channel);
-    else resampleArea(channel, width, height, small, bw, bh);
-    const dilated = maxFilter(small, bw, bh, radius);
-    return boxBlur(dilated, bw, bh, radius);
-  });
-
+  const { width: bw, height: bh, channels: backgrounds } = estimateBackground(rgba, options);
   const out = createRgba(width, height);
   const o = out.data;
   // Background sample positions of output pixel centers (bilinear, edge-clamped).
@@ -159,6 +155,39 @@ export function removeShadows(rgba: RgbaImage, options: ShadowRemovalOptions = {
     }
   }
   return out;
+}
+
+/** Low-resolution estimate of the paper color of each RGB channel (see {@link removeShadows}). */
+export interface BackgroundEstimate {
+  width: number;
+  height: number;
+  /** R, G and B planes of `width × height` values in 0–255. */
+  channels: [Float32Array, Float32Array, Float32Array];
+}
+
+/**
+ * Estimates the paper background of each channel: area downscale to `backgroundSize`, max
+ * filter (erases dark strokes) and box blur.
+ */
+export function estimateBackground(
+  rgba: RgbaImage,
+  options: ShadowRemovalOptions = {},
+): BackgroundEstimate {
+  const { width, height, data } = rgba;
+  const size = options.backgroundSize ?? 96;
+  const radius = options.dilateRadius ?? 3;
+  const scale = Math.min(1, size / Math.max(width, height));
+  const bw = Math.max(1, Math.round(width * scale));
+  const bh = Math.max(1, Math.round(height * scale));
+  const channel = new Uint8Array(width * height);
+  const plane = (c: number) => {
+    for (let i = 0, p = c; i < channel.length; i++, p += 4) channel[i] = data[p];
+    const small = new Float32Array(bw * bh);
+    if (bw === width && bh === height) small.set(channel);
+    else resampleArea(channel, width, height, small, bw, bh);
+    return boxBlur(maxFilter(small, bw, bh, radius), bw, bh, radius);
+  };
+  return { width: bw, height: bh, channels: [plane(0), plane(1), plane(2)] };
 }
 
 /** Separable square max filter (morphological dilation of bright regions). */
@@ -218,6 +247,14 @@ export interface ThresholdOptions {
   k?: number;
 }
 
+/** Default local window (odd, px) of {@link adaptiveThreshold}: ~1/24 of the shorter side, ≥ 15. */
+export function sauvolaWindow(width: number, height: number): number {
+  return Math.max(15, Math.round(Math.min(width, height) / 24) | 1);
+}
+
+/** Saturation multiplier of the `'color'` filter. */
+export const COLOR_SATURATION = 1.2;
+
 /**
  * Local adaptive binarization with integral images (O(1) per pixel for any window size). Pixels
  * darker than their local threshold become 0 (ink), all others 255 (paper).
@@ -226,7 +263,7 @@ export function adaptiveThreshold(gray: GrayImage, options: ThresholdOptions = {
   const { width: w, height: h, data } = gray;
   const method = options.method ?? 'sauvola';
   const k = options.k ?? (method === 'sauvola' ? 0.2 : 0.15);
-  const windowSize = options.window ?? Math.max(15, Math.round(Math.min(w, h) / 24) | 1);
+  const windowSize = options.window ?? sauvolaWindow(w, h);
   const r = windowSize >> 1;
   const stride = w + 1;
   // Float64 keeps sums exact for any realistic image (sum of squares exceeds 2^32 at ~66 K px).
@@ -284,7 +321,7 @@ export function applyFilter(rgba: RgbaImage, filter: ScanFilter): RgbaImage {
       return copy;
     }
     case 'color':
-      return enhanceColor(removeShadows(rgba), { saturation: 1.2 });
+      return enhanceColor(removeShadows(rgba), { saturation: COLOR_SATURATION });
     case 'grayscale':
       return enhanceColor(toGrayscale(removeShadows(rgba)), { saturation: 1 });
     case 'bw': {
