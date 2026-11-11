@@ -67,15 +67,16 @@ try {
   }
   const nnDir = join(tmp, 'node_modules/@scanoficus/detector-nn');
   const shipped = ['LICENSE.md'];
-  for (const [bundle, graphs] of [
-    ['docquadnet', ['docquadnet']],
-    ['docquadnet2', ['docquadnet2', 'docquadnet2-refiner']],
+  for (const [bundle, graphs, extra] of [
+    ['docquadnet', ['docquadnet'], []],
+    ['docquadnet2', ['docquadnet2', 'docquadnet2-refiner'], []],
+    ['docquadnet3', ['docquadnet3-refiner'], ['decision.json', 'coco-credits.csv']],
   ]) {
     for (const name of graphs) {
       const graph = JSON.parse(readFileSync(join(nnDir, `models/${bundle}/${name}.json`), 'utf8'));
       shipped.push(`${bundle}/${name}.json`, `${bundle}/${graph.weights.file}`);
     }
-    shipped.push(`${bundle}/bundle.json`);
+    shipped.push(`${bundle}/bundle.json`, ...extra.map((f) => `${bundle}/${f}`));
   }
   for (const file of shipped) {
     if (!existsSync(join(nnDir, 'models', file))) {
@@ -96,6 +97,7 @@ try {
     '@scanoficus/react',
     '@scanoficus/detector-nn',
     '@scanoficus/detector-nn/docquadnet2',
+    '@scanoficus/detector-nn/docquadnet3',
   ];
   // Runtime: every entry imports in Node (SSR safety) and exposes exports.
   writeFileSync(
@@ -181,14 +183,25 @@ detector.detect(ctx.getImageData(0, 0, 384, 288)).then(
 import { createNnDetector } from '@scanoficus/detector-nn';
 // Round 2 + refiner from its subpath (its own model files); the rule accepts any frame.
 import { DOCQUADNET2 } from '@scanoficus/detector-nn/docquadnet2';
+import { DOCQUADNET3 } from '@scanoficus/detector-nn/docquadnet3';
 const nn = createNnDetector({ backend: 'webgl2' });
 const nn2 = createNnDetector({ backend: 'webgl2', bundle: DOCQUADNET2, presence: () => 1 });
+// Round 3 with its decision.json (the shared round-2 main network and its own refiner).
+const nn3 = createNnDetector({ backend: 'webgl2', bundle: DOCQUADNET3 });
 Promise.all([
   nn.infer(ctx.getImageData(0, 0, 384, 288)),
   nn2.detectStill(ctx.getImageData(0, 0, 384, 288)),
+  nn3.ready().then(() => nn3.detect(ctx.getImageData(0, 0, 384, 288))),
 ]).then(
   ([out, still]) => {
-    window.nnResult = { presence: out.presence, backend: nn.backend, refined: !!still, backend2: nn2.backend };
+    window.nnResult = {
+      presence: out.presence,
+      backend: nn.backend,
+      refined: !!still,
+      backend2: nn2.backend,
+      backend3: nn3.backend,
+      decision3: nn3.bundle?.decision?.spec.features.join('+'),
+    };
   },
   (error) => { window.nnResult = { error: String(error) }; },
 );
@@ -213,6 +226,8 @@ Promise.all([
     if (
       nn.backend !== 'webgl2' ||
       nn.backend2 !== 'webgl2' ||
+      nn.backend3 !== 'webgl2' ||
+      nn.decision3 !== 'z+cl_min+cl_mean+cl1_min' ||
       !nn.refined ||
       !(nn.presence >= 0 && nn.presence <= 1)
     ) {
@@ -220,7 +235,7 @@ Promise.all([
     }
     console.log(
       `vite ${label} (installed package): neural detectors load their packaged models ` +
-        '(round 1; round 2 + refiner on a still) ' +
+        '(round 1; round 2 + refiner on a still; round 3 with decision.json) ' +
         `(presence ${nn.presence.toFixed(3)})`,
     );
   };

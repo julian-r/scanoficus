@@ -12,7 +12,7 @@ import {
  * not download it.
  */
 
-export type DetectorChoice = 'classic' | 'nn' | 'nn-refine' | 'hybrid' | 'nn2-refiner';
+export type DetectorChoice = 'classic' | 'nn' | 'nn-refine' | 'hybrid' | 'nn2-refiner' | 'nn3';
 
 export const DETECTOR_LABELS: Record<DetectorChoice, string> = {
   classic: 'Classic',
@@ -20,6 +20,7 @@ export const DETECTOR_LABELS: Record<DetectorChoice, string> = {
   'nn-refine': 'Neural + refine',
   hybrid: 'Hybrid',
   'nn2-refiner': 'Neural v2 + refiner',
+  nn3: 'Neural v3',
 };
 
 const STORAGE_KEY = 'scanoficus-detector';
@@ -73,7 +74,8 @@ const REFINED = new Set<DetectorChoice>(['nn-refine', 'hybrid']);
  * still works at its calibrated 384 px); the others keep the default 384.
  */
 export function detectionMaxSide(choice: DetectorChoice): number | undefined {
-  return REFINED.has(choice) ? 768 : undefined;
+  // Round 3 refines live frames too (its decision needs the corner scores): 768 px as well.
+  return REFINED.has(choice) || choice === 'nn3' ? 768 : undefined;
 }
 
 export function saveChoice(choice: DetectorChoice): void {
@@ -173,10 +175,17 @@ export function createDemoDetector(choice: DetectorChoice): DocumentDetector {
       choice === 'nn2-refiner'
         ? (await import('@scanoficus/detector-nn/docquadnet2')).DOCQUADNET2
         : undefined;
+    // Round 3: its decision.json is the presence rule; the refiner runs on live frames and
+    // stills (the bundle's default).
+    const v3 =
+      choice === 'nn3'
+        ? (await import('@scanoficus/detector-nn/docquadnet3')).DOCQUADNET3
+        : undefined;
     const options = {
       refine: REFINED.has(choice),
       backend: 'webgl2' as const, // never the slow CPU path in a live loop
       ...(v2 ? { bundle: v2, refiner: { live: false, still: true } } : {}),
+      ...(v3 ? { bundle: v3 } : {}),
       ...(choice === 'hybrid' ? { threshold: nn.HYBRID_DEFAULTS.networkThreshold } : {}),
     };
     let network: DocumentDetector | null = null;
@@ -236,7 +245,7 @@ export function createDemoDetector(choice: DetectorChoice): DocumentDetector {
   });
   publish();
 
-  /** Full-resolution still detection (round 2 with refiner; others use the downscaled path). */
+  /** Full-resolution still detection (rounds 2 and 3; the others use the downscaled path). */
   const detectStill = async (
     still: DetectorFrame,
     options?: DetectOptions,
@@ -256,7 +265,7 @@ export function createDemoDetector(choice: DetectorChoice): DocumentDetector {
   };
 
   return {
-    ...(choice === 'nn2-refiner' ? { detectStill } : {}),
+    ...(choice === 'nn2-refiner' || choice === 'nn3' ? { detectStill } : {}),
     async detect(frame: DetectorFrame, options?: DetectOptions) {
       if (!detector && interim && !disposed) {
         return interim.detect(frame, { ...options, maxSide: 384 });

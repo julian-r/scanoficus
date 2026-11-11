@@ -275,7 +275,7 @@ async function checkDemo(label, url) {
   );
 }
 
-const CHOICES = ['classic', 'nn', 'nn-refine', 'hybrid', 'nn2-refiner'];
+const CHOICES = ['classic', 'nn', 'nn-refine', 'hybrid', 'nn2-refiner', 'nn3'];
 
 /**
  * Without a stored choice, the demo defaults to Hybrid (WebGL2 works in headless Chrome) whose
@@ -463,11 +463,13 @@ async function checkDetectorChoices(label, url) {
       )
       .then((h) => h.jsonValue())
       .catch((e) => ({ failed: String(e).split('\n')[0] }));
-    // Round 2 re-detects the full-resolution still with the corner refiner (detectStill).
+    // Rounds 2 and 3 re-detect the full-resolution still with the corner refiner (detectStill).
     const usedStill = photo.status?.stillSize === '640×480';
     check(
       `${label}: photo import with "${choice}" finds the page`,
-      !photo.failed && photo.error < 0.02 && usedStill === (choice === 'nn2-refiner'),
+      !photo.failed &&
+        photo.error < 0.02 &&
+        usedStill === (choice === 'nn2-refiner' || choice === 'nn3'),
       photo.failed ??
         `corner error ${(photo.error * 100).toFixed(2)} % of the diagonal` +
           (usedStill
