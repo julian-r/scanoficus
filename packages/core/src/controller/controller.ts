@@ -181,6 +181,8 @@ export class ScannerController {
   private resumeWhenVisible = false;
   private busy = false;
   private lastFrameAt = 0;
+  /** Consecutive failures of `detectStill` (reported once, at the second). */
+  private stillFailures = 0;
   private peakSharpness = 0;
   private stableSince: number | null = null;
   /** Quad of the last capture; auto-capture waits until the document changes. */
@@ -675,20 +677,34 @@ export class ScannerController {
     height: number,
   ): Promise<Quad | null> {
     // A detector with `detectStill` gets the full-resolution still (a bitmap copy it owns).
+    let copy: ImageBitmap | null = null;
     try {
       if (!this.detector) {
         this.detector = (this.options.createDetector ?? createDefaultDetector)();
       }
       const detector = this.detector;
       if (detector.detectStill) {
-        const still = 'data' in source ? source : await createImageBitmap(source);
+        if (!('data' in source)) copy = await createImageBitmap(source);
+        const still = copy ?? (source as RgbaImage);
         // Read the size first: a bitmap transferred to a worker is detached (0 × 0) afterwards.
         const { width: stillWidth, height: stillHeight } = still;
         const detection = await detector.detectStill(still, this.options.detection);
+        this.stillFailures = 0;
         return detection && scaleQuad(detection.quad, width / stillWidth, height / stillHeight);
       }
-    } catch {
-      // Fall back to detect() on the downscaled frame (with its own fallback handling).
+    } catch (error) {
+      // Fall back to detect() on the downscaled frame (with its own fallback handling); report
+      // once if the still path keeps failing (two in a row).
+      if (++this.stillFailures === 2) {
+        this.emitter.emit('error', {
+          error: new Error(
+            `Still detection failed, using the downscaled frame: ${asError(error).message}`,
+          ),
+        });
+      }
+    } finally {
+      // The detector normally consumes the copy; closing a consumed (detached) bitmap is a no-op.
+      copy?.close();
     }
     const maxSide = this.options.detection?.maxSide ?? 384;
     const frame = 'data' in source ? source : this.grabber.grab(source as ImageBitmap, maxSide);

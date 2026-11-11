@@ -171,6 +171,47 @@ describe('ScannerController', () => {
     }
   });
 
+  it('closes the still copy the detector did not consume', async () => {
+    const copies: { width: number; height: number; close: ReturnType<typeof vi.fn> }[] = [];
+    vi.stubGlobal('createImageBitmap', async (src: { width: number; height: number }) => {
+      const copy = { width: src.width, height: src.height, close: vi.fn() };
+      copies.push(copy);
+      return copy;
+    });
+    try {
+      // A detector that answers without consuming (closing or transferring) the still.
+      const detector = { detect: async () => null, detectStill: async () => null, dispose() {} };
+      const { controller } = setup({ detector });
+      const bitmapLike = { width: 320, height: 240, close() {} };
+      await controller.addImage(bitmapLike as unknown as ImageBitmap);
+      expect(copies).toHaveLength(1);
+      expect(copies[0].close).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('reports a still path that keeps failing once and falls back to detect()', async () => {
+    const scene = generateScene('perspective', 4, 640, 480);
+    const inner = createMainThreadDetector();
+    const detector = {
+      detect: vi.fn(inner.detect),
+      detectStill: vi.fn(async () => {
+        throw new Error('GPU gone');
+      }),
+      dispose: () => inner.dispose(),
+    };
+    const { controller } = setup({ detector });
+    const errors: string[] = [];
+    controller.on('error', ({ error }) => errors.push(error.message));
+    for (let i = 0; i < 3; i++) {
+      const page = await controller.addImage(scene.image);
+      expect(convexIoU(page.quad, scene.quad!)).toBeGreaterThan(0.95);
+    }
+    expect(detector.detect).toHaveBeenCalledTimes(3);
+    expect(errors).toEqual(['Still detection failed, using the downscaled frame: GPU gone']);
+  });
+
   it('toggles torch and auto-capture', async () => {
     const { controller, camera } = setup();
     await controller.start(video);
