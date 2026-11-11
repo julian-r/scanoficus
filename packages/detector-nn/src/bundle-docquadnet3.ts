@@ -19,5 +19,15 @@ export const DOCQUADNET3: BundleSource = {
     workSide: 1600,
     coordinates: 'normalized',
   },
-  decisionUrl: new URL('../models/docquadnet3/decision.json', import.meta.url),
+  decision: {
+    main: 'docquadnet2',
+    refiner: 'docquadnet3-refiner',
+    scales: [0.4, 0.2],
+    features: ['z', 'cl_min', 'cl_mean', 'cl1_min'],
+    weights: [0.5753093509248088, -0.23591939289856673, 0.6655785531179895, 0.41959120626988994],
+    bias: -1.6998794049714478,
+    threshold: -1.2528567820767722,
+    mainSha256: '6ea1c21d6f8772d2980140270476a01c3e14a5e465ee6af444bae3e6f34f67ec',
+    refinerSha256: '216d024894ca612d8e27b7de92327e9922da446b8c508dabc833943d74dfc7bb',
+  },
 };

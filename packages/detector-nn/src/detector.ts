@@ -43,6 +43,11 @@ export interface PresenceSignals {
   still: boolean;
   /** The detector's threshold. */
   threshold: number;
+  /**
+   * WebGL2 activation precision the frame's networks ran with, or null on the CPU (round-3
+   * decisions add `FLOAT16_SCORE_OFFSET` on float16).
+   */
+  precision: GlPrecision | null;
 }
 
 /**
@@ -223,6 +228,25 @@ export function createNnDetector(options: NnDetectorOptions = {}): NnDetector {
   const ready = (): Promise<NnBackend> => {
     init ??= getBundle().then((b) => {
       if (disposed) throw new Error('Detector disposed');
+      if (b.decision && !options.presence) {
+        // The decision scores the refiner's corner logits: without the refiner it would reject
+        // every frame.
+        const use = refinerUse(b);
+        if (!use.live || !use.still) {
+          throw new Error(
+            `The ${b.name} bundle's decision needs the refiner on live frames and stills ` +
+              '(refiner: { live: true, still: true }, the default); pass a presence rule to ' +
+              'run without it',
+          );
+        }
+      }
+      if (b.decision && options.threshold !== undefined) {
+        console.warn(
+          `[detector-nn] threshold ${options.threshold} is compared with sigmoid(score) of the ` +
+            `${b.name} decision (its own threshold: ${b.threshold.toFixed(4)} = ` +
+            `sigmoid(${b.decision.spec.threshold}))`,
+        );
+      }
       bundle = b;
       if (mode !== 'cpu') {
         const use = refinerUse(b);
@@ -454,6 +478,7 @@ export function createNnDetector(options: NnDetectorOptions = {}): NnDetector {
         frame,
         still,
         threshold,
+        precision: null,
       };
       const rule = ruleFor(b);
       const use = refinerUse(b);
@@ -464,6 +489,8 @@ export function createNnDetector(options: NnDetectorOptions = {}): NnDetector {
         signals.refinedQuad = orderQuad(refined.quad);
         signals.refiner = refined.passes;
       }
+      signals.precision =
+        lastBackend === 'webgl2' ? ((gl as GlRunner | null)?.precision ?? null) : null;
       const score = rule(signals);
       if (!(score > threshold)) return null;
       let quad: Quad = signals.refinedQuad ?? out.quad;

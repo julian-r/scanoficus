@@ -34,7 +34,11 @@ export interface BundleSource {
   threshold?: number;
   main: ModelSource;
   refiner?: ModelSource & RefinerSettings;
-  /** URL of a `decision.json` (round 3): the bundle's built-in presence rule. */
+  /**
+   * The bundle's built-in presence rule (round 3): the runtime fields of its `decision.json`,
+   * inline (the packaged bundles), or `decisionUrl` to fetch the file (self-hosted `bundle.json`).
+   */
+  decision?: DecisionSpec;
   decisionUrl?: string | URL;
 }
 
@@ -72,10 +76,23 @@ export async function loadBundle(
   const [main, refiner, decisionSpec] = await Promise.all([
     loadModel(spec.main, init),
     spec.refiner ? loadModel(spec.refiner, init) : null,
-    spec.decisionUrl ? fetchJson(spec.decisionUrl, init) : null,
+    spec.decision ?? (spec.decisionUrl ? fetchJson(spec.decisionUrl, init) : null),
   ]);
   const decision = decisionSpec ? createDecision(decisionSpec as DecisionSpec) : null;
   if (decision) {
+    // The decision was fitted on these exact weights: other weights would give other scores.
+    const pinned = [
+      ['main', decision.spec.mainSha256, main.graph.weights?.sha256],
+      ['refiner', decision.spec.refinerSha256, refiner?.graph.weights?.sha256],
+    ] as const;
+    for (const [what, expected, actual] of pinned) {
+      if (!expected || expected !== actual) {
+        throw new Error(
+          `The decision does not belong to these weights: ${what} weights SHA-256 ${actual}, ` +
+            `decision fitted on ${expected ?? '(not pinned: mainSha256 / refinerSha256 missing)'}`,
+        );
+      }
+    }
     const refinerOutputs = refiner?.outputShape[0] ?? 0;
     if (!spec.refiner || refinerOutputs < 3) {
       throw new Error('The decision needs a refiner with corner-confidence outputs');
@@ -164,6 +181,7 @@ export function serializableBundle(source: BundleSource): BundleSource {
     ...source,
     main: model(source.main),
     refiner: source.refiner && model(source.refiner),
+    decision: source.decision,
     decisionUrl: abs(source.decisionUrl),
   };
 }

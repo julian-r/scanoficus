@@ -660,8 +660,8 @@ export class GlRunner {
 
   /**
    * Checks that the GPU path works: no GL error, and the stored outputs for a constant input are
-   * reproduced by every batch item (relative tolerance 1e-3 for float32 storage, 5e-2 for
-   * float16).
+   * reproduced by every batch item (relative tolerance 1e-3 for float32 storage; for float16
+   * 1e-2, and 5e-2 for the refiner).
    */
   private selfTest(net: Net): void {
     const gl = this.gl;
@@ -688,8 +688,9 @@ export class GlRunner {
     const out = this.runTensorUnchecked(net, input);
     check('during the test inference');
     // float16 activations: the refiner's corner logit moves by up to ~0.03 (fp16 vs fp32 in
-    // scanoficus-ml: 0.029), so float16 only catches gross failures.
-    const tolerance = this.precision === 'float32' ? 1e-3 : 5e-2;
+    // scanoficus-ml: 0.029), so the refiner's float16 test only catches gross failures.
+    const refiner = net !== this.nets[0];
+    const tolerance = this.precision === 'float32' ? 1e-3 : refiner ? 5e-2 : 1e-2;
     const per = out.length / net.batch;
     for (let n = 0; n < net.batch; n++) {
       cases[n].heads.forEach((expected, i) => {
