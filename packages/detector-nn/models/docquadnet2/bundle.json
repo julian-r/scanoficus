@@ -1,0 +1,17 @@
+{
+ "format": "scanoficus-nn-bundle/1",
+ "name": "docquadnet2",
+ "threshold": 0.98,
+ "main": {
+  "graph": "docquadnet2.json"
+ },
+ "refiner": {
+  "graph": "docquadnet2-refiner.json",
+  "scales": [
+   0.4,
+   0.2
+  ],
+  "crop": 64,
+  "workSide": 1600
+ }
+}

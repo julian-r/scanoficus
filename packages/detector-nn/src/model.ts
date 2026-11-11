@@ -91,13 +91,18 @@ export interface NnModel {
   readonly width: number;
   /** Input channels (3 = RGB). */
   readonly channels: number;
+  /**
+   * Batch size the graph is meant for (`input.shape[0]`): 1 for the main network, 4 for the
+   * corner refiner (one crop per corner). Shapes in `steps` are per batch item.
+   */
+  readonly batch: number;
   readonly steps: readonly Step[];
   /** Name of the output tensor (9 values: 8 corner coordinates and the presence logit). */
   readonly output: string;
   readonly outputShape: Shape;
 }
 
-import { DOCQUADNET_GRAPH_URL, DOCQUADNET_WEIGHTS_URL } from './model-files.ts';
+import { DOCQUADNET } from './bundle-docquadnet.ts';
 
 /** The format identifier this runtime understands. */
 export const MODEL_FORMAT = 'scanoficus-docquadnet-raw/1';
@@ -105,13 +110,13 @@ export const MODEL_FORMAT = 'scanoficus-docquadnet-raw/1';
 /** Where to fetch a model from (relative URLs resolve against the document / worker location). */
 export interface ModelSource {
   /**
-   * URL of the graph JSON. Default: `DOCQUADNET_GRAPH_URL`, the copy shipped in the package
-   * (`models/docquadnet.json`), which bundlers emit as a hashed asset.
+   * URL of the graph JSON. Default: the round-1 main network shipped in the package
+   * (`models/docquadnet/docquadnet.json`), which bundlers emit as a hashed asset.
    */
   graphUrl?: string | URL;
   /**
    * URL of the fp16 weight blob. Default: the graph's `weights.file` resolved relative to the
-   * graph URL (or `DOCQUADNET_WEIGHTS_URL` with the default graph).
+   * graph URL (or the package's round-1 weights with the default graph).
    */
   weightsUrl?: string | URL;
 }
@@ -127,13 +132,13 @@ export interface ModelSource {
 export async function loadModel(source: ModelSource = {}, init?: RequestInit): Promise<NnModel> {
   const base = typeof location !== 'undefined' ? location.href : undefined;
   const useDefaults = !source.graphUrl;
-  const graphUrl = new URL(source.graphUrl ?? DOCQUADNET_GRAPH_URL, base);
+  const graphUrl = new URL(source.graphUrl ?? DOCQUADNET.main.graphUrl ?? '', base);
   const get = async (url: URL, extra?: RequestInit) => {
     const response = await fetch(url, { ...init, ...extra });
     if (!response.ok) throw new Error(`Failed to load ${url.href}: HTTP ${response.status}`);
     return response;
   };
-  const explicitWeights = source.weightsUrl ?? (useDefaults ? DOCQUADNET_WEIGHTS_URL : null);
+  const explicitWeights = source.weightsUrl ?? (useDefaults ? DOCQUADNET.main.weightsUrl : null);
   const weightsPromise = explicitWeights
     ? get(new URL(explicitWeights, base)).then((r) => r.arrayBuffer())
     : null;
@@ -193,7 +198,7 @@ export function parseModel(graph: unknown, weights: ArrayBuffer | ArrayBufferVie
   for (let i = 0; i < fp16.length; i++) fp16[i] = bytes[2 * i] | (bytes[2 * i + 1] << 8);
 
   const [batch, channels, height, width] = g.input.shape;
-  if (batch !== 1 || !(height > 0 && width > 0)) throw new Error('Expected a 1×C×H×W input');
+  if (!(batch >= 1 && height > 0 && width > 0)) throw new Error('Expected an N×C×H×W input');
   const shapes = new Map<string, Shape>([[g.input.name, [channels, height, width]]]);
   const shapeOf = (name: string): Shape => {
     const s = shapes.get(name);
@@ -325,6 +330,7 @@ export function parseModel(graph: unknown, weights: ArrayBuffer | ArrayBufferVie
     graph: g,
     weights: fp16,
     size: width,
+    batch,
     height,
     width,
     channels,

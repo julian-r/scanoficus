@@ -1,0 +1,743 @@
+{
+ "format": "scanoficus-docquadnet-raw/1",
+ "dtype": "float16",
+ "input": {
+  "name": "input",
+  "shape": [
+   4,
+   3,
+   64,
+   64
+  ],
+  "layout": "NCHW",
+  "channels": "RGB",
+  "range": [
+   0.0,
+   1.0
+  ],
+  "resize": "one 64\u00d764 crop per corner in the canonical corner frame (scanoficus_ml/refiner.py; see refiner.json); batch = 4 corners or 1 crop at a time"
+ },
+ "nodes": [
+  {
+   "op": "conv",
+   "in": "input",
+   "out": "t1",
+   "weight": {
+    "offset": 0,
+    "length": 432,
+    "shape": [
+     16,
+     3,
+     3,
+     3
+    ]
+   },
+   "bias": {
+    "offset": 432,
+    "length": 16,
+    "shape": [
+     16
+    ]
+   },
+   "stride": 2,
+   "pad": 1,
+   "groups": 1,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t1",
+   "out": "t2",
+   "weight": {
+    "offset": 448,
+    "length": 512,
+    "shape": [
+     32,
+     16,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 960,
+    "length": 32,
+    "shape": [
+     32
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t2",
+   "out": "t3",
+   "weight": {
+    "offset": 992,
+    "length": 288,
+    "shape": [
+     32,
+     1,
+     3,
+     3
+    ]
+   },
+   "bias": {
+    "offset": 1280,
+    "length": 32,
+    "shape": [
+     32
+    ]
+   },
+   "stride": 1,
+   "pad": 1,
+   "groups": 32,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t3",
+   "out": "t4",
+   "weight": {
+    "offset": 1312,
+    "length": 512,
+    "shape": [
+     16,
+     32,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 1824,
+    "length": 16,
+    "shape": [
+     16
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "none"
+  },
+  {
+   "op": "add",
+   "a": "t1",
+   "b": "t4",
+   "out": "t5"
+  },
+  {
+   "op": "conv",
+   "in": "t5",
+   "out": "t6",
+   "weight": {
+    "offset": 1840,
+    "length": 1024,
+    "shape": [
+     64,
+     16,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 2864,
+    "length": 64,
+    "shape": [
+     64
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t6",
+   "out": "t7",
+   "weight": {
+    "offset": 2928,
+    "length": 576,
+    "shape": [
+     64,
+     1,
+     3,
+     3
+    ]
+   },
+   "bias": {
+    "offset": 3504,
+    "length": 64,
+    "shape": [
+     64
+    ]
+   },
+   "stride": 2,
+   "pad": 1,
+   "groups": 64,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t7",
+   "out": "t8",
+   "weight": {
+    "offset": 3568,
+    "length": 1536,
+    "shape": [
+     24,
+     64,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 5104,
+    "length": 24,
+    "shape": [
+     24
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "none"
+  },
+  {
+   "op": "conv",
+   "in": "t8",
+   "out": "t9",
+   "weight": {
+    "offset": 5128,
+    "length": 2304,
+    "shape": [
+     96,
+     24,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 7432,
+    "length": 96,
+    "shape": [
+     96
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t9",
+   "out": "t10",
+   "weight": {
+    "offset": 7528,
+    "length": 864,
+    "shape": [
+     96,
+     1,
+     3,
+     3
+    ]
+   },
+   "bias": {
+    "offset": 8392,
+    "length": 96,
+    "shape": [
+     96
+    ]
+   },
+   "stride": 1,
+   "pad": 1,
+   "groups": 96,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t10",
+   "out": "t11",
+   "weight": {
+    "offset": 8488,
+    "length": 2304,
+    "shape": [
+     24,
+     96,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 10792,
+    "length": 24,
+    "shape": [
+     24
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "none"
+  },
+  {
+   "op": "add",
+   "a": "t8",
+   "b": "t11",
+   "out": "t12"
+  },
+  {
+   "op": "conv",
+   "in": "t12",
+   "out": "t13",
+   "weight": {
+    "offset": 10816,
+    "length": 2304,
+    "shape": [
+     96,
+     24,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 13120,
+    "length": 96,
+    "shape": [
+     96
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t13",
+   "out": "t14",
+   "weight": {
+    "offset": 13216,
+    "length": 864,
+    "shape": [
+     96,
+     1,
+     3,
+     3
+    ]
+   },
+   "bias": {
+    "offset": 14080,
+    "length": 96,
+    "shape": [
+     96
+    ]
+   },
+   "stride": 2,
+   "pad": 1,
+   "groups": 96,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t14",
+   "out": "t15",
+   "weight": {
+    "offset": 14176,
+    "length": 3840,
+    "shape": [
+     40,
+     96,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 18016,
+    "length": 40,
+    "shape": [
+     40
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "none"
+  },
+  {
+   "op": "conv",
+   "in": "t15",
+   "out": "t16",
+   "weight": {
+    "offset": 18056,
+    "length": 6400,
+    "shape": [
+     160,
+     40,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 24456,
+    "length": 160,
+    "shape": [
+     160
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t16",
+   "out": "t17",
+   "weight": {
+    "offset": 24616,
+    "length": 1440,
+    "shape": [
+     160,
+     1,
+     3,
+     3
+    ]
+   },
+   "bias": {
+    "offset": 26056,
+    "length": 160,
+    "shape": [
+     160
+    ]
+   },
+   "stride": 1,
+   "pad": 1,
+   "groups": 160,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t17",
+   "out": "t18",
+   "weight": {
+    "offset": 26216,
+    "length": 6400,
+    "shape": [
+     40,
+     160,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 32616,
+    "length": 40,
+    "shape": [
+     40
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "none"
+  },
+  {
+   "op": "add",
+   "a": "t15",
+   "b": "t18",
+   "out": "t19"
+  },
+  {
+   "op": "conv",
+   "in": "t19",
+   "out": "t20",
+   "weight": {
+    "offset": 32656,
+    "length": 6400,
+    "shape": [
+     160,
+     40,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 39056,
+    "length": 160,
+    "shape": [
+     160
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t20",
+   "out": "t21",
+   "weight": {
+    "offset": 39216,
+    "length": 1440,
+    "shape": [
+     160,
+     1,
+     3,
+     3
+    ]
+   },
+   "bias": {
+    "offset": 40656,
+    "length": 160,
+    "shape": [
+     160
+    ]
+   },
+   "stride": 2,
+   "pad": 1,
+   "groups": 160,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t21",
+   "out": "t22",
+   "weight": {
+    "offset": 40816,
+    "length": 10240,
+    "shape": [
+     64,
+     160,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 51056,
+    "length": 64,
+    "shape": [
+     64
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "none"
+  },
+  {
+   "op": "conv",
+   "in": "t22",
+   "out": "t23",
+   "weight": {
+    "offset": 51120,
+    "length": 16384,
+    "shape": [
+     256,
+     64,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 67504,
+    "length": 256,
+    "shape": [
+     256
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t23",
+   "out": "t24",
+   "weight": {
+    "offset": 67760,
+    "length": 2304,
+    "shape": [
+     256,
+     1,
+     3,
+     3
+    ]
+   },
+   "bias": {
+    "offset": 70064,
+    "length": 256,
+    "shape": [
+     256
+    ]
+   },
+   "stride": 1,
+   "pad": 1,
+   "groups": 256,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t24",
+   "out": "t25",
+   "weight": {
+    "offset": 70320,
+    "length": 16384,
+    "shape": [
+     64,
+     256,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 86704,
+    "length": 64,
+    "shape": [
+     64
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "none"
+  },
+  {
+   "op": "add",
+   "a": "t22",
+   "b": "t25",
+   "out": "t26"
+  },
+  {
+   "op": "conv",
+   "in": "t26",
+   "out": "t27",
+   "weight": {
+    "offset": 86768,
+    "length": 2048,
+    "shape": [
+     32,
+     64,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 88816,
+    "length": 32,
+    "shape": [
+     32
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "relu6"
+  },
+  {
+   "op": "flatten",
+   "in": "t27",
+   "out": "t28"
+  },
+  {
+   "op": "linear",
+   "in": "t28",
+   "out": "t29",
+   "weight": {
+    "offset": 88848,
+    "length": 32768,
+    "shape": [
+     64,
+     512
+    ]
+   },
+   "bias": {
+    "offset": 121616,
+    "length": 64,
+    "shape": [
+     64
+    ]
+   },
+   "act": "relu6"
+  },
+  {
+   "op": "linear",
+   "in": "t29",
+   "out": "t30",
+   "weight": {
+    "offset": 121680,
+    "length": 128,
+    "shape": [
+     2,
+     64
+    ]
+   },
+   "bias": {
+    "offset": 121808,
+    "length": 2,
+    "shape": [
+     2
+    ]
+   },
+   "act": "none"
+  }
+ ],
+ "outputs": {
+  "heads": "t30",
+  "offset": "heads[0:2] = corner offset (dx, dy) in units of half the crop side, in the canonical crop frame (see refiner.json)"
+ },
+ "config": {
+  "size": 64,
+  "in_channels": 3,
+  "stem": 16,
+  "stages": [
+   [
+    16,
+    1,
+    2,
+    1
+   ],
+   [
+    24,
+    2,
+    4,
+    2
+   ],
+   [
+    40,
+    2,
+    4,
+    2
+   ],
+   [
+    64,
+    2,
+    4,
+    2
+   ]
+  ],
+  "head_channels": 32,
+  "hidden": 64,
+  "act": "relu6",
+  "n_outputs": 2,
+  "presence": false
+ },
+ "weights": {
+  "file": "docquadnet2-refiner-ed145db94b95.bin",
+  "byteLength": 243620,
+  "sha256": "ed145db94b951da579d03c7e788190e8e72bcbee4941a9e722f9b79cea864978"
+ },
+ "selfTest": {
+  "input": 0.5,
+  "heads": [
+   0.07418668270111084,
+   0.054396651685237885
+  ]
+ }
+}

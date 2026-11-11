@@ -17,17 +17,34 @@ export class CpuRunner {
     );
   }
 
-  /** Runs the network on a `C×H×W` input (CHW) and returns the output tensor (9 values). */
-  run(input: Float32Array): Float32Array {
+  /**
+   * Runs the network on `batch` inputs of `C×H×W` (NCHW) and returns the outputs one after the
+   * other (9 values per frame for the main network, 2 per crop for the refiner).
+   */
+  run(input: Float32Array, batch = 1): Float32Array {
     const { model } = this;
-    const expected = model.channels * model.height * model.width;
-    if (input.length !== expected) throw new RangeError(`Expected ${expected} input values`);
-    const env = new Map<string, Float32Array>([[model.graph.input.name, input]]);
-    const get = (name: string) => env.get(name) as Float32Array;
-    model.steps.forEach((step, i) => {
-      env.set(step.output, runStep(step, this.params[i], get));
-    });
-    return get(model.output);
+    const size = model.channels * model.height * model.width;
+    if (input.length !== batch * size)
+      throw new RangeError(`Expected ${batch * size} input values`);
+    const outputs: Float32Array[] = [];
+    for (let n = 0; n < batch; n++) {
+      const env = new Map<string, Float32Array>([
+        [model.graph.input.name, input.subarray(n * size, (n + 1) * size)],
+      ]);
+      const get = (name: string) => env.get(name) as Float32Array;
+      model.steps.forEach((step, i) => {
+        env.set(step.output, runStep(step, this.params[i], get));
+      });
+      outputs.push(get(model.output));
+    }
+    if (batch === 1) return outputs[0];
+    const out = new Float32Array(outputs.reduce((a, o) => a + o.length, 0));
+    let offset = 0;
+    for (const o of outputs) {
+      out.set(o, offset);
+      offset += o.length;
+    }
+    return out;
   }
 }
 

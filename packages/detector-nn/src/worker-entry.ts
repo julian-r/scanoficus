@@ -1,49 +1,71 @@
 /**
  * Web Worker entry of the neural detector. Start it as a module worker and talk to it with
  * `createNnDetectorWorker`: the first message configures the detector (`{ init: options }`),
- * then it answers the detection protocol of `@scanoficus/core/worker` in order.
+ * then it answers the detection protocol of `@scanoficus/core/worker` in order, and still
+ * requests (`{ nnStill: { id, frame } }`) with `{ nnStillResult }`.
  *
  * @module
  */
 import type { DetectorWorkerMessage, DetectRequest } from '@scanoficus/core/worker';
-import { createNnDetector, type NnDetector } from './detector.ts';
-import type { NnWorkerInit, NnWorkerStatus } from './worker-client.ts';
+import { createNnDetector, type NnDetector, type PresenceRule } from './detector.ts';
+import type { NnStillRequest, NnWorkerInit, NnWorkerStatus } from './worker-client.ts';
 
 interface NnWorkerScope {
-  onmessage: ((event: MessageEvent<DetectRequest | NnWorkerInit>) => void) | null;
+  onmessage: ((event: MessageEvent<DetectRequest | NnWorkerInit | NnStillRequest>) => void) | null;
   postMessage(message: DetectorWorkerMessage | NnWorkerStatus): void;
 }
 
 const scope = globalThis as unknown as NnWorkerScope;
-let detector: NnDetector | null = null;
+let detector: Promise<NnDetector> | null = null;
 let queue: Promise<void> = Promise.resolve();
+const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 scope.onmessage = (event) => {
-  const message = event.data;
-  if ('init' in message) {
-    detector?.dispose();
-    const current = createNnDetector(message.init);
+  const data = event.data;
+  if ('init' in data) {
+    const previous = detector;
+    previous?.then(
+      (d) => d.dispose(),
+      () => {},
+    );
+    const { presenceModule, ...options } = data.init;
+    const started = performance.now();
+    const current = (async () => {
+      // A custom presence rule cannot be posted (functions do not clone): load its module.
+      const presence = presenceModule
+        ? ((await import(/* @vite-ignore */ presenceModule)).default as PresenceRule)
+        : undefined;
+      return createNnDetector({ ...options, presence });
+    })();
     detector = current;
     // Load the model and compile the shaders before the first frame arrives, and report the
     // outcome (the core client ignores these messages; `createNnDetectorWorker` reads them).
-    const started = performance.now();
-    current.ready().then(
-      (backend) =>
+    current
+      .then(async (d) => {
+        const backend = await d.ready();
         scope.postMessage({
-          nnReady: { backend, precision: current.precision, ms: performance.now() - started },
-        }),
-      (error) =>
-        scope.postMessage({ nnError: error instanceof Error ? error.message : String(error) }),
-    );
+          nnReady: { backend, precision: d.precision, ms: performance.now() - started },
+        });
+      })
+      .catch((error) => scope.postMessage({ nnError: message(error) }));
     return;
   }
-  const { id, frame, options } = message;
   queue = queue.then(async () => {
+    const still = 'nnStill' in data;
+    const id = still ? data.nnStill.id : data.id;
     try {
       if (!detector) throw new Error('Neural detector worker was not initialized');
-      scope.postMessage({ id, detection: await detector.detect(frame, options) });
+      const d = await detector;
+      if (still) {
+        const detection = await d.detectStill(data.nnStill.frame);
+        scope.postMessage({ nnStillResult: { id, detection, backend: d.backend } });
+      } else {
+        scope.postMessage({ id, detection: await d.detect(data.frame, data.options) });
+      }
     } catch (error) {
-      scope.postMessage({ id, error: error instanceof Error ? error.message : String(error) });
+      scope.postMessage(
+        still ? { nnStillResult: { id, error: message(error) } } : { id, error: message(error) },
+      );
     }
   });
 };

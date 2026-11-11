@@ -1,0 +1,1061 @@
+{
+ "format": "scanoficus-docquadnet-raw/1",
+ "dtype": "float16",
+ "input": {
+  "name": "input",
+  "shape": [
+   1,
+   3,
+   192,
+   192
+  ],
+  "layout": "NCHW",
+  "channels": "RGB",
+  "range": [
+   0.0,
+   1.0
+  ],
+  "resize": "whole frame stretched to size\u00d7size (no letterbox), area/box filter"
+ },
+ "nodes": [
+  {
+   "op": "conv",
+   "in": "input",
+   "out": "t1",
+   "weight": {
+    "offset": 0,
+    "length": 432,
+    "shape": [
+     16,
+     3,
+     3,
+     3
+    ]
+   },
+   "bias": {
+    "offset": 432,
+    "length": 16,
+    "shape": [
+     16
+    ]
+   },
+   "stride": 2,
+   "pad": 1,
+   "groups": 1,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t1",
+   "out": "t2",
+   "weight": {
+    "offset": 448,
+    "length": 144,
+    "shape": [
+     16,
+     1,
+     3,
+     3
+    ]
+   },
+   "bias": {
+    "offset": 592,
+    "length": 16,
+    "shape": [
+     16
+    ]
+   },
+   "stride": 1,
+   "pad": 1,
+   "groups": 16,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t2",
+   "out": "t3",
+   "weight": {
+    "offset": 608,
+    "length": 256,
+    "shape": [
+     16,
+     16,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 864,
+    "length": 16,
+    "shape": [
+     16
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "none"
+  },
+  {
+   "op": "add",
+   "a": "t1",
+   "b": "t3",
+   "out": "t4"
+  },
+  {
+   "op": "conv",
+   "in": "t4",
+   "out": "t5",
+   "weight": {
+    "offset": 880,
+    "length": 1024,
+    "shape": [
+     64,
+     16,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 1904,
+    "length": 64,
+    "shape": [
+     64
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t5",
+   "out": "t6",
+   "weight": {
+    "offset": 1968,
+    "length": 576,
+    "shape": [
+     64,
+     1,
+     3,
+     3
+    ]
+   },
+   "bias": {
+    "offset": 2544,
+    "length": 64,
+    "shape": [
+     64
+    ]
+   },
+   "stride": 2,
+   "pad": 1,
+   "groups": 64,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t6",
+   "out": "t7",
+   "weight": {
+    "offset": 2608,
+    "length": 1536,
+    "shape": [
+     24,
+     64,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 4144,
+    "length": 24,
+    "shape": [
+     24
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "none"
+  },
+  {
+   "op": "conv",
+   "in": "t7",
+   "out": "t8",
+   "weight": {
+    "offset": 4168,
+    "length": 2304,
+    "shape": [
+     96,
+     24,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 6472,
+    "length": 96,
+    "shape": [
+     96
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t8",
+   "out": "t9",
+   "weight": {
+    "offset": 6568,
+    "length": 864,
+    "shape": [
+     96,
+     1,
+     3,
+     3
+    ]
+   },
+   "bias": {
+    "offset": 7432,
+    "length": 96,
+    "shape": [
+     96
+    ]
+   },
+   "stride": 1,
+   "pad": 1,
+   "groups": 96,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t9",
+   "out": "t10",
+   "weight": {
+    "offset": 7528,
+    "length": 2304,
+    "shape": [
+     24,
+     96,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 9832,
+    "length": 24,
+    "shape": [
+     24
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "none"
+  },
+  {
+   "op": "add",
+   "a": "t7",
+   "b": "t10",
+   "out": "t11"
+  },
+  {
+   "op": "conv",
+   "in": "t11",
+   "out": "t12",
+   "weight": {
+    "offset": 9856,
+    "length": 2304,
+    "shape": [
+     96,
+     24,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 12160,
+    "length": 96,
+    "shape": [
+     96
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t12",
+   "out": "t13",
+   "weight": {
+    "offset": 12256,
+    "length": 864,
+    "shape": [
+     96,
+     1,
+     3,
+     3
+    ]
+   },
+   "bias": {
+    "offset": 13120,
+    "length": 96,
+    "shape": [
+     96
+    ]
+   },
+   "stride": 2,
+   "pad": 1,
+   "groups": 96,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t13",
+   "out": "t14",
+   "weight": {
+    "offset": 13216,
+    "length": 3840,
+    "shape": [
+     40,
+     96,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 17056,
+    "length": 40,
+    "shape": [
+     40
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "none"
+  },
+  {
+   "op": "conv",
+   "in": "t14",
+   "out": "t15",
+   "weight": {
+    "offset": 17096,
+    "length": 6400,
+    "shape": [
+     160,
+     40,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 23496,
+    "length": 160,
+    "shape": [
+     160
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t15",
+   "out": "t16",
+   "weight": {
+    "offset": 23656,
+    "length": 1440,
+    "shape": [
+     160,
+     1,
+     3,
+     3
+    ]
+   },
+   "bias": {
+    "offset": 25096,
+    "length": 160,
+    "shape": [
+     160
+    ]
+   },
+   "stride": 1,
+   "pad": 1,
+   "groups": 160,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t16",
+   "out": "t17",
+   "weight": {
+    "offset": 25256,
+    "length": 6400,
+    "shape": [
+     40,
+     160,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 31656,
+    "length": 40,
+    "shape": [
+     40
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "none"
+  },
+  {
+   "op": "add",
+   "a": "t14",
+   "b": "t17",
+   "out": "t18"
+  },
+  {
+   "op": "conv",
+   "in": "t18",
+   "out": "t19",
+   "weight": {
+    "offset": 31696,
+    "length": 6400,
+    "shape": [
+     160,
+     40,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 38096,
+    "length": 160,
+    "shape": [
+     160
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t19",
+   "out": "t20",
+   "weight": {
+    "offset": 38256,
+    "length": 1440,
+    "shape": [
+     160,
+     1,
+     3,
+     3
+    ]
+   },
+   "bias": {
+    "offset": 39696,
+    "length": 160,
+    "shape": [
+     160
+    ]
+   },
+   "stride": 1,
+   "pad": 1,
+   "groups": 160,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t20",
+   "out": "t21",
+   "weight": {
+    "offset": 39856,
+    "length": 6400,
+    "shape": [
+     40,
+     160,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 46256,
+    "length": 40,
+    "shape": [
+     40
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "none"
+  },
+  {
+   "op": "add",
+   "a": "t18",
+   "b": "t21",
+   "out": "t22"
+  },
+  {
+   "op": "conv",
+   "in": "t22",
+   "out": "t23",
+   "weight": {
+    "offset": 46296,
+    "length": 6400,
+    "shape": [
+     160,
+     40,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 52696,
+    "length": 160,
+    "shape": [
+     160
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t23",
+   "out": "t24",
+   "weight": {
+    "offset": 52856,
+    "length": 1440,
+    "shape": [
+     160,
+     1,
+     3,
+     3
+    ]
+   },
+   "bias": {
+    "offset": 54296,
+    "length": 160,
+    "shape": [
+     160
+    ]
+   },
+   "stride": 2,
+   "pad": 1,
+   "groups": 160,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t24",
+   "out": "t25",
+   "weight": {
+    "offset": 54456,
+    "length": 10240,
+    "shape": [
+     64,
+     160,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 64696,
+    "length": 64,
+    "shape": [
+     64
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "none"
+  },
+  {
+   "op": "conv",
+   "in": "t25",
+   "out": "t26",
+   "weight": {
+    "offset": 64760,
+    "length": 16384,
+    "shape": [
+     256,
+     64,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 81144,
+    "length": 256,
+    "shape": [
+     256
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t26",
+   "out": "t27",
+   "weight": {
+    "offset": 81400,
+    "length": 2304,
+    "shape": [
+     256,
+     1,
+     3,
+     3
+    ]
+   },
+   "bias": {
+    "offset": 83704,
+    "length": 256,
+    "shape": [
+     256
+    ]
+   },
+   "stride": 1,
+   "pad": 1,
+   "groups": 256,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t27",
+   "out": "t28",
+   "weight": {
+    "offset": 83960,
+    "length": 16384,
+    "shape": [
+     64,
+     256,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 100344,
+    "length": 64,
+    "shape": [
+     64
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "none"
+  },
+  {
+   "op": "add",
+   "a": "t25",
+   "b": "t28",
+   "out": "t29"
+  },
+  {
+   "op": "conv",
+   "in": "t29",
+   "out": "t30",
+   "weight": {
+    "offset": 100408,
+    "length": 16384,
+    "shape": [
+     256,
+     64,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 116792,
+    "length": 256,
+    "shape": [
+     256
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t30",
+   "out": "t31",
+   "weight": {
+    "offset": 117048,
+    "length": 2304,
+    "shape": [
+     256,
+     1,
+     3,
+     3
+    ]
+   },
+   "bias": {
+    "offset": 119352,
+    "length": 256,
+    "shape": [
+     256
+    ]
+   },
+   "stride": 1,
+   "pad": 1,
+   "groups": 256,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t31",
+   "out": "t32",
+   "weight": {
+    "offset": 119608,
+    "length": 16384,
+    "shape": [
+     64,
+     256,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 135992,
+    "length": 64,
+    "shape": [
+     64
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "none"
+  },
+  {
+   "op": "add",
+   "a": "t29",
+   "b": "t32",
+   "out": "t33"
+  },
+  {
+   "op": "conv",
+   "in": "t33",
+   "out": "t34",
+   "weight": {
+    "offset": 136056,
+    "length": 16384,
+    "shape": [
+     256,
+     64,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 152440,
+    "length": 256,
+    "shape": [
+     256
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t34",
+   "out": "t35",
+   "weight": {
+    "offset": 152696,
+    "length": 2304,
+    "shape": [
+     256,
+     1,
+     3,
+     3
+    ]
+   },
+   "bias": {
+    "offset": 155000,
+    "length": 256,
+    "shape": [
+     256
+    ]
+   },
+   "stride": 2,
+   "pad": 1,
+   "groups": 256,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t35",
+   "out": "t36",
+   "weight": {
+    "offset": 155256,
+    "length": 24576,
+    "shape": [
+     96,
+     256,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 179832,
+    "length": 96,
+    "shape": [
+     96
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "none"
+  },
+  {
+   "op": "conv",
+   "in": "t36",
+   "out": "t37",
+   "weight": {
+    "offset": 179928,
+    "length": 36864,
+    "shape": [
+     384,
+     96,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 216792,
+    "length": 384,
+    "shape": [
+     384
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t37",
+   "out": "t38",
+   "weight": {
+    "offset": 217176,
+    "length": 3456,
+    "shape": [
+     384,
+     1,
+     3,
+     3
+    ]
+   },
+   "bias": {
+    "offset": 220632,
+    "length": 384,
+    "shape": [
+     384
+    ]
+   },
+   "stride": 1,
+   "pad": 1,
+   "groups": 384,
+   "act": "relu6"
+  },
+  {
+   "op": "conv",
+   "in": "t38",
+   "out": "t39",
+   "weight": {
+    "offset": 221016,
+    "length": 36864,
+    "shape": [
+     96,
+     384,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 257880,
+    "length": 96,
+    "shape": [
+     96
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "none"
+  },
+  {
+   "op": "add",
+   "a": "t36",
+   "b": "t39",
+   "out": "t40"
+  },
+  {
+   "op": "conv",
+   "in": "t40",
+   "out": "t41",
+   "weight": {
+    "offset": 257976,
+    "length": 2304,
+    "shape": [
+     24,
+     96,
+     1,
+     1
+    ]
+   },
+   "bias": {
+    "offset": 260280,
+    "length": 24,
+    "shape": [
+     24
+    ]
+   },
+   "stride": 1,
+   "pad": 0,
+   "groups": 1,
+   "act": "relu6"
+  },
+  {
+   "op": "flatten",
+   "in": "t41",
+   "out": "t42"
+  },
+  {
+   "op": "linear",
+   "in": "t42",
+   "out": "t43",
+   "weight": {
+    "offset": 260304,
+    "length": 82944,
+    "shape": [
+     96,
+     864
+    ]
+   },
+   "bias": {
+    "offset": 343248,
+    "length": 96,
+    "shape": [
+     96
+    ]
+   },
+   "act": "relu6"
+  },
+  {
+   "op": "linear",
+   "in": "t43",
+   "out": "t44",
+   "weight": {
+    "offset": 343344,
+    "length": 864,
+    "shape": [
+     9,
+     96
+    ]
+   },
+   "bias": {
+    "offset": 344208,
+    "length": 9,
+    "shape": [
+     9
+    ]
+   },
+   "act": "none"
+  }
+ ],
+ "outputs": {
+  "heads": "t44",
+  "corners": "heads[0:8] = x0, y0, \u2026, x3, y3 normalized to the frame (may lie outside [0, 1]), clockwise, any start corner",
+  "presence": "sigmoid(heads[8]) = document-presence probability"
+ },
+ "config": {
+  "size": 192,
+  "in_channels": 3,
+  "stem": 16,
+  "stages": [
+   [
+    16,
+    1,
+    1,
+    1
+   ],
+   [
+    24,
+    2,
+    4,
+    2
+   ],
+   [
+    40,
+    2,
+    4,
+    3
+   ],
+   [
+    64,
+    2,
+    4,
+    3
+   ],
+   [
+    96,
+    2,
+    4,
+    2
+   ]
+  ],
+  "head_channels": 24,
+  "hidden": 96,
+  "act": "relu6",
+  "n_outputs": 8,
+  "presence": true
+ },
+ "weights": {
+  "file": "docquadnet2-6ea1c21d6f87.bin",
+  "byteLength": 688434,
+  "sha256": "6ea1c21d6f8772d2980140270476a01c3e14a5e465ee6af444bae3e6f34f67ec"
+ },
+ "selfTest": {
+  "input": 0.5,
+  "heads": [
+   0.2591411769390106,
+   0.28742629289627075,
+   0.6569505929946899,
+   0.3141695261001587,
+   0.6231542825698853,
+   0.6187505125999451,
+   0.23825505375862122,
+   0.5900704860687256,
+   -5.901034355163574
+  ]
+ }
+}

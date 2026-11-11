@@ -32,6 +32,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./docquadnet2": {
+      "@scanoficus/source": "./src/bundle-docquadnet2.ts",
+      "types": "./dist/docquadnet2.d.ts",
+      "import": "./dist/docquadnet2.js"
+    },
     "./worker-entry": {
       "@scanoficus/source": "./src/worker-entry.ts",
       "types": "./dist/worker-entry.d.ts",

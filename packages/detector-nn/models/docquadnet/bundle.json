@@ -1,0 +1,8 @@
+{
+ "format": "scanoficus-nn-bundle/1",
+ "name": "docquadnet",
+ "threshold": 0.85,
+ "main": {
+  "graph": "docquadnet.json"
+ }
+}

@@ -1,21 +1,82 @@
-import type { Quad } from '@scanoficus/core/geometry';
+import type { Detection, DetectOptions } from '@scanoficus/core/detect';
+import { orderQuad, type Quad } from '@scanoficus/core/geometry';
 import { type GrayImage, type RgbaImage, rgbaToGray } from '@scanoficus/core/image';
 import type { DetectorFrame, DocumentDetector } from '@scanoficus/core/worker';
+import { type BundleSource, loadBundle, type NnBundle } from './bundle.ts';
+import { DOCQUADNET } from './bundle-docquadnet.ts';
+import { type RefinerPass, refineCornersCpu } from './corners.ts';
 import { CpuRunner } from './cpu.ts';
 import { decodeHeads, fitQuadToFrame, type NnOutput } from './decode.ts';
 import { ContextLostError, createCanvas, type GlPrecision, GlRunner } from './gl.ts';
 import { loadModel, type NnModel } from './model.ts';
-import { bytesToInput, preprocessRgba } from './preprocess.ts';
+import { bytesToInput, preprocessRgba, rgbaToRgb } from './preprocess.ts';
 import { type RefineOptions, refineQuad } from './refine.ts';
 
-/** Presence threshold chosen on validation (scanoficus-ml `export/docquadnet/threshold.json`). */
+/** Presence threshold of the round-1 model (scanoficus-ml `export/docquadnet/threshold.json`). */
 export const DEFAULT_THRESHOLD = 0.85;
+
+/** What a presence rule gets for one frame. */
+export interface PresenceSignals {
+  /** Presence logit of the main network and its sigmoid. */
+  logit: number;
+  presence: number;
+  /** The 9 raw outputs of the main network. */
+  heads: Float32Array;
+  /** The network's quad (frame pixels, may extend beyond the frame). */
+  rawQuad: Quad;
+  /** The quad after the corner refiner, if it ran for this frame. */
+  refinedQuad: Quad | null;
+  /** The refiner's offsets per pass (half-crop units, crop frame), if it ran. */
+  refiner: RefinerPass[] | null;
+  /**
+   * The frame (an `ImageBitmap` is still open during the call; do not close or keep it). For
+   * stills this is the full-resolution image.
+   */
+  frame: DetectorFrame;
+  /** True for the still re-detection (`detectStill`), false for live frames. */
+  still: boolean;
+  /** The detector's threshold. */
+  threshold: number;
+}
+
+/**
+ * Decides document presence: returns a score in [0, 1]; the frame reports a document if the
+ * score exceeds the detector's threshold, and the score becomes `Detection.score`. With the
+ * default ({@link presenceProbability}) frames below the threshold skip the refiner; with any
+ * other rule the refiner runs first (when enabled) so the rule sees its result.
+ */
+export type PresenceRule = (signals: PresenceSignals) => number;
+
+/** The default presence rule: the main network's presence probability. */
+export const presenceProbability: PresenceRule = (s) => s.presence;
+
+/** When the corner refiner of a bundle runs. */
+export interface RefinerUse {
+  /** On live frames (`detect`). Default false (it costs two refiner passes per frame). */
+  live?: boolean;
+  /** On stills (`detectStill`: captured photos and imported images). Default true. */
+  still?: boolean;
+}
 
 /** Inference backend. */
 export type NnBackend = 'webgl2' | 'cpu';
 
 /** Options for {@link createNnDetector}. */
 export interface NnDetectorOptions {
+  /**
+   * The model bundle: a {@link BundleSource} (`DOCQUADNET`, the default; `DOCQUADNET2` from
+   * `@scanoficus/detector-nn/docquadnet2`, round 2 with the corner refiner; or your own URLs),
+   * the URL of a self-hosted `bundle.json`, or a loaded bundle (`loadBundle`). `graphUrl`,
+   * `weightsUrl` and `model` describe a main network without a refiner instead.
+   */
+  bundle?: BundleSource | string | URL | NnBundle | Promise<NnBundle>;
+  /**
+   * Corner refiner of the bundle: `true` / `{ live, still }` (default: stills only), `false`
+   * to never run it.
+   */
+  refiner?: boolean | RefinerUse;
+  /** Presence decision (default {@link presenceProbability} against `threshold`). */
+  presence?: PresenceRule;
   /**
    * URL of the graph JSON (relative URLs resolve against the page / worker location). Default:
    * the copy shipped in the package (`models/docquadnet.json`; see `loadModel`).
@@ -29,8 +90,9 @@ export interface NnDetectorOptions {
   /** An already loaded model instead of the URLs (e.g. shared by several detectors). */
   model?: NnModel | Promise<NnModel>;
   /**
-   * A document is reported if its presence probability exceeds this. Default
-   * {@link DEFAULT_THRESHOLD} (0.85); 0.9–0.95 trades recall for fewer false positives.
+   * A document is reported if its presence score exceeds this. Default: the bundle's threshold
+   * (round 1: {@link DEFAULT_THRESHOLD} 0.85, where 0.9–0.95 trades recall for fewer false
+   * positives; round 2: 0.98).
    */
   threshold?: number;
   /**
@@ -77,6 +139,15 @@ export interface NnDetector extends DocumentDetector {
    * without refinement. Consumes `ImageBitmap` frames like `detect`.
    */
   infer(frame: DetectorFrame): Promise<NnOutput>;
+  /**
+   * Detection on a full-resolution still (captured photo, imported image): like `detect`, with
+   * the corner refiner when the bundle has one (on the still downscaled to the refiner's work
+   * size). The `ScannerController` calls it for the re-detection after capture and for
+   * `addImage()`. Consumes `ImageBitmap` frames.
+   */
+  detectStill(frame: DetectorFrame, options?: DetectOptions): Promise<Detection | null>;
+  /** The loaded bundle (after `ready()`). */
+  readonly bundle: NnBundle | null;
 }
 
 type Canvas2D = OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D;
@@ -88,25 +159,47 @@ type Canvas2D = OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D;
  * classic detector are ignored. Works on the main thread and in workers (`OffscreenCanvas`);
  * see `createNnDetectorWorker` to run it in a worker.
  */
-export function createNnDetector(options: NnDetectorOptions): NnDetector {
+export function createNnDetector(options: NnDetectorOptions = {}): NnDetector {
   const mode = options.backend ?? 'auto';
-  const threshold = options.threshold ?? DEFAULT_THRESHOLD;
   const refine = options.refine === true ? {} : options.refine || null;
-  let modelPromise: Promise<NnModel> | null = null;
+  const refinerUse: Required<RefinerUse> =
+    options.refiner === false
+      ? { live: false, still: false }
+      : {
+          live: options.refiner === true || (options.refiner?.live ?? false),
+          still: options.refiner === true || (options.refiner?.still ?? true),
+        };
+  const rule = options.presence ?? presenceProbability;
+  let bundlePromise: Promise<NnBundle> | null = null;
   let init: Promise<NnBackend> | null = null;
-  let model: NnModel | null = null;
+  let bundle: NnBundle | null = null;
   let gl: GlRunner | null = null;
   let cpu: CpuRunner | null = null;
+  let cpuRefiner: CpuRunner | null = null;
   let disposed = false;
   let lastBackend: NnBackend | null = null;
   let glError: string | null = null;
   let canvas2d: { canvas: OffscreenCanvas | HTMLCanvasElement; ctx: Canvas2D } | null = null;
 
-  const getModel = () => {
-    modelPromise ??= options.model
-      ? Promise.resolve(options.model)
-      : loadModel({ graphUrl: options.graphUrl, weightsUrl: options.weightsUrl });
-    return modelPromise;
+  const getBundle = (): Promise<NnBundle> => {
+    if (bundlePromise) return bundlePromise;
+    const b = options.bundle;
+    if (b instanceof Promise) bundlePromise = b;
+    else if (b && typeof b === 'object' && 'main' in b && isLoaded(b)) {
+      bundlePromise = Promise.resolve(b);
+    } else if (b) bundlePromise = loadBundle(b as BundleSource | string | URL);
+    else if (options.model || options.graphUrl) {
+      const model = options.model
+        ? Promise.resolve(options.model)
+        : loadModel({ graphUrl: options.graphUrl, weightsUrl: options.weightsUrl });
+      bundlePromise = model.then((main) => ({
+        name: 'custom',
+        threshold: DEFAULT_THRESHOLD,
+        main,
+        refiner: null,
+      }));
+    } else bundlePromise = loadBundle(DOCQUADNET);
+    return bundlePromise;
   };
 
   const fallBack = (error: unknown) => {
@@ -115,12 +208,17 @@ export function createNnDetector(options: NnDetectorOptions): NnDetector {
   };
 
   const ready = (): Promise<NnBackend> => {
-    init ??= getModel().then((m) => {
+    init ??= getBundle().then((b) => {
       if (disposed) throw new Error('Detector disposed');
-      model = m;
+      bundle = b;
       if (mode !== 'cpu') {
+        const useRefiner = b.refiner && (refinerUse.live || refinerUse.still);
         try {
-          gl = new GlRunner(m, { precision: options.precision, canvas: options.canvas });
+          gl = new GlRunner(b.main, {
+            precision: options.precision,
+            canvas: options.canvas,
+            refiner: useRefiner ? b.refiner?.model : undefined,
+          });
         } catch (error) {
           if (mode === 'webgl2') throw error;
           fallBack(error);
@@ -130,7 +228,7 @@ export function createNnDetector(options: NnDetectorOptions): NnDetector {
     });
     // A failure (network, WebGL2 with backend 'webgl2') is not cached: the next call retries.
     init.catch(() => {
-      if (!model) modelPromise = null;
+      if (!bundle) bundlePromise = null;
       init = null;
     });
     return init;
@@ -159,40 +257,70 @@ export function createNnDetector(options: NnDetectorOptions): NnDetector {
     return ctx.getImageData(0, 0, width, height);
   };
 
+  /** Whether the frame of the last main-network run is on the GPU (for the refiner). */
+  let frameOnGpu = false;
+
   const runCpu = (m: NnModel, frame: DetectorFrame): Float32Array => {
     cpu ??= new CpuRunner(m);
     lastBackend = 'cpu';
+    frameOnGpu = false;
     return cpu.run(bytesToInput(preprocessRgba(pixels(frame), m.width, m.height)));
+  };
+
+  /** A GL failure: context loss → this frame on the CPU; anything else → CPU from now on. */
+  const glFailed = (error: unknown) => {
+    if (mode === 'webgl2') throw error;
+    if (!(error instanceof ContextLostError)) {
+      gl?.dispose();
+      gl = null;
+      fallBack(error);
+    }
   };
 
   const run = (m: NnModel, frame: DetectorFrame): Float32Array => {
     if (gl) {
       try {
-        const heads =
-          Math.max(frame.width, frame.height) > gl.maxFrameSize
-            ? gl.runTensor(bytesToInput(preprocessRgba(pixels(frame), m.width, m.height)))
-            : gl.run(frame);
+        const fits = Math.max(frame.width, frame.height) <= gl.maxFrameSize;
+        const heads = fits
+          ? gl.run(frame)
+          : gl.runTensor(bytesToInput(preprocessRgba(pixels(frame), m.width, m.height)));
         lastBackend = 'webgl2';
+        frameOnGpu = fits;
         return heads;
       } catch (error) {
-        if (mode === 'webgl2') throw error;
-        // During a context loss, use the CPU for this frame and retry WebGL2 later; any other
-        // failure switches to the CPU permanently.
-        if (!(error instanceof ContextLostError)) {
-          gl.dispose();
-          gl = null;
-          fallBack(error);
-        }
+        glFailed(error);
       }
     }
     return runCpu(m, frame);
+  };
+
+  /** The corner refiner on the frame of the last run (GPU if it is there, else the CPU). */
+  const runRefiner = (b: NnBundle, frame: DetectorFrame, quad: Quad) => {
+    const refiner = b.refiner as NonNullable<NnBundle['refiner']>;
+    if (gl?.hasRefiner && frameOnGpu) {
+      try {
+        return gl.refine(quad, refiner);
+      } catch (error) {
+        glFailed(error);
+      }
+    }
+    cpuRefiner ??= new CpuRunner(refiner.model);
+    const runner = cpuRefiner;
+    const rgba = pixels(frame);
+    lastBackend = 'cpu';
+    return refineCornersCpu(
+      { width: rgba.width, height: rgba.height, data: rgbaToRgb(rgba) },
+      quad,
+      refiner,
+      (input, n) => runner.run(input, n),
+    );
   };
 
   /** Runs the network without consuming the frame. */
   const evaluate = async (frame: DetectorFrame): Promise<NnOutput> => {
     await ready();
     if (disposed) throw new Error('Detector disposed');
-    const m = model as NnModel;
+    const m = (bundle as NnBundle).main;
     if (!(frame.width >= 1 && frame.height >= 1)) throw new RangeError('Empty frame');
     if (!isBitmap(frame) && frame.data?.length !== frame.width * frame.height * 4) {
       throw new TypeError('Expected an ImageBitmap or RGBA pixels with ImageData layout');
@@ -211,15 +339,67 @@ export function createNnDetector(options: NnDetectorOptions): NnDetector {
     return rgbaToGray(frame); // refineQuad area-downscales it
   };
 
+  /** The whole pipeline for one frame: network, refiner, presence rule, edge refinement. */
+  const process = async (frame: DetectorFrame, still: boolean): Promise<Detection | null> => {
+    try {
+      const out = await evaluate(frame);
+      const b = bundle as NnBundle;
+      const threshold = options.threshold ?? b.threshold;
+      const signals: PresenceSignals = {
+        logit: out.heads[8],
+        presence: out.presence,
+        heads: out.heads,
+        rawQuad: out.quad,
+        refinedQuad: null,
+        refiner: null,
+        frame,
+        still,
+        threshold,
+      };
+      // The default rule decides before the (costly) refiner.
+      if (rule === presenceProbability && !(out.presence > threshold)) return null;
+      if (b.refiner && (still ? refinerUse.still : refinerUse.live)) {
+        const refined = runRefiner(b, frame, out.quad);
+        signals.refinedQuad = orderQuad(refined.quad);
+        signals.refiner = refined.passes;
+      }
+      const score = rule(signals);
+      if (!(score > threshold)) return null;
+      let quad: Quad = signals.refinedQuad ?? out.quad;
+      if (refine) {
+        const longSide = refine.longSide ?? 1024;
+        const gray = grayFor(frame, longSide);
+        const sx = gray.width / frame.width;
+        const sy = gray.height / frame.height;
+        const scaled = quad.map((p) => ({ x: p.x * sx, y: p.y * sy })) as unknown as Quad;
+        quad = refineQuad(gray, scaled, refine).map((p) => ({
+          x: p.x / sx,
+          y: p.y / sy,
+        })) as unknown as Quad;
+      }
+      if (options.clipToFrame !== false) {
+        const fitted = fitQuadToFrame(quad, frame.width, frame.height);
+        if (!fitted) return null;
+        quad = fitted;
+      }
+      return { quad, score };
+    } finally {
+      if (isBitmap(frame)) frame.close();
+    }
+  };
+
   return {
     get backend() {
-      return lastBackend ?? (gl ? 'webgl2' : model ? 'cpu' : null);
+      return lastBackend ?? (gl ? 'webgl2' : bundle ? 'cpu' : null);
     },
     get glError() {
       return glError;
     },
     get precision() {
       return (gl as GlRunner | null)?.precision ?? null;
+    },
+    get bundle() {
+      return bundle;
     },
     ready,
     async infer(frame) {
@@ -229,41 +409,23 @@ export function createNnDetector(options: NnDetectorOptions): NnDetector {
         if (isBitmap(frame)) frame.close();
       }
     },
-    async detect(frame) {
-      try {
-        const out = await evaluate(frame);
-        if (!(out.presence > threshold)) return null;
-        let quad: Quad = out.quad;
-        if (refine) {
-          const longSide = refine.longSide ?? 1024;
-          const gray = grayFor(frame, longSide);
-          const sx = gray.width / frame.width;
-          const sy = gray.height / frame.height;
-          const scaled = quad.map((p) => ({ x: p.x * sx, y: p.y * sy })) as unknown as Quad;
-          quad = refineQuad(gray, scaled, refine).map((p) => ({
-            x: p.x / sx,
-            y: p.y / sy,
-          })) as unknown as Quad;
-        }
-        if (options.clipToFrame !== false) {
-          const fitted = fitQuadToFrame(quad, frame.width, frame.height);
-          if (!fitted) return null;
-          quad = fitted;
-        }
-        return { quad, score: out.presence };
-      } finally {
-        if (isBitmap(frame)) frame.close();
-      }
-    },
+    detect: (frame) => process(frame, false),
+    detectStill: (frame) => process(frame, true),
     dispose() {
       disposed = true;
       (gl as GlRunner | null)?.dispose();
       gl = null;
       cpu = null;
+      cpuRefiner = null;
       if (canvas2d) canvas2d.canvas.width = canvas2d.canvas.height = 0;
       canvas2d = null;
     },
   };
+}
+
+function isLoaded(b: object): b is NnBundle {
+  const main = (b as { main?: unknown }).main as { steps?: unknown } | undefined;
+  return Array.isArray(main?.steps);
 }
 
 export function isBitmap(frame: unknown): frame is ImageBitmap {

@@ -5,7 +5,7 @@ import { rgbaToGray } from '@scanoficus/core/image';
 import type { DocumentDetector } from '@scanoficus/core/worker';
 import { describe, expect, it, vi } from 'vitest';
 import { createHybridDetector, createNnDetector, parseModel, refineQuad } from '../src/index.ts';
-import { DOCQUADNET_GRAPH_URL, DOCQUADNET_WEIGHTS_URL } from '../src/model-files.ts';
+import { DOCQUADNET_GRAPH_URL, DOCQUADNET_WEIGHTS_URL } from './models.ts';
 import { renderScene, type SceneCase } from './scene.ts';
 
 const fixtures = JSON.parse(

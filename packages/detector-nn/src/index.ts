@@ -6,6 +6,31 @@
  *
  * @module
  */
+
+export {
+  BUNDLE_FORMAT,
+  type BundleSource,
+  loadBundle,
+  type NnBundle,
+  type RefinerModel,
+  type RefinerSettings,
+  serializableBundle,
+} from './bundle.ts';
+export { DOCQUADNET } from './bundle-docquadnet.ts';
+export {
+  applyOffset,
+  buildPyramid,
+  type CornerFrame,
+  cornerFrame,
+  cropPlan,
+  pyramidSizes,
+  type RefinerPass,
+  type RefinerResult,
+  type RgbImage,
+  refineCornersCpu,
+  warpCrop,
+  workSize,
+} from './corners.ts';
 export { CpuRunner } from './cpu.ts';
 export { decodeHeads, fitQuadToFrame, type NnOutput } from './decode.ts';
 export {
@@ -14,6 +39,10 @@ export {
   type NnBackend,
   type NnDetector,
   type NnDetectorOptions,
+  type PresenceRule,
+  type PresenceSignals,
+  presenceProbability,
+  type RefinerUse,
 } from './detector.ts';
 export {
   ContextLostError,
@@ -41,13 +70,14 @@ export {
   verifyWeights,
   type WeightRef,
 } from './model.ts';
-export { DOCQUADNET_GRAPH_URL, DOCQUADNET_WEIGHTS_URL } from './model-files.ts';
-export { bytesToInput, preprocessRgba } from './preprocess.ts';
+export { bytesToInput, preprocessRgba, rgbaToRgb } from './preprocess.ts';
 export { type RefineOptions, refineQuad } from './refine.ts';
 export {
   createNnDetectorWorker,
   type NnDetectorWorkerOptions,
+  type NnStillRequest,
   type NnWorkerDetector,
+  type NnWorkerDetectorOptions,
   type NnWorkerInfo,
   type NnWorkerInit,
   type NnWorkerStatus,

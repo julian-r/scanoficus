@@ -18,19 +18,13 @@ export function preprocessRgba(
   let width = frame.width;
   let height = frame.height;
   if (frame.data.length !== width * height * 4) throw new RangeError('Expected RGBA pixels');
-  // Interleaved RGB copy (alpha dropped).
-  let rgb: Uint8Array = new Uint8Array(width * height * 3);
-  for (let i = 0, p = 0; i < width * height; i++, p += 4) {
-    rgb[3 * i] = frame.data[p];
-    rgb[3 * i + 1] = frame.data[p + 1];
-    rgb[3 * i + 2] = frame.data[p + 2];
-  }
+  let rgb = rgbaToRgb(frame);
   while (width >= 2 * size && height >= 2 * targetHeight && width % 2 === 0 && height % 2 === 0) {
     rgb = areaInteger(rgb, width, height, 2, 2);
     width /= 2;
     height /= 2;
   }
-  const out = resize(rgb, width, height, size, targetHeight);
+  const out = resizeRgb(rgb, width, height, size, targetHeight);
   // Interleaved → planar.
   const plane = size * targetHeight;
   const planar = new Uint8Array(3 * plane);
@@ -42,6 +36,18 @@ export function preprocessRgba(
   return planar;
 }
 
+/** Interleaved RGB copy of RGBA pixels (alpha dropped). */
+export function rgbaToRgb(frame: RgbaImage): Uint8Array {
+  const n = frame.width * frame.height;
+  const rgb = new Uint8Array(n * 3);
+  for (let i = 0, p = 0; i < n; i++, p += 4) {
+    rgb[3 * i] = frame.data[p];
+    rgb[3 * i + 1] = frame.data[p + 1];
+    rgb[3 * i + 2] = frame.data[p + 2];
+  }
+  return rgb;
+}
+
 /** Converts CHW bytes to the float network input in [0, 1]. */
 export function bytesToInput(
   bytes: Uint8Array,
@@ -51,8 +57,8 @@ export function bytesToInput(
   return out;
 }
 
-/** OpenCV `cvRound` for floats: round half to even. */
-function roundHalfEven(v: number): number {
+/** OpenCV `cvRound` (and Python's `round`) for floats: round half to even. */
+export function roundHalfEven(v: number): number {
   const r = Math.round(v);
   return r - v === 0.5 && r % 2 !== 0 ? r - 1 : r;
 }
@@ -63,7 +69,13 @@ function saturate(v: number): number {
 }
 
 /** `cv::resize(INTER_AREA)` of interleaved RGB bytes. */
-function resize(src: Uint8Array, sw: number, sh: number, dw: number, dh: number): Uint8Array {
+export function resizeRgb(
+  src: Uint8Array,
+  sw: number,
+  sh: number,
+  dw: number,
+  dh: number,
+): Uint8Array {
   if (sw === dw && sh === dh) return src.slice();
   const scaleX = 1 / (dw / sw);
   const scaleY = 1 / (dh / sh);
@@ -149,7 +161,13 @@ function areaTab(
 }
 
 /** Integer-factor area resize (`resizeAreaFast`); 2×2 rounds half up like OpenCV's SIMD path. */
-function areaInteger(src: Uint8Array, sw: number, sh: number, fx: number, fy: number): Uint8Array {
+export function areaInteger(
+  src: Uint8Array,
+  sw: number,
+  sh: number,
+  fx: number,
+  fy: number,
+): Uint8Array {
   const dw = Math.floor(sw / fx);
   const dh = Math.floor(sh / fy);
   const dst = new Uint8Array(dw * dh * 3);

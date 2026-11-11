@@ -1,16 +1,31 @@
+import type { Quad } from '@scanoficus/core/geometry';
 import type { RgbaImage } from '@scanoficus/core/image';
+import type { RefinerSettings } from './bundle.ts';
+import {
+  applyOffset,
+  cornerFrame,
+  cropPlan,
+  pyramidSizes,
+  type RefinerPass,
+  type RefinerResult,
+  scalePoints,
+  workSize,
+} from './corners.ts';
 import type { NnModel, Shape, Step } from './model.ts';
 import { linearAreaTable } from './preprocess.ts';
 
 /**
  * Minimal WebGL2 inference runtime for the lowered DocQuadNet graph.
  *
- * Layout: a `C × H × W` activation is one texture of `W × (H · ⌈C / 4⌉)` texels; texel
- * `(x, s · H + y)` holds channels `4s … 4s + 3` at `(y, x)` (padding channels are 0). Every step
+ * Layout: a batch of `N` activations of `C × H × W` is one texture of `N·W × (H · ⌈C / 4⌉)`
+ * texels; texel `(n·W + x, s · H + y)` holds channels `4s … 4s + 3` of item `n` at `(y, x)`
+ * (padding channels are 0). The main network runs with N = 1, the corner refiner with N = 4
+ * (one crop per corner, side by side). Every step
  * is one full-screen draw into the output texture's framebuffer: dense convolution (also used for
  * the linear layers, whose kernel covers the whole input), depthwise convolution (both with
  * fused bias, residual add and activation), elementwise add / sigmoid, and the preprocessing
- * (2×2 box halvings, then an area resize to the input size). Weights are fp16 textures holding
+ * (2×2 box halvings, then an area resize to the input size), and for the refiner the work
+ * image, its pyramid and one crop draw per corner. Weights are fp16 textures holding
  * the exact stored values; arithmetic is float32 (`highp`); activations are stored as float32
  * or float16 textures. Only the final 9 outputs are read back.
  */
@@ -58,7 +73,9 @@ void main() {
   ivec2 p = ivec2(gl_FragCoord.xy);
   int s = p.y / u_outSize.y;
   int oy = p.y - s * u_outSize.y;
-  int ox = p.x;
+  int n = p.x / u_outSize.x;
+  int ox = p.x - n * u_outSize.x;
+  int x0 = n * u_inSize.x;
   vec4 acc = texelFetch(u_w, ivec2(u_kernel.x * u_kernel.y * u_inSlices * 4, s), 0);
   for (int ky = 0; ky < u_kernel.y; ky++) {
     int iy = oy * u_stride + ky - u_pad;
@@ -68,7 +85,7 @@ void main() {
       if (ix < 0 || ix >= u_inSize.x) continue;
       int c = (ky * u_kernel.x + kx) * u_inSlices * 4;
       for (int k = 0; k < u_inSlices; k++, c += 4) {
-        vec4 v = texelFetch(u_in, ivec2(ix, k * u_inSize.y + iy), 0);
+        vec4 v = texelFetch(u_in, ivec2(x0 + ix, k * u_inSize.y + iy), 0);
         acc += mat4(
           texelFetch(u_w, ivec2(c, s), 0),
           texelFetch(u_w, ivec2(c + 1, s), 0),
@@ -90,7 +107,9 @@ void main() {
   ivec2 p = ivec2(gl_FragCoord.xy);
   int s = p.y / u_outSize.y;
   int oy = p.y - s * u_outSize.y;
-  int ox = p.x;
+  int n = p.x / u_outSize.x;
+  int ox = p.x - n * u_outSize.x;
+  int x0 = n * u_inSize.x;
   vec4 acc = texelFetch(u_w, ivec2(u_kernel.x * u_kernel.y, s), 0);
   for (int ky = 0; ky < u_kernel.y; ky++) {
     int iy = oy * u_stride + ky - u_pad;
@@ -99,7 +118,7 @@ void main() {
       int ix = ox * u_stride + kx - u_pad;
       if (ix < 0 || ix >= u_inSize.x) continue;
       acc += texelFetch(u_w, ivec2(ky * u_kernel.x + kx, s), 0) *
-        texelFetch(u_in, ivec2(ix, s * u_inSize.y + iy), 0);
+        texelFetch(u_in, ivec2(x0 + ix, s * u_inSize.y + iy), 0);
     }
   }
   if (u_residual == 1) acc += texelFetch(u_res, p, 0);
@@ -172,6 +191,39 @@ void main() {
   o = vec4(roundEven(acc / (cell.x * cell.y)) / 255.0, 0.0);
 }`;
 
+/**
+ * One refiner crop (`refiner.Pyramid.crop`): crop pixel (x, y) of crop n samples the pyramid
+ * level at (mx·(x, y, 1), my·(x, y, 1)) bilinearly with clamp-to-edge, on 8-bit levels, rounded
+ * half to even like OpenCV 5's float warpAffine (which uses fused multiply-adds; GLSL ES 3.00 has
+ * no fma, so rare pixels differ by one level).
+ */
+const CROP = `${HEADER}
+uniform sampler2D u_src;
+uniform ivec2 u_srcSize;
+uniform vec3 u_mx, u_my;
+uniform int u_x0;
+vec3 px(int x, int y) {
+  ivec2 q = clamp(ivec2(x, y), ivec2(0), u_srcSize - 1);
+  return floor(texelFetch(u_src, q, 0).rgb * 255.0 + 0.5);
+}
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  float x = float(p.x - u_x0);
+  float y = float(p.y);
+  float sx = u_mx.x * x + (u_mx.y * y + u_mx.z);
+  float sy = u_my.x * x + (u_my.y * y + u_my.z);
+  float fx = floor(sx);
+  float fy = floor(sy);
+  float ax = sx - fx;
+  float ay = sy - fy;
+  int ix = int(fx);
+  int iy = int(fy);
+  vec3 v0 = px(ix, iy) + ax * (px(ix + 1, iy) - px(ix, iy));
+  vec3 v1 = px(ix, iy + 1) + ax * (px(ix + 1, iy + 1) - px(ix, iy + 1));
+  vec3 v = v0 + ay * (v1 - v0);
+  o = vec4(clamp(roundEven(v), 0.0, 255.0) / 255.0, 0.0);
+}`;
+
 interface Target {
   texture: WebGLTexture;
   framebuffer: WebGLFramebuffer;
@@ -180,6 +232,7 @@ interface Target {
 }
 
 interface Programs {
+  crop: WebGLProgram;
   conv: WebGLProgram;
   depthwise: WebGLProgram;
   elementwise: WebGLProgram;
@@ -228,6 +281,8 @@ export interface GlRunnerOptions {
    * `OffscreenCanvas` has no WebGL2 (Safari 16.4–16.x) and a document exists.
    */
   canvas?: OffscreenCanvas | HTMLCanvasElement;
+  /** A corner refiner network to run on the same context (see {@link GlRunner.refine}). */
+  refiner?: NnModel;
 }
 
 const CONTEXT_ATTRIBUTES: WebGLContextAttributes = {
@@ -267,20 +322,41 @@ export function createGlContext(
   return null;
 }
 
+/** A network on the context: weights, activation textures and the tensor → texture plan. */
+interface Net {
+  model: NnModel;
+  /** Batch size the textures are laid out for. */
+  batch: number;
+  weights: WebGLTexture[];
+  targets: Target[];
+  tensorTarget: Map<string, number>;
+}
+
+/** A texture the refiner crops from (a pyramid level; level 0 may be the frame itself). */
+interface Level {
+  texture: WebGLTexture;
+  width: number;
+  height: number;
+  /** Owned render target (null for the frame texture). */
+  target: Target | null;
+}
+
 /**
- * Runs a model with WebGL2. The constructor compiles the shaders, uploads the weights (the
- * cold start) and runs a self-test: GL errors, framebuffer completeness and, if the graph has a
- * `selfTest` record, one inference on its constant input against the stored outputs. It throws
- * (releasing everything it created) if WebGL2 or a renderable float format is missing or the
- * self-test fails, so callers can fall back to the CPU instead of getting wrong answers.
+ * Runs a model (and optionally the corner refiner) with WebGL2. The constructor compiles the
+ * shaders, uploads the weights (the cold start) and runs a self-test: GL errors, framebuffer
+ * completeness and, if a graph has a `selfTest` record, one inference on its constant input
+ * against the stored outputs. It throws (releasing everything it created) if WebGL2 or a
+ * renderable float format is missing or the self-test fails, so callers can fall back to the CPU
+ * instead of getting wrong answers.
  *
  * Context loss: while the context is lost, {@link run} throws {@link ContextLostError}; after
- * the browser restores the context, the next run rebuilds all GPU resources from the model kept
+ * the browser restores the context, the next run rebuilds all GPU resources from the models kept
  * in memory. {@link dispose} releases every GPU resource and the context.
  */
 export class GlRunner {
   readonly precision: GlPrecision;
   private readonly model: NnModel;
+  private readonly refinerModel: NnModel | null;
   private readonly canvas: OffscreenCanvas | HTMLCanvasElement;
   private readonly ownsCanvas: boolean;
   private gl: WebGL2RenderingContext;
@@ -288,19 +364,23 @@ export class GlRunner {
   private state: 'ready' | 'lost' | 'disposed' = 'ready';
   private programs!: Programs;
   private uniforms = new Map<WebGLProgram, Map<string, WebGLUniformLocation | null>>();
-  private weights: WebGLTexture[] = [];
-  /** Activation targets and which one each tensor uses. */
-  private targets: Target[] = [];
-  private tensorTarget = new Map<string, number>();
+  /** The main network, then the refiner (if any). */
+  private nets: Net[] = [];
   private frameTexture: WebGLTexture | null = null;
+  /** Size of the last frame uploaded by {@link run}, `null` before (or after a rebuild). */
+  private frame: { width: number; height: number; version: number } | null = null;
+  private frameVersion = 0;
   private levels: Target[] = [];
+  /** Work image pyramid of the current frame for the refiner, and what it was built for. */
+  private pyramid: { key: string; levels: Level[] } | null = null;
+  private pyramidTargets: Target[] = [];
   /**
    * Integer coefficient table of the upscaling resize and the sizes it was made for. Always
    * bound (a 1×1 placeholder at first): an integer sampler left on the unit of `u_src` would
    * make every resize draw fail with INVALID_OPERATION.
    */
   private table: { texture: WebGLTexture; key: string } | null = null;
-  /** Frame sizes whose preprocessing was checked for GL errors. */
+  /** Frame sizes whose preprocessing was checked for GL errors, and the refiner path. */
   private checkedSizes = new Set<string>();
   private readonly maxTextureSize: number;
   private readonly onLost = (event: Event) => {
@@ -310,6 +390,7 @@ export class GlRunner {
 
   constructor(model: NnModel, options: GlRunnerOptions = {}) {
     this.model = model;
+    this.refinerModel = options.refiner ?? null;
     this.ownsCanvas = !options.canvas;
     const context = createGlContext(options.canvas);
     if (!context) throw new Error('WebGL2 is not available');
@@ -350,33 +431,52 @@ export class GlRunner {
     return this.maxTextureSize;
   }
 
+  /** True if a refiner network was given. */
+  get hasRefiner(): boolean {
+    return this.refinerModel !== null;
+  }
+
   /** Preprocesses `frame` on the GPU and runs the network. Returns the 9 raw outputs. */
   run(frame: GlFrame): Float32Array {
     this.ensure();
     this.preprocess(frame);
-    return this.execute();
+    return this.execute(this.nets[0]);
   }
 
   /** Runs the network on an already preprocessed `C × H × W` input (CHW). */
   runTensor(input: Float32Array): Float32Array {
     this.ensure();
-    return this.runTensorUnchecked(input);
+    return this.runTensorUnchecked(this.nets[0], input);
   }
 
-  private runTensorUnchecked(input: Float32Array): Float32Array {
-    const { width, height, channels } = this.model;
+  /** Runs the refiner network on 4 crops (NCHW floats in [0, 1]); returns 4 × 2 offsets. */
+  runRefinerTensor(input: Float32Array): Float32Array {
+    this.ensure();
+    return this.runTensorUnchecked(this.refinerNet(), input);
+  }
+
+  private runTensorUnchecked(net: Net, input: Float32Array): Float32Array {
+    const { width, height, channels } = net.model;
+    const { batch } = net;
     const plane = width * height;
     if (channels > 4) throw new RangeError('Inputs with more than 4 channels are not supported');
-    if (input.length !== channels * plane) throw new RangeError('Bad input length');
-    const texels = new Float32Array(plane * 4);
-    for (let c = 0; c < channels; c++) {
-      for (let i = 0; i < plane; i++) texels[i * 4 + c] = input[c * plane + i];
+    if (input.length !== batch * channels * plane) throw new RangeError('Bad input length');
+    const texels = new Float32Array(batch * plane * 4);
+    for (let n = 0; n < batch; n++) {
+      for (let c = 0; c < channels; c++) {
+        const src = (n * channels + c) * plane;
+        for (let y = 0; y < height; y++) {
+          for (let x = 0; x < width; x++) {
+            texels[((y * batch + n) * width + x) * 4 + c] = input[src + y * width + x];
+          }
+        }
+      }
     }
     const gl = this.gl;
-    const target = this.target(this.model.graph.input.name);
+    const target = this.target(net, net.model.graph.input.name);
     gl.bindTexture(gl.TEXTURE_2D, target.texture);
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RGBA, gl.FLOAT, texels);
-    return this.execute();
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width * batch, height, gl.RGBA, gl.FLOAT, texels);
+    return this.execute(net);
   }
 
   /** Reads back the last network input as 8-bit CHW planes (debugging and tests). */
@@ -384,12 +484,82 @@ export class GlRunner {
     this.ensure();
     const { width, height, channels } = this.model;
     const plane = width * height;
-    const texels = this.read(this.target(this.model.graph.input.name), width, height);
+    const texels = this.read(this.target(this.nets[0], this.model.graph.input.name), width, height);
     const out = new Uint8Array(channels * plane);
     for (let c = 0; c < channels; c++) {
       for (let i = 0; i < plane; i++) out[c * plane + i] = Math.round(texels[i * 4 + c] * 255);
     }
     return out;
+  }
+
+  /** Reads back the last refiner crops as 8-bit RGB, `4 × crop × crop × 3` (tests). */
+  readCrops(): Uint8Array {
+    this.ensure();
+    const net = this.refinerNet();
+    const { width, height } = net.model;
+    const texels = this.read(this.target(net, net.model.graph.input.name), width * 4, height);
+    const out = new Uint8Array(4 * width * height * 3);
+    for (let n = 0; n < 4; n++) {
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          for (let c = 0; c < 3; c++) {
+            out[((n * height + y) * width + x) * 3 + c] = Math.round(
+              texels[((y * 4 + n) * width + x) * 4 + c] * 255,
+            );
+          }
+        }
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Refines the 4 corners of `quad` (frame pixels) on the frame of the last {@link run}: work
+   * image, pyramid and per pass one crop draw per corner and one batched refiner inference (see
+   * `refineCornersCpu` for the pipeline). Returns the refined quad and the offsets.
+   */
+  refine(quad: Quad, settings: RefinerSettings): RefinerResult {
+    this.ensure();
+    const net = this.refinerNet();
+    const frame = this.frame;
+    if (!frame) throw new Error('refine() needs a frame: call run() first');
+    if (settings.crop !== net.model.width) throw new RangeError('Crop size does not match');
+    const levels = this.buildPyramid(frame, settings.workSide);
+    const s = levels[0].width / frame.width;
+    let q = scalePoints(quad, s);
+    const gl = this.gl;
+    const { crop } = settings;
+    const input = this.target(net, net.model.graph.input.name);
+    const program = this.programs.crop;
+    const passes: RefinerPass[] = [];
+    for (const scale of settings.scales) {
+      const frames = [0, 1, 2, 3].map((i) => cornerFrame(q, i, scale));
+      gl.useProgram(program);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, input.framebuffer);
+      frames.forEach((f, n) => {
+        const { level, m } = cropPlan(f, levels.length, crop);
+        const src = levels[level];
+        this.bindTexture(program, 'u_src', 0, src.texture);
+        gl.uniform2i(this.uniform(program, 'u_srcSize'), src.width, src.height);
+        gl.uniform3f(this.uniform(program, 'u_mx'), m[0], m[1], m[2]);
+        gl.uniform3f(this.uniform(program, 'u_my'), m[3], m[4], m[5]);
+        gl.uniform1i(this.uniform(program, 'u_x0'), n * crop);
+        gl.viewport(n * crop, 0, crop, crop);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+      });
+      const out = this.execute(net);
+      const offsets = frames.map((_, n) => [out[2 * n], out[2 * n + 1]] as [number, number]);
+      q = frames.map((f, n) => applyOffset(f, offsets[n]));
+      passes.push({ scale, offsets });
+    }
+    if (!this.checkedSizes.has('refine')) {
+      const error = gl.getError();
+      if (error !== gl.NO_ERROR && !gl.isContextLost()) {
+        throw new Error(`WebGL2 refinement failed: GL error 0x${error.toString(16)}`);
+      }
+      this.checkedSizes.add('refine');
+    }
+    return { quad: scalePoints(q, s, true) as unknown as Quad, passes };
   }
 
   /** Releases all GPU resources (and the context if the runner created the canvas). */
@@ -405,6 +575,12 @@ export class GlRunner {
     }
   }
 
+  private refinerNet(): Net {
+    const net = this.nets[1];
+    if (!net) throw new Error('No refiner network on this runner');
+    return net;
+  }
+
   private ensure(): void {
     if (this.state === 'disposed') throw new Error('Runner disposed');
     if (this.gl.isContextLost()) {
@@ -414,10 +590,12 @@ export class GlRunner {
     if (this.state === 'lost') {
       // All objects of the lost context are invalid: rebuild from scratch.
       this.uniforms.clear();
-      this.weights = [];
-      this.targets = [];
+      this.nets = [];
       this.levels = [];
+      this.pyramidTargets = [];
+      this.pyramid = null;
       this.frameTexture = null;
+      this.frame = null;
       this.table = null;
       probeGl(this.gl); // re-enables the float render extensions
       this.build();
@@ -427,12 +605,13 @@ export class GlRunner {
 
   /**
    * Compiles the programs, uploads the weights, allocates the activation textures and runs the
-   * self-test; throws on any failure.
+   * self-tests; throws on any failure.
    */
   private build(): void {
     const gl = this.gl;
     gl.getError(); // clear stale errors
     this.programs = {
+      crop: link(gl, CROP),
       conv: link(gl, CONV),
       depthwise: link(gl, DEPTHWISE),
       elementwise: link(gl, ELEMENTWISE),
@@ -442,20 +621,28 @@ export class GlRunner {
     gl.disable(gl.BLEND);
     gl.disable(gl.DEPTH_TEST);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    for (const step of this.model.steps) {
-      if (step.kind === 'conv') this.weights.push(this.uploadWeights(step));
-    }
     this.table = { texture: this.uploadTable(new Int32Array(4), 1), key: '' };
     this.checkedSizes.clear();
-    this.allocate();
-    this.selfTest();
+    this.nets = [this.createNet(this.model, 1)];
+    if (this.refinerModel) this.nets.push(this.createNet(this.refinerModel, 4));
+    for (const net of this.nets) this.selfTest(net);
+  }
+
+  private createNet(model: NnModel, batch: number): Net {
+    const net: Net = { model, batch, weights: [], targets: [], tensorTarget: new Map() };
+    for (const step of model.steps) {
+      if (step.kind === 'conv') net.weights.push(this.uploadWeights(model, step));
+    }
+    this.allocate(net);
+    return net;
   }
 
   /**
    * Checks that the GPU path works: no GL error, and the stored outputs for a constant input are
-   * reproduced (relative tolerance 1e-3 for float32 storage, 1e-2 for float16).
+   * reproduced by every batch item (relative tolerance 1e-3 for float32 storage, 1e-2 for
+   * float16).
    */
-  private selfTest(): void {
+  private selfTest(net: Net): void {
     const gl = this.gl;
     const check = (what: string) => {
       const error = gl.getError();
@@ -464,39 +651,50 @@ export class GlRunner {
       }
     };
     check('during initialization');
-    const test = this.model.graph.selfTest;
+    const test = net.model.graph.selfTest;
     if (!test) return;
-    const { width, height, channels } = this.model;
-    const out = this.runTensorUnchecked(
-      new Float32Array(channels * width * height).fill(test.input),
-    );
+    const { width, height, channels } = net.model;
+    const size = net.batch * channels * width * height;
+    const out = this.runTensorUnchecked(net, new Float32Array(size).fill(test.input));
     check('during the test inference');
     const tolerance = this.precision === 'float32' ? 1e-3 : 1e-2;
-    test.heads.forEach((expected, i) => {
-      const error = Math.abs(out[i] - expected);
-      if (!(error <= tolerance * Math.max(1, Math.abs(expected)))) {
-        throw new Error(
-          `WebGL2 self-test failed (${this.precision}): output ${i} is ${out[i]}, expected ` +
-            `${expected}`,
-        );
-      }
-    });
+    const per = out.length / net.batch;
+    for (let n = 0; n < net.batch; n++) {
+      test.heads.forEach((expected, i) => {
+        const value = out[n * per + i];
+        if (!(Math.abs(value - expected) <= tolerance * Math.max(1, Math.abs(expected)))) {
+          throw new Error(
+            `WebGL2 self-test failed (${this.precision}): output ${i} is ${value}, expected ` +
+              `${expected}`,
+          );
+        }
+      });
+    }
   }
 
   private release(): void {
     const gl = this.gl;
     for (const p of Object.values(this.programs ?? {})) gl.deleteProgram(p);
-    for (const t of this.weights) gl.deleteTexture(t);
-    for (const t of [...this.targets, ...this.levels]) {
+    for (const net of this.nets) {
+      for (const t of net.weights) gl.deleteTexture(t);
+      for (const t of net.targets) {
+        gl.deleteFramebuffer(t.framebuffer);
+        gl.deleteTexture(t.texture);
+      }
+    }
+    // Sparse: pyramid level 0 has no target when the frame is the work image.
+    for (const t of [...this.levels, ...this.pyramidTargets].filter(Boolean)) {
       gl.deleteFramebuffer(t.framebuffer);
       gl.deleteTexture(t.texture);
     }
     if (this.frameTexture) gl.deleteTexture(this.frameTexture);
     if (this.table) gl.deleteTexture(this.table.texture);
-    this.weights = [];
-    this.targets = [];
+    this.nets = [];
     this.levels = [];
+    this.pyramidTargets = [];
+    this.pyramid = null;
     this.frameTexture = null;
+    this.frame = null;
     this.table = null;
     this.uniforms.clear();
   }
@@ -513,9 +711,9 @@ export class GlRunner {
   }
 
   /** Packs a convolution's fp16 weights and bias into one RGBA16F texture (exact values). */
-  private uploadWeights(step: Extract<Step, { kind: 'conv' }>): WebGLTexture {
+  private uploadWeights(model: NnModel, step: Extract<Step, { kind: 'conv' }>): WebGLTexture {
     const gl = this.gl;
-    const w = this.model.weights;
+    const w = model.weights;
     const [cin] = step.inShape;
     const [cout] = step.outShape;
     const [kh, kw] = step.kernel;
@@ -554,30 +752,30 @@ export class GlRunner {
    * Assigns activation textures with a static liveness plan: a tensor's texture returns to the
    * pool (per texture size) after its last use, so peak memory is a few tensors, not all 40.
    */
-  private allocate(): void {
-    const { steps, graph, width, height, channels } = this.model;
+  private allocate(net: Net): void {
+    const { steps, graph, width, height, channels } = net.model;
     const lastUse = new Map<string, number>();
     steps.forEach((step, i) => {
       for (const name of inputsOf(step)) lastUse.set(name, i);
     });
-    lastUse.set(this.model.output, steps.length);
+    lastUse.set(net.model.output, steps.length);
     const free = new Map<string, number[]>();
     const acquire = (name: string, shape: Shape) => {
-      const width = shape[2];
-      const height = shape[1] * Math.ceil(shape[0] / 4);
-      const key = `${width}x${height}`;
-      const index = free.get(key)?.pop() ?? this.targets.push(this.createTarget(width, height)) - 1;
-      this.tensorTarget.set(name, index);
+      const w = shape[2] * net.batch;
+      const h = shape[1] * Math.ceil(shape[0] / 4);
+      const key = `${w}x${h}`;
+      const index = free.get(key)?.pop() ?? net.targets.push(this.createTarget(w, h)) - 1;
+      net.tensorTarget.set(name, index);
     };
-    this.tensorTarget.clear();
     acquire(graph.input.name, [channels, height, width]);
     steps.forEach((step, i) => {
       acquire(step.output, step.kind === 'conv' ? step.outShape : step.shape);
       for (const name of new Set(inputsOf(step))) {
         if (lastUse.get(name) !== i) continue;
-        const t = this.targets[this.tensorTarget.get(name) as number];
+        const index = net.tensorTarget.get(name) as number;
+        const t = net.targets[index];
         const key = `${t.width}x${t.height}`;
-        free.set(key, [...(free.get(key) ?? []), this.tensorTarget.get(name) as number]);
+        free.set(key, [...(free.get(key) ?? []), index]);
       }
     });
   }
@@ -604,8 +802,8 @@ export class GlRunner {
     return { texture, framebuffer, width, height };
   }
 
-  private target(name: string): Target {
-    return this.targets[this.tensorTarget.get(name) as number];
+  private target(net: Net, name: string): Target {
+    return net.targets[net.tensorTarget.get(name) as number];
   }
 
   private uniform(program: WebGLProgram, name: string): WebGLUniformLocation | null {
@@ -632,6 +830,58 @@ export class GlRunner {
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
+  /** A reusable RGBA8 target of this size from `pool` (or a new one). */
+  private rgbaTarget(pool: Target[], index: number, width: number, height: number): Target {
+    const gl = this.gl;
+    let target = pool[index];
+    if (!target || target.width !== width || target.height !== height) {
+      if (target) {
+        gl.deleteFramebuffer(target.framebuffer);
+        gl.deleteTexture(target.texture);
+      }
+      target = this.createTarget(width, height, gl.RGBA8);
+      pool[index] = target;
+    }
+    return target;
+  }
+
+  private halve(source: WebGLTexture, target: Target): void {
+    const { halve } = this.programs;
+    this.gl.useProgram(halve);
+    this.bindTexture(halve, 'u_src', 0, source);
+    this.draw(target);
+  }
+
+  /**
+   * Resizes `source` into `target` as `cv2.resize(INTER_AREA)` does: area when both axes shrink
+   * (or stay), OpenCV's bilinear emulation when one grows.
+   */
+  private resizeInto(source: WebGLTexture, width: number, height: number, target: Target): void {
+    const gl = this.gl;
+    const { width: tw, height: th } = target;
+    const { resize } = this.programs;
+    const linear = width < tw || height < th;
+    if (linear) {
+      const key = `${width}x${height}>${tw}x${th}`;
+      if (this.table?.key !== key) {
+        if (this.table) gl.deleteTexture(this.table.texture);
+        const n = Math.max(tw, th);
+        const data = new Int32Array(n * 2 * 4);
+        data.set(linearAreaTable(width, tw, true), 0);
+        data.set(linearAreaTable(height, th, false), n * 4);
+        this.table = { texture: this.uploadTable(data, n), key };
+      }
+    }
+    // Bind after any upload: uploads go through the active texture unit.
+    gl.useProgram(resize);
+    this.bindTexture(resize, 'u_src', 0, source);
+    this.bindTexture(resize, 'u_tab', 1, this.table?.texture as WebGLTexture);
+    gl.uniform1i(this.uniform(resize, 'u_linear'), linear ? 1 : 0);
+    gl.uniform2i(this.uniform(resize, 'u_srcSize'), width, height);
+    gl.uniform2f(this.uniform(resize, 'u_scale'), width / tw, height / th);
+    this.draw(target);
+  }
+
   /** Uploads the frame, halves it while possible and resizes it into the input tensor. */
   private preprocess(frame: GlFrame): void {
     const gl = this.gl;
@@ -643,6 +893,7 @@ export class GlRunner {
     }
     if (!(width >= 1 && height >= 1)) throw new RangeError('Empty frame');
     this.frameTexture ??= gl.createTexture();
+    gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.frameTexture);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
@@ -653,48 +904,17 @@ export class GlRunner {
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, frame);
     }
     setNearest(gl);
+    this.frame = { width, height, version: ++this.frameVersion };
     let source = this.frameTexture as WebGLTexture;
     let level = 0;
-    const { halve, resize } = this.programs;
     while (width >= 2 * mw && height >= 2 * mh && width % 2 === 0 && height % 2 === 0) {
       width /= 2;
       height /= 2;
-      let target = this.levels[level];
-      if (!target || target.width !== width || target.height !== height) {
-        if (target) {
-          gl.deleteFramebuffer(target.framebuffer);
-          gl.deleteTexture(target.texture);
-        }
-        target = this.createTarget(width, height, gl.RGBA8);
-        this.levels[level] = target;
-      }
-      gl.useProgram(halve);
-      this.bindTexture(halve, 'u_src', 0, source);
-      this.draw(target);
+      const target = this.rgbaTarget(this.levels, level++, width, height);
+      this.halve(source, target);
       source = target.texture;
-      level++;
     }
-    // OpenCV uses true area interpolation only when neither axis grows.
-    const linear = width < mw || height < mh;
-    if (linear) {
-      const key = `${width}x${height}`;
-      if (this.table?.key !== key) {
-        if (this.table) gl.deleteTexture(this.table.texture);
-        const n = Math.max(mw, mh);
-        const data = new Int32Array(n * 2 * 4);
-        data.set(linearAreaTable(width, mw, true), 0);
-        data.set(linearAreaTable(height, mh, false), n * 4);
-        this.table = { texture: this.uploadTable(data, n), key };
-      }
-    }
-    // Bind after any upload: uploads go through the active texture unit.
-    gl.useProgram(resize);
-    this.bindTexture(resize, 'u_src', 0, source);
-    this.bindTexture(resize, 'u_tab', 1, this.table?.texture as WebGLTexture);
-    gl.uniform1i(this.uniform(resize, 'u_linear'), linear ? 1 : 0);
-    gl.uniform2i(this.uniform(resize, 'u_srcSize'), width, height);
-    gl.uniform2f(this.uniform(resize, 'u_scale'), width / mw, height / mh);
-    this.draw(this.target(this.model.graph.input.name));
+    this.resizeInto(source, width, height, this.target(this.nets[0], this.model.graph.input.name));
     // A failed draw would silently leave the previous input in place: check each new frame size.
     const size = `${frame.width}x${frame.height}`;
     if (!this.checkedSizes.has(size)) {
@@ -706,20 +926,54 @@ export class GlRunner {
     }
   }
 
-  /** Runs every step and reads back the output tensor. */
-  private execute(): Float32Array {
+  /**
+   * The work image (one area resize to `workSide`, or a 2× halving when that is exact, like
+   * `cv2.resize(INTER_AREA)`) and its pyramid of 2× box halvings, built once per frame.
+   */
+  private buildPyramid(
+    frame: { width: number; height: number; version: number },
+    workSide: number,
+  ): Level[] {
+    const key = `${frame.version}@${workSide}`;
+    if (this.pyramid?.key === key) return this.pyramid.levels;
+    const work = workSize(frame.width, frame.height, workSide);
+    const source = this.frameTexture as WebGLTexture;
+    let level0: Level;
+    if (work.width === frame.width && work.height === frame.height) {
+      level0 = { texture: source, ...work, target: null };
+    } else {
+      const target = this.rgbaTarget(this.pyramidTargets, 0, work.width, work.height);
+      if (frame.width === 2 * work.width && frame.height === 2 * work.height) {
+        this.halve(source, target);
+      } else this.resizeInto(source, frame.width, frame.height, target);
+      level0 = { texture: target.texture, ...work, target };
+    }
+    const levels = [level0];
+    pyramidSizes(work.width, work.height)
+      .slice(1)
+      .forEach(([w, h], i) => {
+        const target = this.rgbaTarget(this.pyramidTargets, i + 1, w, h);
+        this.halve(levels[i].texture, target);
+        levels.push({ texture: target.texture, width: w, height: h, target });
+      });
+    this.pyramid = { key, levels };
+    return levels;
+  }
+
+  /** Runs every step of a network and reads back its output tensor (NCHW, all batch items). */
+  private execute(net: Net): Float32Array {
     const gl = this.gl;
     let w = 0;
-    for (const step of this.model.steps) {
-      const out = this.target(step.output);
+    for (const step of net.model.steps) {
+      const out = this.target(net, step.output);
       if (step.kind === 'conv') {
         const program = step.depthwise ? this.programs.depthwise : this.programs.conv;
         gl.useProgram(program);
         const u = (name: string) => this.uniform(program, name);
-        this.bindTexture(program, 'u_in', 0, this.target(step.input).texture);
-        this.bindTexture(program, 'u_w', 1, this.weights[w++]);
-        const residual = step.residual ? this.target(step.residual).texture : null;
-        this.bindTexture(program, 'u_res', 2, residual ?? this.weights[0]);
+        this.bindTexture(program, 'u_in', 0, this.target(net, step.input).texture);
+        this.bindTexture(program, 'u_w', 1, net.weights[w++]);
+        const residual = step.residual ? this.target(net, step.residual).texture : null;
+        this.bindTexture(program, 'u_res', 2, residual ?? net.weights[0]);
         gl.uniform1i(u('u_residual'), residual ? 1 : 0);
         gl.uniform2i(u('u_inSize'), step.inShape[2], step.inShape[1]);
         gl.uniform2i(u('u_outSize'), step.outShape[2], step.outShape[1]);
@@ -732,21 +986,25 @@ export class GlRunner {
         const program = this.programs.elementwise;
         gl.useProgram(program);
         const a = step.kind === 'add' ? step.a : step.input;
-        this.bindTexture(program, 'u_a', 0, this.target(a).texture);
-        const b = step.kind === 'add' ? this.target(step.b).texture : this.weights[0];
+        this.bindTexture(program, 'u_a', 0, this.target(net, a).texture);
+        const b = step.kind === 'add' ? this.target(net, step.b).texture : net.weights[0];
         this.bindTexture(program, 'u_b', 1, b);
         gl.uniform1i(this.uniform(program, 'u_mode'), step.kind === 'add' ? 0 : 1);
       }
       this.draw(out);
     }
-    const [c, h, wd] = this.model.outputShape;
-    const texels = this.read(this.target(this.model.output), wd, h * Math.ceil(c / 4));
-    // Unpack [C, H, W] from the packed layout.
-    const out = new Float32Array(c * h * wd);
-    for (let ch = 0; ch < c; ch++) {
-      for (let y = 0; y < h; y++) {
-        for (let x = 0; x < wd; x++) {
-          out[(ch * h + y) * wd + x] = texels[(((ch >> 2) * h + y) * wd + x) * 4 + (ch & 3)];
+    const [c, h, wd] = net.model.outputShape;
+    const { batch } = net;
+    const texels = this.read(this.target(net, net.model.output), wd * batch, h * Math.ceil(c / 4));
+    // Unpack [N, C, H, W] from the packed layout.
+    const out = new Float32Array(batch * c * h * wd);
+    for (let n = 0; n < batch; n++) {
+      for (let ch = 0; ch < c; ch++) {
+        for (let y = 0; y < h; y++) {
+          for (let x = 0; x < wd; x++) {
+            const texel = ((ch >> 2) * h + y) * wd * batch + n * wd + x;
+            out[((n * c + ch) * h + y) * wd + x] = texels[texel * 4 + (ch & 3)];
+          }
         }
       }
     }

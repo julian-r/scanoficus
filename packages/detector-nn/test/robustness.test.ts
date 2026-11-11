@@ -10,7 +10,7 @@ import {
   fitQuadToFrame,
   parseModel,
 } from '../src/index.ts';
-import { DOCQUADNET_GRAPH_URL, DOCQUADNET_WEIGHTS_URL } from '../src/model-files.ts';
+import { DOCQUADNET_GRAPH_URL, DOCQUADNET_WEIGHTS_URL } from './models.ts';
 import { renderScene, type SceneCase } from './scene.ts';
 
 const quad = (...points: [number, number][]) =>

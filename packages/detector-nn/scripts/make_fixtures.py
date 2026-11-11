@@ -103,7 +103,7 @@ def main() -> None:
 
     # The packaged model (scripts/package_model.py); its weights must equal the ML export.
     export = ml / "export" / "docquadnet"
-    models = HERE.parent / "models"
+    models = HERE.parent / "models" / "docquadnet"
     graph_path = models / "docquadnet.json"
     graph = json.loads(graph_path.read_text())
     blob = (models / graph["weights"]["file"]).read_bytes()
