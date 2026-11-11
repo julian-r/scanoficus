@@ -199,6 +199,8 @@ export async function contextLoss() {
   const strictAfter = await strict.detect(image);
   detector.dispose();
   strict.dispose();
+  releaseContext(canvas);
+  releaseContext(strictCanvas);
   const err = (d) => (d ? cornerError(d.quad, c.quad) : null);
   return {
     before: err(before),
@@ -209,6 +211,15 @@ export async function contextLoss() {
     strictError,
     strictAfter: err(strictAfter),
   };
+}
+
+/**
+ * Releases the WebGL context of a canvas the check created and passed to a detector (the
+ * runtime only releases contexts of canvases it created itself), so many checks in a row do not
+ * pile up live GPU contexts.
+ */
+function releaseContext(canvas) {
+  canvas.getContext('webgl2')?.getExtension('WEBGL_lose_context')?.loseContext();
 }
 
 /** Every texture, framebuffer and program created is deleted by dispose(). */
@@ -239,6 +250,7 @@ export async function disposeCheck({ v2 } = {}) {
     () => false,
     () => true,
   );
+  releaseContext(canvas);
   return { live, leaked: counts, rejected };
 }
 
@@ -287,6 +299,7 @@ export async function selfTestFailure() {
   } catch (e) {
     error = String(e);
   }
+  releaseContext(canvas);
   const detector = createNnDetector({ model: broken });
   const meta = await fixtures();
   const detection = await detector.detect(await frame(meta.cases[0]));

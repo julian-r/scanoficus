@@ -5,9 +5,15 @@
  * the main thread and in a worker (OffscreenCanvas), context loss and restore, and that
  * dispose() deletes every GPU object. With `--bench`, also cold-start and warm per-frame timings.
  *
- * Uses the installed Google Chrome (`channel: 'chrome'`, override with CHROME_PATH).
+ * Uses the installed Google Chrome (`channel: 'chrome'`, override with CHROME_PATH). Chrome logs
+ * to `node_modules/.cache/check-nn/chrome-<n>.log`. If the browser (or a page) crashes during a
+ * check, the log's tail is printed, Chrome is relaunched and the check runs once more; it is then
+ * reported as "retried after a browser crash". CHECK_NN_CRASH=<export>[:page] crashes the browser
+ * (or only the page) once at that check-page.mjs export, to test this path.
  * Usage: `pnpm --filter @scanoficus/detector-nn check:browser [-- --bench] [--json out.json]`.
  */
+import { execFileSync } from 'node:child_process';
+import { mkdirSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { extname, join, normalize } from 'node:path';
@@ -36,8 +42,14 @@ const scenes = [
 ];
 
 const failures = [];
+/**
+ * Set by inPage() when its page run was repeated after a crash; every check on that result
+ * reports it (cleared by the next inPage()).
+ */
+let retryNote = '';
 const check = (name, ok, details = '') => {
-  console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}${details ? ` — ${details}` : ''}`);
+  const note = retryNote ? ` (${retryNote})` : '';
+  console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}${note}${details ? ` — ${details}` : ''}`);
   if (!ok) failures.push(name);
 };
 
@@ -85,36 +97,92 @@ const server = createServer(async (req, res) => {
 await new Promise((resolve) => server.listen(0, resolve));
 const origin = `http://localhost:${server.address().port}`;
 
-const browser = await chromium.launch({
-  ...(process.env.CHROME_PATH
-    ? { executablePath: process.env.CHROME_PATH }
-    : { channel: 'chrome' }),
-  headless: true,
-  // Without a GPU (CI), Chrome only offers WebGL through SwiftShader with this flag. Add e.g.
-  // SWIFTSHADER=1 forces the software renderer CI uses (ubuntu without a GPU) on a machine with
-  // a GPU; CHROME_ARGS adds any other flags.
-  args: [
-    '--enable-unsafe-swiftshader',
-    ...(process.env.SWIFTSHADER === '1' ? ['--use-angle=swiftshader'] : []),
-    ...(process.env.CHROME_ARGS?.split(' ') ?? []),
-  ],
-});
+const logDir = join(root, 'node_modules/.cache/check-nn');
+mkdirSync(logDir, { recursive: true });
+let launches = 0;
+let logFile = '';
+/** Launches Chrome, logging to its own file (a crash leaves the reason there). */
+async function launch() {
+  logFile = join(logDir, `chrome-${process.pid}-${++launches}.log`);
+  return chromium.launch({
+    ...(process.env.CHROME_PATH
+      ? { executablePath: process.env.CHROME_PATH }
+      : { channel: 'chrome' }),
+    headless: true,
+    // Without a GPU (CI), Chrome only offers WebGL through SwiftShader with this flag.
+    // SWIFTSHADER=1 forces the software renderer CI uses (ubuntu without a GPU) on a machine
+    // with a GPU; CHROME_ARGS adds any other flags.
+    args: [
+      '--enable-unsafe-swiftshader',
+      // Playwright drops Chrome's stderr (unless DEBUG=pw:browser), so log to a file.
+      '--enable-logging=file',
+      `--log-file=${logFile}`,
+      ...(process.env.SWIFTSHADER === '1' ? ['--use-angle=swiftshader'] : []),
+      ...(process.env.CHROME_ARGS?.split(' ') ?? []),
+    ],
+  });
+}
+let browser = await launch();
+
+const [crashAt, crashKind] = (process.env.CHECK_NN_CRASH ?? '').split(':');
+let crashPending = !!crashAt;
 
 /** Runs an export of check-page.mjs in a fresh page (fresh caches, contexts and workers). */
-async function inPage(name, arg = {}) {
+async function runInPage(name, arg, state) {
   const context = await browser.newContext();
   const page = await context.newPage();
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e)));
+  page.on('crash', () => {
+    state.crashed = 'page';
+  });
   await page.goto(`${origin}/`);
   try {
+    if (crashPending && name === crashAt) {
+      crashPending = false;
+      if (crashKind === 'page') await page.goto('chrome://crash').catch(() => {});
+      // The browser: every process of this launch has the log file on its command line.
+      else execFileSync('pkill', ['-9', '-f', `log-file=${logFile}`]);
+    }
     return await page.evaluate(
       async ([n, a]) => (await import('/check-page.mjs'))[n](a),
       [name, arg],
     );
   } finally {
     if (errors.length) console.log(`  page errors: ${errors.join(' | ')}`);
-    await context.close();
+    if (browser.isConnected()) await context.close().catch(() => {});
+  }
+}
+
+/**
+ * Runs an export of check-page.mjs; after a browser or page crash, prints the end of Chrome's
+ * log, relaunches Chrome if needed and runs it once more.
+ */
+async function inPage(name, arg = {}) {
+  retryNote = '';
+  const state = { crashed: null };
+  try {
+    return await runInPage(name, arg, state);
+  } catch (error) {
+    const kind = !browser.isConnected() ? 'browser' : state.crashed;
+    if (!kind) throw error;
+    const tail = await readFile(logFile, 'utf8')
+      .then((log) =>
+        log
+          .trimEnd()
+          .split('\n')
+          // Headless Chrome on macOS repeats this harmless line many times a second.
+          .filter((l) => !l.includes('CVDisplayLinkCreateWithCGDisplay'))
+          .slice(-15),
+      )
+      .catch(() => ['(no log)']);
+    console.log(
+      `info ${kind} crashed during ${name}: ${String(error).split('\n')[0]}\n` +
+        `  end of ${logFile}:\n${tail.map((l) => `    ${l}`).join('\n')}`,
+    );
+    if (kind === 'browser') browser = await launch();
+    retryNote = `retried after a ${kind === 'browser' ? 'browser' : 'page'} crash`;
+    return runInPage(name, arg, { crashed: null });
   }
 }
 
@@ -239,15 +307,16 @@ for (const precision of ['float32', 'float16']) {
  *   pixels differently from OpenCV (0 of 2 M values on Apple M5 / Metal, 22–24 on SwiftShader
  *   as on CI), and the corner logit reacts to single pixels. SwiftShader measured offsets
  *   7e-6 / 6e-5 and corner logit 1.1e-3 / 5.9e-3 (round 3 / round 4, whose refiner is more
- *   sensitive); Metal at most 2e-7 and 1.3e-5. The logit tolerance 1.5e-2 keeps 2.5× margin
- *   over round 4 on SwiftShader; the |weights| of the logit features sum to 1.33 / 0.95 in the
- *   round-3 / round-4 decision, so the score moves by < 2e-2, below its own tolerance of 0.05.
- *   Offsets may differ by 1e-3 half-crop units (0.03 px of a 64-px crop).
+ *   sensitive); Metal at most 2e-7 and 1.3e-5. The logit tolerance is per round: 4e-3 for
+ *   round 3 (3.5× SwiftShader's 1.1e-3) and 1.5e-2 for round 4 (2.5× its 5.9e-3); the |weights|
+ *   of the logit features sum to 1.33 / 0.95 in the round-3 / round-4 decision, so the score
+ *   moves by < 6e-3 / < 1.5e-2, below its own tolerance of 0.05. Offsets may differ by 1e-3
+ *   half-crop units (0.03 px of a 64-px crop).
  * float16 activations: corner logit up to 0.057 (Metal, round 4); 0.1 keeps a margin across GPUs.
  */
 const REFINER_TOLERANCE = {
-  float32: { netOffsets: 1e-4, netLogit: 1e-4, offsets: 1e-3, logit: 1.5e-2 },
-  float16: { netOffsets: 0.05, netLogit: 0.1, offsets: 0.05, logit: 0.1 },
+  float32: { netOffsets: 1e-4, netLogit: 1e-4, offsets: 1e-3, logit: { 3: 4e-3, 4: 1.5e-2 } },
+  float16: { netOffsets: 0.05, netLogit: 0.1, offsets: 0.05, logit: { 3: 0.1, 4: 0.1 } },
 };
 // Scenes: the 12 round-2 scenes, 8 faint blends with NumPy margins of ±0.05 … ±0.5 around the
 // threshold, and a white page on a light table.
@@ -261,15 +330,15 @@ for (const round of [3, 4]) {
     const max = (key, list = results) => Math.max(...list.map((r) => r[key] ?? 0));
     const mismatched = results.reduce((n, r) => n + r.cropMismatched, 0);
     const total = results.reduce((n, r) => n + r.crops, 0);
-    // Score tolerance vs NumPy: float32 0.05; float16 0.3 on clear pages and 0.7 on faint
-    // near-threshold pages (measured up to 0.66 before the float16 offset).
     // Score tolerance vs NumPy, clear pages / faint near-threshold pages. float32: 0.05 / 0.1
     // (faint pages: the CPU path itself differs by up to 0.04, SwiftShader measured 0.061 with its
     // GPU-rounded crops, Metal 0.042). float16: 0.3 / 0.7 (faint: up to 0.66 on Metal).
-    const t =
-      precision === 'float32'
-        ? { score: 0.05, faint: 0.1, ...REFINER_TOLERANCE.float32 }
-        : { score: 0.3, faint: 0.7, ...REFINER_TOLERANCE.float16 };
+    const refinerTolerance = REFINER_TOLERANCE[precision];
+    const t = {
+      ...(precision === 'float32' ? { score: 0.05, faint: 0.1 } : { score: 0.3, faint: 0.7 }),
+      ...refinerTolerance,
+      logit: refinerTolerance.logit[round],
+    };
     const tolerance = (r) => (r.faint ? t.faint : t.score);
     // Decisions must agree with NumPy wherever the NumPy margin exceeds the score tolerance.
     const decided = results.filter((r) => Math.abs(r.margin) > tolerance(r));
