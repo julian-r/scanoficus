@@ -64,6 +64,7 @@ export const BASE_STYLES = `
 }
 :host([hidden]) { display: none; }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 button {
   font: inherit;
   color: inherit;
