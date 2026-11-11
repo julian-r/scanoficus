@@ -1,7 +1,10 @@
 // Offline shell for the scanoficus demo. The app shell (index.html) is cached on install;
 // navigations are network-first with the cached shell as fallback, and same-origin assets
 // (hashed by Vite, so immutable) are cache-first with runtime caching.
-const CACHE = 'scanoficus-demo-v1';
+// CacheStorage is shared by the whole origin (e.g. all GitHub project Pages of a user), so
+// only caches in this app's namespace are ever deleted.
+const PREFIX = 'scanoficus-demo-';
+const CACHE = `${PREFIX}v1`;
 const SHELL = new URL('./', self.registration.scope).href;
 
 self.addEventListener('install', (event) => {
@@ -17,7 +20,11 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches
       .keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      .then((keys) =>
+        Promise.all(
+          keys.filter((k) => k.startsWith(PREFIX) && k !== CACHE).map((k) => caches.delete(k)),
+        ),
+      )
       .then(() => self.clients.claim()),
   );
 });

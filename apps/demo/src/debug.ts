@@ -17,6 +17,11 @@ export function attachDebugOverlay(controller: ScannerController, host: HTMLElem
   const stats = panel.querySelector('pre') as HTMLPreElement;
   const context = new DetectorContext();
 
+  let detectorNote = 'detector: worker';
+  const offError = controller.on('error', ({ error }) => {
+    if (error.message.startsWith('Falling back'))
+      detectorNote = `detector: main thread (${error.message})`;
+  });
   const offFrame = controller.on('frame', ({ image }) => {
     const detection = detectDocument(rgbaToGray(image), {}, context);
     const { width, height, edges } = context;
@@ -49,6 +54,7 @@ export function attachDebugOverlay(controller: ScannerController, host: HTMLElem
       `stable       ${d.stable ? 'yes' : 'no'}  progress ${(d.progress * 100).toFixed(0)}%`,
       `sharpness    ${d.sharpness.toFixed(0)} (${(d.relativeSharpness * 100).toFixed(0)}% of peak)`,
       `frame        ${d.frameWidth}×${d.frameHeight}`,
+      detectorNote,
     ].join('\n');
   });
   const offState = controller.on('state', ({ state }) => {
@@ -58,6 +64,7 @@ export function attachDebugOverlay(controller: ScannerController, host: HTMLElem
     offFrame();
     offDetection();
     offState();
+    offError();
     panel.remove();
   };
 }

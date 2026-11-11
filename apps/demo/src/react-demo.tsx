@@ -1,13 +1,12 @@
 import { DocumentScanner, useDocumentScanner } from '@scanoficus/react';
-import { useMemo, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { createDemoDetector } from './detector.ts';
 import { download, scanFileName } from './download.ts';
 
 /** A custom scanner UI built only with the `useDocumentScanner` hook. */
 function HookScanner() {
-  const detector = useMemo(() => createDemoDetector(), []);
-  const scanner = useDocumentScanner({ detector });
+  // The hook's controller owns its detector worker and disposes it on unmount.
+  const scanner = useDocumentScanner();
   const video = useRef<HTMLVideoElement>(null);
   const live =
     scanner.state === 'scanning' || scanner.state === 'capturing' || scanner.state === 'starting';
@@ -107,7 +106,6 @@ function HookScanner() {
 function ElementScanner() {
   const [open, setOpen] = useState(false);
   const [summary, setSummary] = useState('');
-  const options = useMemo(() => ({ detector: createDemoDetector() }), []);
   if (!open) {
     return (
       <div className="actions">
@@ -121,7 +119,6 @@ function ElementScanner() {
   return (
     <div className="scanner-overlay">
       <DocumentScanner
-        options={options}
         pageSize="a4"
         style={{ height: '100%' }}
         onCancel={() => setOpen(false)}

@@ -1,6 +1,5 @@
 import type { ScanDocumentElement } from '@scanoficus/elements';
 import { attachDebugOverlay } from './debug.ts';
-import { createDemoDetector } from './detector.ts';
 import { button, renderResults } from './results.ts';
 
 /** Live scanning with the full `<scan-document>` flow in a full-screen overlay. */
@@ -12,16 +11,16 @@ export function mountLive(main: HTMLElement, debug: () => boolean): () => void {
 change filters, crop, rotate and save a PDF.</p>`;
   const results = document.createElement('section');
   let close: (() => void) | null = null;
+  let clearResults = () => {};
 
   const open = () => {
     const overlay = document.createElement('div');
     overlay.className = 'scanner-overlay';
     const scanner = document.createElement('scan-document') as ScanDocumentElement;
     scanner.setAttribute('page-size', 'a4');
-    scanner.options = {
-      detector: createDemoDetector(),
-      camera: { resolution: highRes.checked ? 'max' : 'hd' },
-    };
+    // The controller creates (and disposes) its detector worker through the library's
+    // default worker URL, which Vite bundles from `new Worker(new URL(…))`.
+    scanner.options = { camera: { resolution: highRes.checked ? 'max' : 'hd' } };
     overlay.append(scanner);
     document.body.append(overlay);
     document.body.classList.add('scanning');
@@ -34,7 +33,8 @@ change filters, crop, rotate and save a PDF.</p>`;
       close = null;
     };
     scanner.addEventListener('scan-complete', (e) => {
-      renderResults(results, e.detail.pages, e.detail.pdf);
+      clearResults();
+      clearResults = renderResults(results, e.detail.pages, e.detail.pdf);
       close?.();
     });
     scanner.addEventListener('scan-cancel', () => close?.());
@@ -48,5 +48,8 @@ change filters, crop, rotate and save a PDF.</p>`;
   const highRes = highResLabel.querySelector('input') as HTMLInputElement;
   intro.append(highResLabel, button('Start scanning', open, 'primary'));
   main.replaceChildren(intro, results);
-  return () => close?.();
+  return () => {
+    close?.();
+    clearResults();
+  };
 }

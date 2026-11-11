@@ -1,6 +1,5 @@
 import { ScannerController } from '@scanoficus/core/controller';
 import type { ScanCropEditorElement, ScanReviewElement } from '@scanoficus/elements';
-import { createDemoDetector } from './detector.ts';
 import { button, renderResults } from './results.ts';
 
 /**
@@ -9,7 +8,9 @@ import { button, renderResults } from './results.ts';
  * document, adjust the corners, then review and export. No live camera access needed.
  */
 export function mountPhoto(main: HTMLElement): () => void {
-  const controller = new ScannerController({ detector: createDemoDetector() });
+  // Owns its default detector worker; disposed (with the worker) when leaving the route.
+  const controller = new ScannerController();
+  let clearResults = () => {};
   const intro = document.createElement('section');
   intro.innerHTML = `<h1>Scan from a photo</h1>
 <p>Take a picture with your camera app or choose one from your library. The document is
@@ -30,7 +31,8 @@ detected automatically; adjust the corners if needed.</p>`;
     review.controller = controller;
     review.addEventListener('scan-crop', (e) => showCrop(e.detail.page.id));
     review.addEventListener('scan-complete', (e) => {
-      renderResults(results, e.detail.pages, e.detail.pdf);
+      clearResults();
+      clearResults = renderResults(results, e.detail.pages, e.detail.pdf);
       stage.replaceChildren();
     });
     stage.replaceChildren(review);
@@ -68,5 +70,8 @@ detected automatically; adjust the corners if needed.</p>`;
     button('Take or choose a photo', () => input.click(), 'primary'),
   );
   main.replaceChildren(intro, stage, results);
-  return () => controller.dispose();
+  return () => {
+    controller.dispose();
+    clearResults();
+  };
 }
