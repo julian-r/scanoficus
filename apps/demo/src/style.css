@@ -145,3 +145,8 @@ button.primary {
   stroke-width: 3;
   vector-effect: non-scaling-stroke;
 }
+.option {
+  display: block;
+  margin: 8px 0 12px;
+  font-size: 15px;
+}

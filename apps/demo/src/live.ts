@@ -18,7 +18,10 @@ change filters, crop, rotate and save a PDF.</p>`;
     overlay.className = 'scanner-overlay';
     const scanner = document.createElement('scan-document') as ScanDocumentElement;
     scanner.setAttribute('page-size', 'a4');
-    scanner.options = { detector: createDemoDetector() };
+    scanner.options = {
+      detector: createDemoDetector(),
+      camera: { resolution: highRes.checked ? 'max' : 'hd' },
+    };
     overlay.append(scanner);
     document.body.append(overlay);
     document.body.classList.add('scanning');
@@ -38,7 +41,12 @@ change filters, crop, rotate and save a PDF.</p>`;
     scanner.addEventListener('scan-error', (e) => console.error(e.detail.error));
   };
 
-  intro.append(button('Start scanning', open, 'primary'));
+  const highResLabel = document.createElement('label');
+  highResLabel.className = 'option';
+  highResLabel.innerHTML =
+    '<input type="checkbox"> High-resolution stream (sharper pages, more battery and memory)';
+  const highRes = highResLabel.querySelector('input') as HTMLInputElement;
+  intro.append(highResLabel, button('Start scanning', open, 'primary'));
   main.replaceChildren(intro, results);
   return () => close?.();
 }

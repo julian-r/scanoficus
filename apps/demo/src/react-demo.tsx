@@ -29,6 +29,7 @@ function HookScanner() {
       </div>
       <p role="status">
         State: {scanner.state}
+        {scanner.cameraStage && ` (${scanner.cameraStage})`}
         {scanner.detection && ` · ${scanner.detection.stable ? 'stable' : 'moving'}`}
         {scanner.error && ` · ${scanner.error.message}`}
       </p>
@@ -40,6 +41,11 @@ function HookScanner() {
             onClick={() => video.current && void scanner.start(video.current)}
           >
             Start camera
+          </button>
+        )}
+        {scanner.state === 'error' && (
+          <button type="button" onClick={() => void scanner.retry()}>
+            Retry camera
           </button>
         )}
         {live && (

@@ -102,6 +102,7 @@ polygon.ready { fill: var(--scan-quad-fill-ready, rgb(10 132 255 / 0.45)); }
 
 /** Status texts; override via the `messages` property for localization. */
 export interface ScanCameraMessages {
+  requesting: string;
   starting: string;
   searching: string;
   holdStill: string;
@@ -117,6 +118,7 @@ export interface ScanCameraMessages {
 }
 
 const DEFAULT_MESSAGES: ScanCameraMessages = {
+  requesting: 'Waiting for camera access…',
   starting: 'Starting camera…',
   searching: 'Position the document in view',
   holdStill: 'Hold steady',
@@ -283,7 +285,7 @@ export class ScanCameraElement extends BaseElement {
 
   private statusText(s: ScannerSnapshot): string {
     const m = this.messages;
-    if (s.state === 'starting') return m.starting;
+    if (s.state === 'starting') return s.cameraStage === 'acquiring' ? m.requesting : m.starting;
     if (s.state === 'capturing') return m.capturing;
     if (s.state !== 'scanning') return '';
     if (!s.autoCapture) return m.manual;

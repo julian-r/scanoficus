@@ -1,3 +1,4 @@
+import { CameraError } from '@scanoficus/core/camera';
 import { ScannerController, type ScannerOptions, type ScanPage } from '@scanoficus/core/controller';
 import type { ScanFilter } from '@scanoficus/core/filters';
 import { BASE_STYLES, BaseElement, emit, escapeHtml } from './base.ts';
@@ -88,7 +89,7 @@ export class ScanDocumentElement extends BaseElement {
       if (file) void this.importImage(file);
     });
     this.$('.retry').addEventListener('click', () => {
-      this._controller?.start(this.camera.video).catch((error) => this.fail(error));
+      this._controller?.retry().catch((error) => this.fail(error));
     });
   }
 
@@ -209,7 +210,12 @@ export class ScanDocumentElement extends BaseElement {
     const error = this.$('.error');
     error.hidden = view !== 'error';
     if (view === 'error') {
-      const message = controller.getSnapshot().error?.message ?? 'The camera is not available.';
+      const error = controller.getSnapshot().error;
+      let message = error?.message ?? 'The camera is not available.';
+      if (error instanceof CameraError && error.code === 'permission-denied') {
+        message +=
+          '. Allow camera access for this site in your browser settings, or import a photo.';
+      }
       this.$('.message').innerHTML = escapeHtml(message);
     }
     if (view !== this.view) {

@@ -21,6 +21,8 @@ export interface DocumentScannerApi extends ScannerSnapshot {
   /** Opens the camera into the video element and starts live detection. */
   start(video?: HTMLVideoElement): Promise<void>;
   stop(): void;
+  /** Retries opening the camera after an error. */
+  retry(): Promise<void>;
   capture(): Promise<ScanPage | null>;
   finish(): void;
   setAutoCapture(enabled: boolean): void;
@@ -77,6 +79,7 @@ export function useDocumentScanner(options: UseDocumentScannerOptions = {}): Doc
       controller,
       start: (video?: HTMLVideoElement) => controller.start(video),
       stop: () => controller.stop(),
+      retry: () => controller.retry(),
       capture: () => controller.capture(),
       finish: () => controller.finish(),
       setAutoCapture: (enabled: boolean) => controller.setAutoCapture(enabled),
