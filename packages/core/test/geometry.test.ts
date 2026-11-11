@@ -260,8 +260,15 @@ describe('estimateOutputSize', () => {
     expect(size.width * size.height).toBeLessThanOrEqual(12_000_000);
     expect(size.width).toBeGreaterThanOrEqual(3463);
     expect(size.height).toBeGreaterThanOrEqual(3462);
-    const long = estimateOutputSize(rect, { maxLongSide: 3464.2 });
-    expect(Math.max(long.width, long.height)).toBeLessThanOrEqual(3464.2);
+    // Long side 3464.6 is below the 3464.7 cap, but rounds up to 3465.
+    const wide: Quad = [
+      { x: 0, y: 0 },
+      { x: 3464.6, y: 0 },
+      { x: 3464.6, y: 2000 },
+      { x: 0, y: 2000 },
+    ];
+    const long = estimateOutputSize(wide, { maxLongSide: 3464.7 });
+    expect(long).toEqual({ width: 3464, height: 2000 });
   });
 
   it('clamps to maxLongSide preserving aspect', () => {

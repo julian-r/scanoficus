@@ -367,13 +367,13 @@ describe('ScannerController', () => {
     expect(calls.at(-1)).toMatchObject({ width: page.width, height: page.height });
   });
 
-  it('stops page creation when disposed during still detection (no renderer created)', async () => {
+  it('stops page creation when disposed during still detection', async () => {
     let finishDetection: () => void = () => {};
     const deferred: DocumentDetector = {
       detect: () => new Promise((resolve) => (finishDetection = () => resolve(null))),
       dispose() {},
     };
-    // No renderer option: creating the default renderer would throw in Node.
+    // No renderer option: the controller would create its own (see controller-renderer.test.ts).
     const { controller, camera } = setup({
       detector: deferred,
       renderer: undefined,
