@@ -13,8 +13,10 @@ decision), in its own folder `<models>/<bundle>/`:
     0.3, …), which the WebGL2 runtime reproduces after initialization;
 - `bundle.json`: the manifest for self-hosting (`loadBundle`): graph file names, presence
   threshold and, with a refiner, its crop scales, crop size and work-image side;
-- with a decision: `decision.json` from export/<round>/ plus `mainSha256` and `refinerSha256`
-  (the weights it was fitted with; `loadBundle` rejects other weights), and `coco-credits.csv`
+- with a decision: `decision.json`, a copy of a decision file of export/<round>/ (by default
+  its `decision.json`; `--decision <bundle>=<file>` takes another, e.g. `decision-4b.json`) plus
+  `mainSha256` and `refinerSha256` (the weights it was fitted with; `loadBundle` rejects other
+  weights) and `exportFile` (which file it came from), and `coco-credits.csv`
   (the COCO images behind the refiner and the decision, with Flickr author and title from
   `fetch_flickr_credits.py`'s cache);
 - a TypeScript module with the same bundle as `new URL('…/models/…', import.meta.url)`
@@ -33,7 +35,11 @@ The attribution notices (`LICENSE.md` next to each models folder) are maintained
 Usage (from the repository root, with the scanoficus-ml checkout and its virtualenv):
 
     PYTHONDONTWRITEBYTECODE=1 ~/src/scanoficus-ml/.venv/bin/python \\
-        packages/detector-nn/scripts/package_model.py [--ml ~/src/scanoficus-ml]
+        packages/detector-nn/scripts/package_model.py [--ml ~/src/scanoficus-ml] \\
+        [--decision docquadnet4=decision-4b.json]
+
+The decision is one swappable file: the bundle module and `bundle.json` take everything the
+runtime needs from it, so another decision for the same networks changes nothing else.
 """
 
 from __future__ import annotations
@@ -89,6 +95,25 @@ BUNDLES = {
         "target": "package",
     },
 }
+
+#: Default decision file in export/<decision>/.
+DECISION_FILE = "decision.json"
+
+
+def pinned_decision(ml: Path, spec: dict, file: str, main_sha: str, refiner_sha: str) -> dict:
+    """The packaged decision: export/<spec.decision>/<file> (same main network and refiner as
+    the bundle), pinned to the weights' SHA-256 and with the name of the export file."""
+    decision = json.loads((ml / "export" / spec["decision"] / file).read_text())
+    assert decision["main"] == spec["main"] and decision["refiner"] == spec["refiner"], decision
+    decision["mainSha256"] = main_sha
+    decision["refinerSha256"] = refiner_sha
+    decision["exportFile"] = f"export/{spec['decision']}/{file}"
+    return decision
+
+
+#: Fields of the decision that the runtime reads (inline in the bundle module).
+DECISION_KEYS = ["main", "refiner", "scales", "features", "weights", "bias", "threshold",
+                 "mainSha256", "refinerSha256"]
 
 COCO_ROLES = {"A": "refiner-training", "B": "decision-fit", "val": "validation"}
 
@@ -183,7 +208,11 @@ def main() -> None:
     parser.add_argument("--flickr-cache", default=str(Path.home() / ".cache" / "scanoficus" / "flickr-oembed.jsonl"))
     parser.add_argument("--keep-credits", action="store_true",
                         help="keep the existing coco-credits.csv (while the Flickr fetch is incomplete)")
+    parser.add_argument("--decision", action="append", default=[], metavar="BUNDLE=FILE",
+                        help=f"decision file in export/<decision>/ for a bundle (default {DECISION_FILE})")
     args = parser.parse_args()
+    decision_files = dict(d.split("=", 1) for d in args.decision)
+    assert all(BUNDLES.get(b, {}).get("decision") for b in decision_files), decision_files
     ml = Path(args.ml)
     sys.path.insert(0, str(ml))
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -202,9 +231,8 @@ def main() -> None:
         main_export = ml / "export" / spec["main"]
         decision = None
         if spec.get("decision"):
-            decision_file = ml / "export" / spec["decision"] / "decision.json"
-            decision = json.loads(decision_file.read_text())
-            assert decision["main"] == spec["main"] and decision["refiner"] == spec["refiner"], decision
+            decision = {"scales": json.loads((ml / "export" / spec["decision"] / decision_files.get(
+                bundle, DECISION_FILE)).read_text())["scales"]}  # pinned below, once the weights are known
             threshold = None  # from the decision
         else:
             threshold = float(json.loads((main_export / "threshold.json").read_text())["threshold"])
@@ -241,8 +269,9 @@ def main() -> None:
                                    "workSide": refiner["workSide"], "coordinates": coordinates}
         if decision:
             # Pin the decision to the weights it was fitted with (added in the package copy).
-            decision["mainSha256"] = main["sha256"]
-            decision["refinerSha256"] = refiner["sha256"]
+            decision = pinned_decision(ml, spec, decision_files.get(bundle, DECISION_FILE),
+                                       main["sha256"], refiner["sha256"])
+            print(f"{bundle}/decision.json: from {decision['exportFile']}")
             (folder / "decision.json").write_text(json.dumps(decision, indent=1) + "\n")
             manifest["decision"] = "decision.json"
             if not args.keep_credits:
@@ -276,9 +305,7 @@ def main() -> None:
             ]
         if decision:
             # Only the fields the runtime reads, inline: no fetch (and no data: URL) for it.
-            keys = ["main", "refiner", "scales", "features", "weights", "bias", "threshold",
-                    "mainSha256", "refinerSha256"]
-            lines += ["  decision: {", *(f"    {k}: {json.dumps(decision[k])}," for k in keys), "  },"]
+            lines += ["  decision: {", *(f"    {k}: {json.dumps(decision[k])}," for k in DECISION_KEYS), "  },"]
         lines += ["};", ""]
         target["ts"].mkdir(parents=True, exist_ok=True)
         (target["ts"] / target["tsName"].format(bundle=bundle)).write_text("\n".join(lines))

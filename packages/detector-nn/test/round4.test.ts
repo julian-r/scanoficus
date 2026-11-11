@@ -228,6 +228,42 @@ describe('round-4 guards', () => {
       async (url: URL | string) => new Response(readFileSync(new URL(String(url)))),
     );
 
+  it('takes a refit decision for the same networks as a file swap (decision-4b)', async () => {
+    // As `package_model.py --decision docquadnet4=decision-4b.json` would package it.
+    const fixture = JSON.parse(
+      readFileSync(new URL('fixtures/decision-4b-round4.json', import.meta.url), 'utf8'),
+    ) as {
+      decision: DecisionSpec;
+      vectors: { features: Record<string, number>; score: number; accept: boolean }[];
+    };
+    const refit = fixture.decision;
+    expect(refit.weights).not.toEqual(spec.weights);
+    expect(refit.mainSha256).toBe(spec.mainSha256);
+    const swapped = createDecision(refit);
+    expect(fixture.vectors.length).toBeGreaterThanOrEqual(18);
+    let differ = 0;
+    for (const v of fixture.vectors) {
+      const score = swapped.scoreFeatures(v.features);
+      expect(Math.abs(score - v.score)).toBeLessThan(1e-12);
+      expect(score > refit.threshold).toBe(v.accept);
+      if (decision.scoreFeatures(v.features) > spec.threshold !== v.accept) differ++;
+    }
+    // The vectors include frames on which the two decisions disagree.
+    expect(differ).toBeGreaterThan(0);
+    serveFiles();
+    const loaded = await loadBundle({ ...DOCQUADNET4, decision: refit });
+    expect(loaded.decision?.spec.weights).toEqual(refit.weights);
+    expect(loaded.decision?.spec.threshold).toBe(refit.threshold);
+    // Self-hosted: the same bundle.json with the other decision.json next to it.
+    vi.stubGlobal('fetch', async (url: URL | string) =>
+      String(url).endsWith('/decision.json')
+        ? new Response(JSON.stringify(refit))
+        : new Response(readFileSync(new URL(String(url)))),
+    );
+    const hosted = await loadBundle(new URL('../models/docquadnet4/bundle.json', import.meta.url));
+    expect(hosted.decision?.spec.bias).toBe(refit.bias);
+  });
+
   it('loadBundle rejects a decision pinned to other weights', async () => {
     serveFiles();
     const loaded = await loadBundle(DOCQUADNET4);

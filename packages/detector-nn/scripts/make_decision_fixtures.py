@@ -22,6 +22,11 @@ scores (decision-only test).
 
 Writes `test/fixtures/round<N>.json` (and `decision-near.json` for round 3,
 `decision-near-round4.json` for round 4). Usage: see make_fixtures.py (same virtualenv).
+
+`--decision FILE` (another decision file in export/<bundle>/ for the same networks, e.g.
+`decision-4b.json`): writes only `test/fixtures/<stem>-round<N>.json` with that decision as
+`package_model.py --decision` would package it (pinned to the packaged weights) and its
+decision-only vectors, so swapping the file is tested.
 """
 
 from __future__ import annotations
@@ -60,6 +65,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ml", default=str(Path.home() / "src" / "scanoficus-ml"))
     parser.add_argument("--variant", choices=sorted(VARIANTS), default="docquadnet4")
+    parser.add_argument("--decision", help="another decision file in export/<variant>/ (decision-only fixture)")
     args = parser.parse_args()
     sys.path.insert(0, args.ml)
     import cv2
@@ -82,6 +88,40 @@ def main() -> None:
         return graph, weights
 
     cfg = json.loads((folder / manifest["decision"]).read_text())
+
+    def decision_vectors(cfg: dict) -> tuple[list[dict], list[dict]]:
+        """Decision-only vectors near cfg's threshold from scanoficus-ml's validation feature
+        caches (cache/verify/*-<tag>.json, the round's features), plus vectors with |z| > 12."""
+        vectors = []
+        for f in sorted((Path(args.ml) / "cache" / "verify").glob(f"*-{variant['tag']}.json")):
+            for e in json.loads(f.read_text()):
+                feats = {n: float(e["f"][n]) for n in cfg["features"]}
+                score = cfg["bias"] + sum(
+                    wk * (min(max(feats[n], -12.0), 12.0) if n == "z" else feats[n])
+                    for n, wk in zip(cfg["features"], cfg["weights"])
+                )
+                vectors.append({"set": f.stem, "id": e["id"], "features": feats, "score": score,
+                                "accept": bool(score > cfg["threshold"])})
+        near = sorted(vectors, key=lambda v: abs(v["score"] - cfg["threshold"]))[:16]
+        clipped = [v for v in vectors if v["features"]["z"] > 12][:2] + [v for v in vectors if v["features"]["z"] < -12][:2]
+        return near, clipped
+
+    if args.decision:
+        from package_model import BUNDLES, DECISION_KEYS, pinned_decision
+
+        other = pinned_decision(Path(args.ml), BUNDLES[args.variant], args.decision,
+                                cfg["mainSha256"], cfg["refinerSha256"])
+        near, clipped = decision_vectors(other)
+        out = FIXTURES / f"{Path(args.decision).stem}-round{variant['round']}.json"
+        out.write_text(json.dumps({
+            "generator": f"packages/detector-nn/scripts/make_decision_fixtures.py --variant {args.variant} --decision {args.decision}",
+            "source": f"scanoficus-ml {other['exportFile']}; vectors from cache/verify/*-{variant['tag']}.json",
+            "decision": {k: other[k] for k in DECISION_KEYS},
+            "vectors": near + clipped,
+        }, indent=1) + "\n")
+        print(f"{out.name}: {len(near)} vectors near the threshold, {len(clipped)} with |z| > 12")
+        return
+
     main_graph, main_w = load(manifest["main"]["graph"])
     ref_graph, ref_w = load(manifest["refiner"]["graph"])
     log: list[dict] = []
@@ -179,21 +219,8 @@ def main() -> None:
         cases.append(case(f"blend{a:04d}-seed{seed}-{name0}", w0, h0, page0, text0, seed, "default", a))
     cases.append(case(*WHITE, style="white"))
 
-    # Decision-only vectors near the threshold from scanoficus-ml's validation feature caches
-    # (cache/verify/*-<tag>.json, the features the decision was fitted on), plus vectors with
-    # |z| > 12 (the clip).
-    vectors = []
-    for f in sorted((Path(args.ml) / "cache" / "verify").glob(f"*-{variant['tag']}.json")):
-        for e in json.loads(f.read_text()):
-            feats = {n: float(e["f"][n]) for n in cfg["features"]}
-            score = cfg["bias"] + sum(
-                wk * (min(max(feats[n], -12.0), 12.0) if n == "z" else feats[n])
-                for n, wk in zip(cfg["features"], cfg["weights"])
-            )
-            vectors.append({"set": f.stem, "id": e["id"], "features": feats, "score": score,
-                            "accept": bool(score > cfg["threshold"])})
-    near = sorted(vectors, key=lambda v: abs(v["score"] - cfg["threshold"]))[:16]
-    clipped = [v for v in vectors if v["features"]["z"] > 12][:2] + [v for v in vectors if v["features"]["z"] < -12][:2]
+    # Decision-only vectors of the packaged decision.
+    near, clipped = decision_vectors(cfg)
     decision_out.write_text(json.dumps({
         "generator": f"packages/detector-nn/scripts/make_decision_fixtures.py --variant {args.variant}",
         "source": f"scanoficus-ml cache/verify/*-{variant['tag']}.json",
