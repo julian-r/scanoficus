@@ -12,7 +12,6 @@ import {
   createNnDetector,
   cropPlan,
   type DecisionSpec,
-  FLOAT16_SCORE_OFFSET,
   loadBundle,
   type NnBundle,
   type PresenceSignals,
@@ -121,9 +120,9 @@ describe('round-3 bundle', () => {
       /es_min/,
     );
     expect(decision.rule({ ...signals, refiner: null })).toBe(0);
-    // float16 frames get the measured offset.
+    // No precision-dependent offset: the float16 bias depends on the GPU (README).
     const f16 = decision.score({ ...signals, precision: 'float16' } as PresenceSignals);
-    expect((f16?.score ?? 0) - (r?.score ?? 0)).toBeCloseTo(FLOAT16_SCORE_OFFSET, 12);
+    expect(f16?.score).toBe(r?.score);
   });
 });
 

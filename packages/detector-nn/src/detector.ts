@@ -44,8 +44,8 @@ export interface PresenceSignals {
   /** The detector's threshold. */
   threshold: number;
   /**
-   * WebGL2 activation precision the frame's networks ran with, or null on the CPU (round-3
-   * decisions add `FLOAT16_SCORE_OFFSET` on float16).
+   * WebGL2 activation precision the frame's networks ran with, or null on the CPU (float16
+   * scores near a decision threshold vary by GPU; see the README).
    */
   precision: GlPrecision | null;
 }

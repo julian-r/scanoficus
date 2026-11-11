@@ -36,26 +36,13 @@ export interface Decision {
   threshold: number;
   /** Presence rule returning `sigmoid(score)` (0 if the refiner did not run). */
   rule: PresenceRule;
-  /**
-   * The linear score of one frame (with {@link FLOAT16_SCORE_OFFSET} if it ran on float16
-   * activations) and its features, or null without refiner outputs.
-   */
+  /** The linear score of one frame and its features, or null without refiner outputs. */
   score(signals: PresenceSignals): { score: number; features: Record<string, number> } | null;
   /** The linear score of given feature values (`z` unclipped; the decision clips it). */
   scoreFeatures(features: Record<string, number>): number;
 }
 
 const sigmoid = (x: number) => 1 / (1 + Math.exp(-x));
-
-/**
- * Added to the decision score when the frame ran on WebGL2 with float16 activations. Measured in
- * `pnpm check:nn` (Apple M5 Pro, ANGLE Metal) on the 21 round-3 scenes: float16 − float32 score
- * mean −0.14, standard deviation 0.22 (clear pages −0.06 ± 0.10, faint near-threshold pages
- * −0.23 ± 0.27). The offset removes the mean; the spread remains, so float16 decisions within
- * about ±0.7 of the threshold can still differ from float32 (2–4 % of the validation frames
- * lie within 0.3–0.66 of it).
- */
-export const FLOAT16_SCORE_OFFSET = 0.14;
 
 /**
  * The features `verify.features` defines and the decision can use; each needs only the main
@@ -119,8 +106,7 @@ export function createDecision(spec: DecisionSpec): Decision {
       if (value === null) return null;
       values[name] = value;
     }
-    const offset = signals.precision === 'float16' ? FLOAT16_SCORE_OFFSET : 0;
-    return { score: scoreFeatures(values) + offset, features: values };
+    return { score: scoreFeatures(values), features: values };
   };
   return {
     spec,
