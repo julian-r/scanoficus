@@ -349,7 +349,8 @@ Metrics follow the Python photo scorer (`scanoficus-datasets/bench/metrics.py`):
 per-photo reference rectangle (the mean opposite side lengths of the ground truth; the JI does
 not depend on that choice), and the IoU of the full quads without clipping to the image.
 
-**Cross-check with the Python scorer (frozen baseline `5d6b0a3`).** The Python bench decodes
+**Cross-check with the Python scorer (frozen baseline `5d6b0a3`; scanoficus-datasets commit
+`6ae09ae`, `results/photo-bench.md`).** The Python bench decodes
 with OpenCV (`imread`, EXIF applied) and runs the same detector at 384:
 
 - _Metrics:_ its classic-384 predictions, imported with `bench:import` and scored by this
