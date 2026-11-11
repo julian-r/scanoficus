@@ -187,13 +187,36 @@ image diagonal. Times are measured with Node 26 on an Apple-silicon Mac:
 The synthetic sheets have perfectly straight edges, so these corner errors are far lower than
 real photos will give. Every false positive in the document-free class is a uniform
 rectangular object (a book, a box): an edge-based detector cannot tell such objects from
-paper. Evaluation on SmartDoc 2015 is on the roadmap.
+paper.
+
+## Detector quality (public datasets)
+
+`pnpm bench` runs the detector with default options on real video frames. The datasets are
+fetched with `pnpm bench:fetch` and stored outside the repository. The table shows the
+official SmartDoc Jaccard index (JI) at the default long side of 384 px:
+
+| dataset                                  | scanoficus |  best published, classic | best published, learned |
+| ---------------------------------------- | ---------: | -----------------------: | ----------------------: |
+| SmartDoc 2015 Ch. 1, all 24,889 frames   |      0.636 |             0.972 (LRDE) |     0.992 (HU-PageScan) |
+| SmartDoc 2015, backgrounds 1–4           |      0.709 |    0.987 (Tropin et al.) |                       – |
+| SmartDoc 2015, background 5 (clutter)    |      0.001 |             0.861 (LRDE) |          0.986 (LDRNet) |
+| MIDV-500, 10 of 50 types (3,000 frames)  |      0.789 | 0.906 (Tropin, 50 types) |                       – |
+| MIDV-2019, 10 of 50 types (1,200 frames) |      0.690 |                        – |                       – |
+
+The detector takes 4.3 ms per frame at 384 px, and corners are accurate when it finds the
+document. About 40 % of the SmartDoc failures come from the minimum-area and score thresholds
+or from picking the table outline. The rest are clutter, stacked papers, low contrast with
+glare, fingers over an edge, and documents leaving the frame. See
+[docs/benchmarks.md](docs/benchmarks.md) for the method, licenses, per-background tables, the
+comparison with published methods and the failure analysis.
 
 ## Roadmap
 
 - Real-device testing and tuning on iOS and Android, following the release gate in the
   platform notes.
-- Evaluation on public datasets (SmartDoc 2015 Ch.1, then MIDV after a license review).
+- Detector tuning against the public-dataset benchmark (minimum area, size preference,
+  ranking, low-contrast edges); see the failure analysis in
+  [docs/benchmarks.md](docs/benchmarks.md).
 - OCR adapters, lazy-loaded: `@scanoficus/ocr-tesseract`, then PaddleOCR via
   `@scanoficus/ocr-onnx`, plus searchable PDFs with an invisible text layer.
 - An optional ML detector plugin (`@scanoficus/detector-ml`) behind the `DocumentDetector`
@@ -212,6 +235,8 @@ pnpm test        # Vitest (core in Node, elements/react in happy-dom)
 pnpm build       # libraries (tsdown) + demo (Vite)
 pnpm size        # size-limit
 pnpm eval        # synthetic detector benchmark; failure images go to packages/core/eval-out/
+pnpm bench:fetch # download SmartDoc 2015 / MIDV-500 / MIDV-2019 to ~/datasets/scanoficus
+pnpm bench       # real-data detector benchmark; then pnpm bench:report, pnpm bench:montage
 pnpm dev:demo    # demo dev server (use https or localhost for camera access)
 ```
 
