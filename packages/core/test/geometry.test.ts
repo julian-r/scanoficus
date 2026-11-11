@@ -248,6 +248,22 @@ describe('estimateOutputSize', () => {
     expect(nearSquare.width / nearSquare.height).toBeCloseTo(1 / 0.9, 2);
   });
 
+  it('never exceeds the caps through integer rounding', () => {
+    // Unrounded area 11,999,676.8 is below the cap; rounding up gave 3465 × 3464 = 12,002,760.
+    const rect: Quad = [
+      { x: 0, y: 0 },
+      { x: 3464.51, y: 0 },
+      { x: 3464.51, y: 3463.6 },
+      { x: 0, y: 3463.6 },
+    ];
+    const size = estimateOutputSize(rect, { maxPixels: 12_000_000 });
+    expect(size.width * size.height).toBeLessThanOrEqual(12_000_000);
+    expect(size.width).toBeGreaterThanOrEqual(3463);
+    expect(size.height).toBeGreaterThanOrEqual(3462);
+    const long = estimateOutputSize(rect, { maxLongSide: 3464.2 });
+    expect(Math.max(long.width, long.height)).toBeLessThanOrEqual(3464.2);
+  });
+
   it('clamps to maxLongSide preserving aspect', () => {
     const size = estimateOutputSize(scaleQuad(square, 100), { maxLongSide: 250 });
     expect(size).toEqual({ width: 250, height: 250 });

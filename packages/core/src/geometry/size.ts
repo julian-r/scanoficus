@@ -45,17 +45,22 @@ export function estimateOutputSize(
       else width = height * ratio;
     }
   }
+  const { maxLongSide, maxPixels } = options;
   let k = 1;
-  if (options.maxLongSide !== undefined)
-    k = Math.min(k, options.maxLongSide / Math.max(width, height));
-  if (options.maxPixels !== undefined)
-    k = Math.min(k, Math.sqrt(options.maxPixels / (width * height)));
-  // Floor when scaling down so that rounding never exceeds the caps.
-  const round = k < 1 ? Math.floor : Math.round;
-  return {
-    width: Math.max(1, round(width * k)),
-    height: Math.max(1, round(height * k)),
-  };
+  if (maxLongSide !== undefined) k = Math.min(k, maxLongSide / Math.max(width, height));
+  if (maxPixels !== undefined) k = Math.min(k, Math.sqrt(maxPixels / (width * height)));
+  let w = Math.max(1, Math.round(width * k));
+  let h = Math.max(1, Math.round(height * k));
+  // Rounding up can overshoot the caps by a pixel row/column: shave off the side whose
+  // rounding added the most until the integer size fits.
+  const fits = () =>
+    (maxLongSide === undefined || Math.max(w, h) <= maxLongSide) &&
+    (maxPixels === undefined || w * h <= maxPixels);
+  while (!fits() && (w > 1 || h > 1)) {
+    if (h <= 1 || (w > 1 && w / width >= h / height)) w--;
+    else h--;
+  }
+  return { width: w, height: h };
 }
 
 /**
