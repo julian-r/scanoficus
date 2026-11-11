@@ -140,6 +140,37 @@ describe('ScannerController', () => {
     expect(convexIoU(fallback.quad, scene.quad!)).toBeGreaterThan(0.95);
   });
 
+  it('passes bitmap sources to detectStill as a copy and keeps their size', async () => {
+    const scene = generateScene('perspective', 4, 640, 480);
+    // A bitmap-like source: the controller copies it with createImageBitmap; the detector
+    // consumes the copy like a worker transfer would (the size becomes 0 × 0).
+    const copies: { width: number; height: number; close: () => void }[] = [];
+    vi.stubGlobal('createImageBitmap', async (src: { width: number; height: number }) => {
+      const copy = { width: src.width, height: src.height, close: vi.fn() };
+      copies.push(copy);
+      return copy;
+    });
+    try {
+      const detector = {
+        detect: async () => null,
+        detectStill: async (still: { width: number; height: number }) => {
+          Object.assign(still, { width: 0, height: 0 });
+          return { quad: scaleQuad(scene.quad!, 0.5, 0.5), score: 0.9 };
+        },
+        dispose: () => {},
+      };
+      const { controller } = setup({ detector });
+      // A 320×240 bitmap-like source (no pixels: the fake renderer does not read them).
+      const bitmapLike = { width: 320, height: 240, close() {} };
+      const page = await controller.addImage(bitmapLike as unknown as ImageBitmap);
+      expect(copies).toHaveLength(1);
+      expect(page.quad[0].x).toBeCloseTo(scene.quad![0].x * 0.5, 6);
+      expect(Number.isFinite(page.quad[2].y)).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('toggles torch and auto-capture', async () => {
     const { controller, camera } = setup();
     await controller.start(video);

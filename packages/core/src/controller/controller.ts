@@ -682,8 +682,10 @@ export class ScannerController {
       const detector = this.detector;
       if (detector.detectStill) {
         const still = 'data' in source ? source : await createImageBitmap(source);
+        // Read the size first: a bitmap transferred to a worker is detached (0 × 0) afterwards.
+        const { width: stillWidth, height: stillHeight } = still;
         const detection = await detector.detectStill(still, this.options.detection);
-        return detection && scaleQuad(detection.quad, width / still.width, height / still.height);
+        return detection && scaleQuad(detection.quad, width / stillWidth, height / stillHeight);
       }
     } catch {
       // Fall back to detect() on the downscaled frame (with its own fallback handling).
