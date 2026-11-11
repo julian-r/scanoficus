@@ -8,12 +8,14 @@ this graph, with a plain TypeScript CPU fallback. It plugs into the scanner as a
 - The network predicts 4 corners (also outside the frame) and a document-presence probability.
   It handles cluttered backgrounds, white-on-white, hand-held and partly visible pages, where the
   classic edge detector fails (see "Quality" below).
-- Two model bundles ship in the package: **round 1** (`DOCQUADNET`, the default) and
-  **round 2 with a corner refiner** (`DOCQUADNET2` from `@scanoficus/detector-nn/docquadnet2`):
-  a second, 124k-parameter network that moves each corner onto the true corner from 64×64
-  crops of the full-resolution still (see "Round 2 and the corner refiner").
-- The JavaScript is 18.1 KB min+gzip without the weights. The weights (fp16; round 1 688 kB,
-  round 2 688 kB + refiner 244 kB) ship in the package (`models/<bundle>/`) and are fetched at
+- Two model bundles ship in the package: **round 1** (`DOCQUADNET`, the default of
+  `createNnDetector`) and **round 4** (`DOCQUADNET4` from `@scanoficus/detector-nn/docquadnet4`,
+  the demo's default): a newer main network, a second, 124k-parameter network that moves each
+  corner onto the true corner from 64×64 crops of the frame and scores it, and a verified
+  presence decision (see "Round 4"). Rounds 2 and 3 are no longer in the package; the demo keeps
+  them for comparison (`apps/demo/models/`).
+- The JavaScript is 18.4 KB min+gzip without the weights. The weights (fp16; round 1 688 kB,
+  round 4 688 kB + refiner 244 kB) ship in the package (`models/<bundle>/`) and are fetched at
   runtime; bundlers emit them as content-hashed assets. Each graph names its weights file,
   length and SHA-256, so a graph and weights from different versions never run together.
 - It runs on the main thread and in a Web Worker (`OffscreenCanvas`). A self-test after
@@ -81,22 +83,40 @@ repository from the same commit on. Core is 0.0.x and unpublished, so no semver 
 express that yet: the peer dependency is `>=0.0.0`. Publish both together; the first published
 core version with these features should become the lower bound (e.g. `^0.1.0`).
 
-## Round 2 and the corner refiner
+## Round 4: corner refiner and verified presence decision
 
 ```ts
 import { createNnDetectorWorker } from '@scanoficus/detector-nn';
-import { DOCQUADNET2 } from '@scanoficus/detector-nn/docquadnet2';
+import { DOCQUADNET4 } from '@scanoficus/detector-nn/docquadnet4';
 
 const scanner = new ScannerController({
-  createDetector: () => createNnDetectorWorker({ bundle: DOCQUADNET2 }),
+  createDetector: () => createNnDetectorWorker({ bundle: DOCQUADNET4, precision: 'float32' }),
+  detection: { maxSide: 768 }, // as in the demo; the refiner works on its own 1600-px image
 });
 ```
 
-Round 2 is opt-in. On a private iPhone set (a thin white receipt on a white table) round 2 +
-refiner reached an IoU of 0.72 against 0.81 for round 1 + edge refinement: the refiner pulled a
-corner out to the stronger edge of the table. Round 1 (with refinement, or in the classic-first
-hybrid) stays the default until round 2 does at least as well on real phone photos.
+Round 4 is the demo's default where WebGL2 renders to float32 textures (see "Precision" below;
+elsewhere the demo uses the classic detector). Offline, held-out, Python pipeline, round 4
+alone against the previous default (classic first, then round 1 + edge refinement):
 
+| set                                   | round 4 | hybrid with round 1 |
+| ------------------------------------- | ------: | ------------------: |
+| SmartDoc held-out (JI)                |   0.983 |               0.976 |
+| MIDV-500 (JI)                         |   0.877 |               0.872 |
+| MIDV-2019 (JI)                        |   0.860 |               0.844 |
+| Dizaj test (JI)                       |   0.882 |               0.705 |
+| RWMD (JI)                             |   0.685 |               0.654 |
+| photos without a document with a quad |   6.6 % |              10.7 % |
+| private iPhone receipt set (IoU)      |   0.888 |               0.814 |
+
+`createNnDetector()` without a `bundle` still loads round 1, so existing setups do not change.
+
+- **Bundle.** Main network `docquadnet4` (scanoficus-ml run `r4-m6`, fine-tuned from round 2's
+  main network with faint-edge scenes added), refiner `docquadnet4-refiner` (run `r4-rf6`,
+  fine-tuned from round 3's refiner; 3 outputs per crop: two offsets and the corner-confidence
+  logit) and the decision of `export/docquadnet4/decision.json` (same features as round 3, new
+  coefficients and threshold). The bundle module carries the decision's runtime fields inline
+  (no file is fetched for it); `models/docquadnet4/decision.json` is the copy for self-hosting.
 - **Pipeline** (a port of `scanoficus_ml/refiner.py` and the `net:` step of
   `scanoficus_ml/pipeline.py`): main network → raw quad → the frame area-downscaled to a long
   side of 1600 (one `cv2.resize(INTER_AREA)`; smaller frames are used as they are) → a pyramid
@@ -104,12 +124,13 @@ hybrid) stays the default until round 2 does at least as well on real phone phot
   so the bisector of the corner points to the crop's bottom right; side 0.4 × √area, then 0.2 ×
   √area), sampled bilinearly with clamp-to-edge from the pyramid level whose pixel is at most
   1.5 crop pixels → the refiner network (the 4 crops as one batch) → offset per corner, rotated
-  back. 2 passes, then the presence decision (round 2: presence > 0.98).
-- **Stills.** `detectStill(frame)` runs the refiner (by default). The `ScannerController`
-  calls it with the full-resolution still for the re-detection after capture and for
-  `addImage()` (core hook `DocumentDetector.detectStill`, additive and optional). Live
-  `detect()` returns the raw network quad unless `refiner: { live: true }` (it costs two
-  refiner passes per frame, see the speed table). `refiner: false` never runs it.
+  back. 2 passes, then the presence decision (round 4: the decision below).
+- **Stills.** `detectStill(frame)` runs the refiner. The `ScannerController` calls it with the
+  full-resolution still for the re-detection after capture and for `addImage()` (core hook
+  `DocumentDetector.detectStill`, additive and optional). A decision bundle (round 4) also
+  refines every live frame, because the decision needs the corner scores (see below). For a
+  bundle without a decision, live `detect()` returns the raw network quad unless
+  `refiner: { live: true }`; `refiner: false` never runs the refiner.
 - **WebGL2.** One context runs both networks. The frame texture of the main network's run is
   reused: one area draw for the work image (a halving when the factor is exactly 2), halvings
   for the pyramid (built once per frame), one crop draw per corner into the refiner's input,
@@ -123,7 +144,7 @@ hybrid) stays the default until round 2 does at least as well on real phone phot
   `fma` (GLSL ES 3.00) and can differ by one level on rare pixels: of the 1,179,648 crop
   values of the test frames, none on Apple M5 (ANGLE Metal) and 22 under SwiftShader. The work image is bit-exact on the CPU; on the
   GPU its area filter is float32 as for the main network.
-- **Presence decision.** `presence: (signals) => score` replaces the rule
+- **Custom presence rules.** `presence: (signals) => score` replaces the rule
   `presence > threshold`. It gets the presence logit and probability, the raw quad, the refined
   quad and the refiner's offsets per pass, the frame (still open; do not close it), whether it
   is a still, and the threshold. The frame reports a document if the returned score exceeds the
@@ -144,73 +165,63 @@ hybrid) stays the default until round 2 does at least as well on real phone phot
   the Python pipeline (the browser's filter instead of one area resize). RGBA stills are used
   as they are.
 - **Bundles.** `loadBundle(source)` loads a main network and an optional refiner and checks
-  every weights file. `source` is a `BundleSource` (`DOCQUADNET`, `DOCQUADNET2`, or your own
-  URLs and refiner settings) or the URL of a self-hosted `bundle.json` (in each
+  every weights file. `source` is a `BundleSource` (`DOCQUADNET`, `DOCQUADNET4`, or your own
+  URLs, refiner settings and decision) or the URL of a self-hosted `bundle.json` (in each
   `models/<bundle>/` folder). Pass the source or the loaded bundle as `bundle`.
 
-## Round 3: the verified presence decision
+### The verified presence decision
 
-```ts
-import { createNnDetectorWorker } from '@scanoficus/detector-nn';
-import { DOCQUADNET3 } from '@scanoficus/detector-nn/docquadnet3';
-
-createDetector: () => createNnDetectorWorker({ bundle: DOCQUADNET3 }),
-```
-
-- **Bundle.** The round-2 main network (its files in `models/docquadnet2/` are shared, not
-  copied), a refiner with a third output per crop, the corner-confidence logit
-  (`docquadnet3-refiner`; offsets as round 2), and the decision of scanoficus-ml's
-  `decision.json`. The bundle module carries the decision's runtime fields inline (no file is
-  fetched for it); `models/docquadnet3/decision.json` is the copy for self-hosting.
 - **Pinned.** The packaged decision records the SHA-256 of the main network's and the refiner's
   weights it was fitted with (`mainSha256`, `refinerSha256`, added by `package_model.py`).
   `loadBundle` rejects a decision whose hashes do not match the loaded weights, or that has
   none.
-- **Decision** (`scanoficus_ml/detectors.py` `OwnPipeline3`, features of
+- **Decision** (`scanoficus_ml/detectors.py` `OwnPipeline3`, introduced in round 3, features of
   `scanoficus_ml/verify.py`): `score = bias + Σ weights[k] · features[k]`, a document if
   `score > threshold`, with the features `z` (main presence logit, clipped to ±12), `cl_min` /
   `cl_mean` (min / mean of the 4 pass-2 corner logits) and `cl1_min` (min of the pass-1
   logits). It is the bundle's built-in presence rule, built from the file at load time
   (`createDecision`): new coefficients or a new threshold are a file swap; a feature this
   runtime cannot compute is refused with an error naming it. `Detection.score` is
-  `sigmoid(score)` and the bundle's threshold `sigmoid(threshold)` (0.222), as in Python. A
+  `sigmoid(score)` and the bundle's threshold `sigmoid(threshold)` (round 4: 0.199), as in
+  Python. The threshold lets at most 5 % of scanoficus-ml's COCO calibration half yield a quad. A
   `presence` option still replaces the rule. An explicit `threshold` is compared with
   `sigmoid(score)` (a warning says so).
-- **The refiner runs on live frames too** (the decision needs its corner scores), so round 3
-  costs about 7 ms more per live frame than round 1 on an M5 Pro, more on phones (see the
-  speed table). Turning the refiner off (`refiner: false`, `live: false` or `still: false`)
+- **The refiner runs on live frames too** (the decision needs its corner scores), so round 4
+  costs about 2–6 ms more per live frame than round 1 on an M5 Pro, more on phones (see the
+  live-cost table). Turning the refiner off (`refiner: false`, `live: false` or `still: false`)
   makes `ready()` throw for a decision bundle, unless a `presence` rule is given: without the
-  corner scores the decision would reject every frame. Round 3
-  starts the refiner from the network's normalized corners times the work-image size and maps
+  corner scores the decision would reject every frame. Decision bundles
+  start the refiner from the network's normalized corners times the work-image size and maps
   the result back per axis, as `verify.run_pipeline` does (round 2: frame pixels times one
   scale, as `pipeline.py`); `RefinerSettings.coordinates` selects this.
-- **Precision: prefer float32.** float32 render targets (the default where available) reproduce
-  the NumPy score within 0.05 on clear pages (0.1 on faint near-threshold pages). With float16
-  activations the corner logits move by up to 0.05 and the score shifts by an amount that
-  depends on the GPU: float16 − float32 averaged −0.14 (sd 0.22) on Apple M5 / Metal and about
-  −0.02 (sd 0.13) on SwiftShader (21 test scenes each), so no constant correction fits and
-  float16 decisions near the threshold vary by GPU (on Metal 2 of the 8 near-threshold test
-  scenes flipped). On scanoficus-ml's validation sets 0.3 % of the frames lie within 0.05 of
-  the threshold, 1.0 % within 0.15, 2.2 % within 0.3 and 4.3 % within 0.66 (0–11 % by set);
-  those are the frames whose float16 decision may differ. `PresenceSignals.precision` tells a
+- **Precision: use float32** (`precision: 'float32'`; `'auto'` picks it where available).
+  float32 render targets reproduce the NumPy score within 0.05 on clear pages (0.1 on faint
+  near-threshold pages). With float16 activations the corner logits move by up to 0.06 and the
+  score shifts by an amount that depends on the GPU (round 4: float16 − float32 averaged −0.05,
+  sd 0.12, on Apple M5 / Metal and −0.03, sd 0.09, on SwiftShader; round 3: −0.14 / −0.02), so
+  no constant correction fits and float16 decisions near the threshold vary by GPU (on Metal 2
+  of the 8 near-threshold test scenes flipped in both rounds). On scanoficus-ml's round-3
+  validation sets 0.3 % of the frames lay within 0.05 of the threshold, 1.0 % within 0.15,
+  2.2 % within 0.3 and 4.3 % within 0.66 (0–11 % by set); those are the frames whose float16
+  decision may differ. The demo therefore uses round 4 only with float32 render targets. `PresenceSignals.precision` tells a
   custom rule which precision a frame ran with. `pnpm check:nn` prints the float16 shift of the
   GPU it runs on.
 
 ### Options (`createNnDetector`, `createNnDetectorWorker`)
 
-| option                                               | default      | meaning                                                                                                                                                                                                                                                                                                                                   |
-| ---------------------------------------------------- | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bundle`                                             | `DOCQUADNET` | model bundle: a `BundleSource`, a `bundle.json` URL, or a loaded `NnBundle` (`createNnDetector` only). Its threshold is the default `threshold`.                                                                                                                                                                                          |
-| `refiner`                                            | stills       | `{ live, still }`, `true` for both, `false` for neither; only with a bundle that has a refiner. Defaults: `{ live: false, still: true }`; for a bundle with a decision (round 3) `{ live: true, still: true }`, which costs about 7 ms per live frame on an M5 Pro (more on phones), and turning it off without a `presence` rule throws. |
-| `presence`                                           | threshold    | presence rule `(signals) => score` (`createNnDetector`); `presenceModule` (URL of a module exporting it) for `createNnDetectorWorker`.                                                                                                                                                                                                    |
-| `graphUrl`, `weightsUrl`                             | package      | the graph JSON and the weights. Default: the files in the package's `models/` (`DOCQUADNET_GRAPH_URL`, `DOCQUADNET_WEIGHTS_URL`). With only `graphUrl`, the weights file named in the graph is loaded from next to it. `createNnDetector` also accepts `model` (from `loadModel`).                                                        |
-| `threshold`                                          | bundle       | presence threshold, chosen on validation: round 1 0.85 (on 785 real photos without a document, 8.8 % pass at 0.85, 7.1 % at 0.9 and 4.6 % at 0.95); round 2 0.98 (at most 5 % of the COCO calibration half; 4.6 % on the report half).                                                                                                    |
-| `backend`                                            | `'auto'`     | `'auto'`: WebGL2, with the CPU when WebGL2 or float render targets are missing, when a run fails, and for frames during a context loss. `'webgl2'`: no fallback (errors reject). `'cpu'`: CPU only.                                                                                                                                       |
-| `precision`                                          | `'auto'`     | storage of WebGL2 activations: `'float32'` if renderable (`EXT_color_buffer_float`), else `'float16'`. Arithmetic is always float32.                                                                                                                                                                                                      |
-| `refine`                                             | `false`      | `true` or `RefineOptions`: network first, then classic edge refinement near the quad.                                                                                                                                                                                                                                                     |
-| `canvas`                                             | new canvas   | canvas for the WebGL2 context (`createNnDetector` only). Default: an `OffscreenCanvas`, or a `<canvas>` where `OffscreenCanvas` has no WebGL2 (Safari 16.4–16.x).                                                                                                                                                                         |
-| `clipToFrame`                                        | `true`       | clamp the quad to the frame; `null` for non-convex or degenerate quads.                                                                                                                                                                                                                                                                   |
-| `workerUrl`, `worker`, `timeoutMs`, `transferPixels` | see the core | as in `createDetectorWorker` from `@scanoficus/core/worker`. The default worker URL is `new URL('./worker-entry.js', import.meta.url)`. `timeoutMs` defaults to 30 s, because the first request includes the model download.                                                                                                              |
+| option                                               | default      | meaning                                                                                                                                                                                                                                                                                                                                     |
+| ---------------------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bundle`                                             | `DOCQUADNET` | model bundle: a `BundleSource`, a `bundle.json` URL, or a loaded `NnBundle` (`createNnDetector` only). Its threshold is the default `threshold`.                                                                                                                                                                                            |
+| `refiner`                                            | stills       | `{ live, still }`, `true` for both, `false` for neither; only with a bundle that has a refiner. Defaults: `{ live: false, still: true }`; for a bundle with a decision (round 4) `{ live: true, still: true }`, which costs about 2–6 ms per live frame on an M5 Pro (more on phones), and turning it off without a `presence` rule throws. |
+| `presence`                                           | threshold    | presence rule `(signals) => score` (`createNnDetector`); `presenceModule` (URL of a module exporting it) for `createNnDetectorWorker`.                                                                                                                                                                                                      |
+| `graphUrl`, `weightsUrl`                             | package      | the graph JSON and the weights. Default: the files in the package's `models/` (`DOCQUADNET_GRAPH_URL`, `DOCQUADNET_WEIGHTS_URL`). With only `graphUrl`, the weights file named in the graph is loaded from next to it. `createNnDetector` also accepts `model` (from `loadModel`).                                                          |
+| `threshold`                                          | bundle       | presence threshold, chosen on validation: round 1 0.85 (on 785 real photos without a document, 8.8 % pass at 0.85, 7.1 % at 0.9 and 4.6 % at 0.95); round 4: its decision (see above).                                                                                                                                                      |
+| `backend`                                            | `'auto'`     | `'auto'`: WebGL2, with the CPU when WebGL2 or float render targets are missing, when a run fails, and for frames during a context loss. `'webgl2'`: no fallback (errors reject). `'cpu'`: CPU only.                                                                                                                                         |
+| `precision`                                          | `'auto'`     | storage of WebGL2 activations: `'float32'` if renderable (`EXT_color_buffer_float`), else `'float16'`. Arithmetic is always float32.                                                                                                                                                                                                        |
+| `refine`                                             | `false`      | `true` or `RefineOptions`: network first, then classic edge refinement near the quad.                                                                                                                                                                                                                                                       |
+| `canvas`                                             | new canvas   | canvas for the WebGL2 context (`createNnDetector` only). Default: an `OffscreenCanvas`, or a `<canvas>` where `OffscreenCanvas` has no WebGL2 (Safari 16.4–16.x).                                                                                                                                                                           |
+| `clipToFrame`                                        | `true`       | clamp the quad to the frame; `null` for non-convex or degenerate quads.                                                                                                                                                                                                                                                                     |
+| `workerUrl`, `worker`, `timeoutMs`, `transferPixels` | see the core | as in `createDetectorWorker` from `@scanoficus/core/worker`. The default worker URL is `new URL('./worker-entry.js', import.meta.url)`. `timeoutMs` defaults to 30 s, because the first request includes the model download.                                                                                                                |
 
 ### Hybrids
 
@@ -225,7 +236,8 @@ createDetector: () => createNnDetectorWorker({ bundle: DOCQUADNET3 }),
   measured: set `detection.maxSide` to 768–1024 when you use refinement. Gradients are computed
   only where the profiles sample. Cost per frame: +1.5 ms for 384-px frames, +11 ms for
   1280×720 RGBA frames (most of it is the full-frame gray conversion and downscale).
-- **Classic first, network on doubt** (`createHybridDetector`; the demo's default). Offline
+- **Classic first, network on doubt** (`createHybridDetector`; the demo's default before round
+  4). Offline
   (scanoficus-datasets `results/hybrid.md`), classic v3 with `CONFIDENT_SCORE` 0.80, else round 1
   - edge refinement (presence > 0.85), had the best JI on every set with documents (SmartDoc
     held-out 0.976, MIDV-500 0.872, MIDV-2019 0.844, Dizaj test 0.705, RWMD 0.654), at 10.7 %
@@ -271,21 +283,20 @@ createDetector: () => createNnDetectorWorker({ bundle: DOCQUADNET3 }),
 
 By default the models come from the package, one folder per bundle:
 
-| folder                | files                                                                                                                                                    | raw / gzip       |
-| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
-| `models/docquadnet/`  | `docquadnet.json`, `docquadnet-9bc8c22c6a4c.bin`, `bundle.json`                                                                                          | 702 kB / 645 kB  |
-| `models/docquadnet2/` | `docquadnet2.json`, `docquadnet2-6ea1c21d6f87.bin`, `docquadnet2-refiner.json`, `docquadnet2-refiner-ed145db94b95.bin`, `bundle.json`                    | 955 kB / 874 kB  |
-| `models/docquadnet3/` | `docquadnet3-refiner.json`, `docquadnet3-refiner-216d024894ca.bin`, `decision.json`, `bundle.json`, `coco-credits.csv` (main network: `../docquadnet2/`) | 1245 kB / 548 kB |
+| folder                | files                                                                                                                                                                      | raw / gzip        |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
+| `models/docquadnet/`  | `docquadnet.json`, `docquadnet-9bc8c22c6a4c.bin`, `bundle.json`                                                                                                            | 702 kB / 645 kB   |
+| `models/docquadnet4/` | `docquadnet4.json`, `docquadnet4-72c2c1e08ed6.bin`, `docquadnet4-refiner.json`, `docquadnet4-refiner-f91211676a5f.bin`, `decision.json`, `bundle.json`, `coco-credits.csv` | 1948 kB / 1193 kB |
 
 They are referenced as `new URL('../models/…', import.meta.url)`. Vite, webpack 5 and other
 bundlers that understand this pattern emit the files as content-hashed assets, so caches
-(including a cache-first service worker) can keep them forever. Round 2 lives in its own entry
-(`@scanoficus/detector-nn/docquadnet2`), so apps that do not import it do not emit its files.
+(including a cache-first service worker) can keep them forever. Round 4 lives in its own entry
+(`@scanoficus/detector-nn/docquadnet4`), so apps that do not import it do not emit its files
+(`coco-credits.csv` is only emitted if you link it, as the demo's footer does).
 Keep `models/LICENSE.md` with them (for example, link it from your app's credits).
 
 To host the files yourself, copy a bundle folder and load its `bundle.json`
-(`bundle: 'https://…/docquadnet2/bundle.json'`; `docquadnet3/bundle.json` refers to the main
-network in `../docquadnet2/`, so copy both folders side by side), or pass `graphUrl` for a main network only (the
+(`bundle: 'https://…/docquadnet4/bundle.json'`), or pass `graphUrl` for a main network only (the
 weights are loaded from the file name in the graph, relative to it). The manifest and the
 graphs are fetched with `cache: 'no-cache'`; the weights' length and SHA-256 are checked against
 their graph (with `crypto.subtle`, which exists only in secure contexts; elsewhere only the
@@ -294,12 +305,12 @@ by about 7 % with gzip and 12 % with brotli; the graphs to 1.5 kB). They are fet
 detector: share one bundle from `loadBundle()` between `createNnDetector` instances. After
 retraining, regenerate `models/` with `scripts/package_model.py`.
 
-**Package size.** Round 2 grows the tarball by 0.87 MB (gzip; 0.96 MB unpacked) compared with
-round 1 alone, round 3 by another 0.55 MB (gzip; 1.25 MB unpacked, of which the COCO
-image list is 0.32 / 0.99 MB). When round 2 becomes the default, drop `models/docquadnet/` from
-the package (`package_model.py` builds each bundle independently) and keep round 1 only where
-it is still needed, for example in the demo's `public/` folder, loaded with
-`bundle: '…/bundle.json'`.
+**Package size.** The tarball is 2.01 MB (gzip; 3.26 MB unpacked, 42 files): round 1 0.65 MB
+gzip, round 4 1.19 MB (of which the COCO image list is 0.32 MB). With rounds 1–3 it was
+2.23 MB (3.52 MB unpacked, 49 files). Rounds 2 and 3 moved to the demo (`apps/demo/models/`,
+loaded from `apps/demo/src/bundles/`), because only its comparison options use them; their
+subpath exports `./docquadnet2` and `./docquadnet3` are gone. `package_model.py` writes each
+bundle to the package or the demo (`target` in its `BUNDLES` table).
 
 ## How it works
 
@@ -337,48 +348,53 @@ it is still needed, for example in the demo's `public/` folder, loaded with
 
 ## Parity and speed
 
-**Round 3** (`test/round3.test.ts`, `pnpm check:nn`; fixtures from
-`scripts/make_round3_fixtures.py`: `verify.run_pipeline` + `features` + the decision with the
+**Round 4** (`test/round4.test.ts`, `pnpm check:nn`; fixtures from
+`scripts/make_decision_fixtures.py`: `verify.run_pipeline` + `features` + the decision with the
 NumPy interpreter as main network and refiner, and `OwnPipeline3` itself with the fp32 ONNX
-exports, on the 12 scenes of the round-2 fixtures, 8 faint near-threshold blends and a white page on a light table):
+exports, on the 12 scenes of the round-2 fixtures, 8 faint near-threshold blends and a white
+page on a light table):
 
 | path (clear pages unless noted)                                 | Apple M5 / Metal    | SwiftShader (CI)    |
 | --------------------------------------------------------------- | ------------------- | ------------------- |
 | CPU: crops from Python's pass inputs                            | bit-exact (SHA-256) | bit-exact           |
-| WebGL2 crops: values differing by one level from the CPU        | 0 of 2,064,384      | 24                  |
-| WebGL2 float32 network on the CPU crops: offsets / corner logit | 1.3·10⁻⁷ / 8.1·10⁻⁶ | 1.0·10⁻⁷ / 6.2·10⁻⁶ |
-| WebGL2 float32 end to end (own crops): offsets / corner logit   | 1.9·10⁻⁷ / 6.2·10⁻⁶ | 7.0·10⁻⁶ / 1.1·10⁻³ |
-| WebGL2 float32 score vs NumPy: clear / faint pages              | 0.011 / 0.042       | 0.005 / 0.061       |
-| WebGL2 float16 score vs NumPy: clear / faint pages              | 0.26 / 0.66         | 0.04 / 0.30         |
-| float16 − float32 score: mean (sd)                              | −0.14 (0.22)        | −0.02 (0.13)        |
-| CPU end to end: score vs NumPy, clear / faint pages             | 0.020 / 0.040       | (same)              |
+| WebGL2 crops: values differing by one level from the CPU        | 0 of 2,064,384      | 22                  |
+| WebGL2 float32 network on the CPU crops: offsets / corner logit | 1.8·10⁻⁷ / 1.1·10⁻⁵ | 2.0·10⁻⁷ / 1.4·10⁻⁵ |
+| WebGL2 float32 end to end (own crops): offsets / corner logit   | 1.7·10⁻⁷ / 1.3·10⁻⁵ | 6.0·10⁻⁵ / 5.9·10⁻³ |
+| WebGL2 float32 score vs NumPy: clear / faint pages              | 0.011 / 0.033       | 0.012 / 0.034       |
+| WebGL2 float16 score vs NumPy: clear / faint pages              | 0.08 / 0.24         | 0.04 / 0.34         |
+| float16 − float32 score: mean (sd)                              | −0.05 (0.12)        | −0.03 (0.09)        |
+| CPU end to end: score vs NumPy, clear / faint pages             | 0.003 / 0.035       | (same)              |
 | accept / reject where the margin exceeds the tolerance          | all equal to NumPy  | all equal to NumPy  |
 
-Tolerances in `check:nn` (float32): the network on identical crops 10⁻⁴; end to end offsets
-10⁻³ and corner logit 4·10⁻³ (GLSL ES 3.00 has no fma, so a GPU may round a few crop pixels
-differently from OpenCV, and the corner logit reacts to single pixels; 3.5× SwiftShader's
-1.1·10⁻³); score 0.05 on clear and 0.1 on faint pages.
+Faint pages are the near-threshold blends, the white page on a light table and the frames
+without a page. Tolerances in `check:nn` (float32): the network on identical crops 10⁻⁴; end to
+end offsets 10⁻³ and corner logit 1.5·10⁻² (GLSL ES 3.00 has no fma, so a GPU may round a few
+crop pixels differently from OpenCV, and the round-4 corner logit reacts to single pixels more
+than round 3's: 5.9·10⁻³ against 1.1·10⁻³ on SwiftShader); score 0.05 on clear and 0.1 on faint
+pages. The near-threshold blends have NumPy margins of −0.50 to +0.48 (round 4 crosses its
+threshold at a blend of about 94/4096 of the page, round 3 at 112); the other scenes score far
+from it (documents +2.1 to +7.2, no-document frames −7.7 and −8.9; threshold −1.39). On Metal
+with float16, 2 of the 8 blends (margins −0.03 and +0.04) flipped.
 
-End to end, the main network's 10⁻⁶ differences move the crops by about 10⁻³ px, which flips
-a few 8-bit crop levels and moves the corner logits by up to a few hundredths; from identical
-crops they agree to 10⁻⁵. All test scenes score far from the threshold (−1.25; documents +2.1
-to +8.1, no-document frames −8.3 to −8.8), so the decisions near the threshold are not
-covered by these fixtures.
+Round 3 (now a demo bundle) is checked the same way (`test/round3.test.ts`, the same
+`check:nn` tolerances, fixtures with `make_decision_fixtures.py --variant docquadnet3`): float32
+score within 0.011 / 0.045 (clear / faint) of NumPy on Metal.
 
-Live cost of round 3 (main network + 2 refiner passes + decision on every frame; same machine
-and run as the table below, WebGL2 float32, warm p50 / p95 ms):
+Live cost of round 4 (main network + 2 refiner passes + decision on every frame; WebGL2
+float32, warm p50 / p95 ms, `pnpm bench:nn` on an Apple M5 Pro):
 
-| frame      | main thread | worker      |
-| ---------- | ----------- | ----------- |
-| 384 × 216  | 9.5 / 12.4  | 10.7 / 13.3 |
-| 768 × 432  | 10.2 / 13.1 | 11.7 / 14.8 |
-| 1280 × 720 | 11.1 / 15.5 | 12.9 / 18.0 |
+| frame      | main thread | worker    |
+| ---------- | ----------- | --------- |
+| 384 × 216  | 4.0 / 7.6   | 7.3 / 7.6 |
+| 768 × 432  | 4.1 / 7.7   | 7.7 / 8.1 |
+| 1280 × 720 | 7.7 / 8.0   | 5.2 / 8.2 |
 
-For comparison in the same run: round 1 alone 1.9 (384) to 5.5 ms, round 1 + edge refinement
-4.9 (384) to 13.9 ms (1280), round 2 + live refiner 9.1–12.0 ms. The hybrid default sends only
-frames with a classic score below 0.80 to the network (35–69 % of the frames offline).
+In the same run: round 1 alone 1.3–4.2 ms, round 1 + edge refinement 3.9 (384) to 11.7 ms
+(1280), round 2 + live refiner 3.4–4.3 ms. So the live refiner and decision add about 2–6 ms
+per frame here; single runs are noisy (the worker at 1280 × 720 was faster than at 768 × 432). Round 3 measured 9.5–12.9 ms in an earlier,
+busier run (round 1 alone was 1.9–5.5 ms there), so compare within one run only.
 
-**Round 2 + refiner**
+**Round 2 + refiner** (now a demo bundle; the refiner pipeline is the same in round 4)
 (`test/refiner.test.ts`, `test/pipeline.test.ts`, `pnpm check:nn`;
 fixtures from `scripts/make_refiner_fixtures.py`, which runs `pipeline.py` with the NumPy
 refiner and with the exported ONNX refiner on the 10 test scenes plus 2000×1500 and
@@ -467,21 +483,24 @@ SmartDoc Jaccard index. This package reproduces that pipeline's outputs (see abo
 | classic (core v3)       |             0.849 |          0.000 |   0.710¹ |     0.655 |                                 6.9 % |
 | DocQuadNet              |             0.950 |          0.884 |    0.792 |     0.793 |                                 8.8 % |
 | DocQuadNet + refinement |             0.973 |          0.887 |    0.808 |     0.813 |                                 8.8 % |
+| DocQuadNet 4 (round 4)² |             0.983 |              – |    0.877 |     0.860 |                                 6.6 % |
 
 ¹ The classic v3 MIDV-500 figure is on the held-out half (5 of the 10 document types); the
 DocQuadNet figures are on all 10 types, none of which it was trained on. The DocQuadNet rows
-were measured against classic v2, before v3 existed; they were not re-run.
+were measured against classic v2, before v3 existed; they were not re-run. ² Main network,
+refiner and decision on its own (scanoficus-ml round 4, held-out); also Dizaj test 0.882 and
+RWMD 0.685. See "Round 4" for the comparison with the classic-first hybrid.
 
-On clean, high-contrast scenes the classic detector is still more precise. The classic-first
-hybrid uses it there.
+On clean, high-contrast scenes the classic detector is more precise than round 1; the
+classic-first hybrid uses it there. Round 4 alone beats that hybrid on every held-out set.
 
 ## License of the weights
 
 The code is BSD-3-Clause (`LICENSE`). The weights (`models/*/*.json`, `models/*/*.bin`) were
-trained by us
-from scratch (no pretrained weights) and are also released under BSD-3-Clause. The training
-data includes frames of the SmartDoc 2015 dataset, whose license requires attribution. Keep
-this notice with the weights:
+trained by us from scratch (no pretrained weights; round 4 fine-tunes our round-2 and round-3
+networks) and are also released under BSD-3-Clause. The training data of both bundles includes
+frames of the SmartDoc 2015 dataset, whose license requires attribution. Keep this notice with
+the weights:
 
 > SmartDoc 2015 Ch. 1 **tuning split only** (datasheet, magazine, patent documents 001–004 on
 > all 5 backgrounds; every 3rd frame = 3,392 frames, downscaled to 640×360) — CC BY 4.0 —
@@ -489,8 +508,8 @@ this notice with the weights:
 > (github.com/jchazalon/smartdoc15-ch1-dataset); attribution must be kept with the weights.
 > License: https://creativecommons.org/licenses/by/4.0/
 
-Rounds 2 and 3 (`models/docquadnet2/`, `models/docquadnet3/`) were also trained on the training
-part of the Dizaj photos, which are CC BY 4.0 as well; keep this notice with those weights:
+Round 4 (`models/docquadnet4/`) was also trained on the training part of the Dizaj photos,
+which are CC BY 4.0 as well; keep this notice with those weights:
 
 > "A New Image Dataset for Document Corner Localization" by Shima Dizaj, Mendeley Data v3,
 > https://doi.org/10.17632/x3nm4cxr83.3, licensed under CC BY 4.0
@@ -500,27 +519,29 @@ part of the Dizaj photos, which are CC BY 4.0 as well; keep this notice with tho
 > Note (Mendeley Data): the dataset's license does not cover content shown in the photos, which
 > can belong to third parties.
 
-Round 3 (`models/docquadnet3/`: its refiner and decision; the main network is round 2's) also
-used COCO photos; keep this notice and `models/docquadnet3/coco-credits.csv` (the image list)
-with those files:
+Round 4 (`models/docquadnet4/`: its refiner and decision) also used COCO photos, the same images
+in the same roles as round 3 (its main network saw none); keep this notice and
+`models/docquadnet4/coco-credits.csv` (the image list) with those files:
 
 > Images from COCO train2017 (Lin et al., "Microsoft COCO: Common Objects in Context", ECCV
 > 2014; https://cocodataset.org; annotations CC BY 4.0, used to select the images), originally
 > from Flickr under CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/) or "no known
 > copyright restrictions" (https://flickr.com/commons/usage/): 6,329 photos without documents;
-> 3,921 trained the round-3 refiner (corner crops), 1,637 fitted the presence decision and 771
-> were used for validation. Changes: cropped (corner crops), resized, rotated and augmented.
-> `docquadnet3/coco-credits.csv` lists each image's COCO id, role, license, Flickr photo page
-> (https://flic.kr/p/…) and, for the 6,223 CC BY 2.0 photos, the author and title as Flickr
-> shows them today (oEmbed, fetched November 2026): 5,150 found, 1,073 no longer on Flickr
-> (author and title unknown; the COCO source URL is listed). 106 photos with "no known copyright
-> restrictions" need no author. Some owners have changed the license on Flickr since COCO
-> collected the photos (column `flickr_license_now`); the license under which COCO obtained
-> them (column `license`) applies to the copies used here.
+> 3,921 trained the refiner (corner crops; round 3, and round 4's refiner fine-tuned from it),
+> 1,637 fitted the presence decision and 771 were used for validation. Changes: cropped (corner
+> crops), resized, rotated and augmented. `docquadnet4/coco-credits.csv` lists each image's COCO
+> id, role, license, Flickr photo page (https://flic.kr/p/…) and, for the 6,223 CC BY 2.0
+> photos, the author and title as Flickr shows them today (oEmbed, fetched November 2026): 5,150
+> found, 1,073 no longer on Flickr (author and title unknown; the COCO source URL is listed). 106
+> photos with "no known copyright restrictions" need no author. Some owners have changed the
+> license on Flickr since COCO collected the photos (column `flickr_license_now`); the license
+> under which COCO obtained them (column `license`) applies to the copies used here.
 
-The other training inputs need no attribution: procedural pages, CC0 textures and HDRIs from
-Poly Haven, and OFL fonts that were only rendered into images. The data manifests are in the
-scanoficus-ml repository. `models/LICENSE.md` carries this notice next to the files.
+The other training inputs need no attribution: procedural pages (round 4 adds synthetic
+faint-edge scenes built from them), CC0 textures and HDRIs from Poly Haven, and OFL fonts that
+were only rendered into images. The data manifests are in the scanoficus-ml repository.
+`models/LICENSE.md` carries this notice next to the files. The demo's rounds 2 and 3 have their
+own notice in `apps/demo/models/LICENSE.md`.
 
 ## Development
 
@@ -535,4 +556,9 @@ $PY packages/detector-nn/scripts/package_model.py
 $PY packages/detector-nn/scripts/make_fixtures.py
 $PY packages/detector-nn/scripts/make_synthetic.py
 $PY packages/detector-nn/scripts/make_refiner_fixtures.py
+$PY packages/detector-nn/scripts/make_decision_fixtures.py                          # round 4
+$PY packages/detector-nn/scripts/make_decision_fixtures.py --variant docquadnet3    # round 3
 ```
+
+`package_model.py` also regenerates the demo's rounds 2 and 3 (`apps/demo/models/`,
+`apps/demo/src/bundles/`).

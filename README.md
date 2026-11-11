@@ -166,7 +166,7 @@ min+gzip, as measured by `pnpm size` (budget: 40 KB for core):
 | `@scanoficus/core/warp` · `/filters` · `/camera` · `/pdf`        | 3.0 · 2.2 · 2.6 · 1.7 KB |
 | `@scanoficus/elements/define` (including core)                   |                  30.5 KB |
 | `@scanoficus/react` (own code, without elements, core and React) |                   1.4 KB |
-| `@scanoficus/detector-nn` (optional; own code, without weights)  |                  18.1 KB |
+| `@scanoficus/detector-nn` (optional; own code, without weights)  |                  18.4 KB |
 
 ## Detector quality (synthetic benchmark)
 
@@ -250,18 +250,20 @@ const scanner = new ScannerController({
   refinement), against 0.849 for the classic detector v3. It also finds pages on cluttered
   backgrounds and pages that leave the frame. On clean scenes the classic detector is still
   more precise; `createHybridDetector` uses the network only when the classic score is below
-  `CONFIDENT_SCORE`.
-- **Round 2 + corner refiner** (`@scanoficus/detector-nn/docquadnet2`, optional): a second
-  network moves each corner onto the true corner from 64×64 crops of the full-resolution still
-  (2 passes). The controller gives detectors the full still through the new optional
-  `DocumentDetector.detectStill`. Offline: SmartDoc held-out 0.978, Dizaj test 0.788 at
-  threshold 0.98. The presence decision is pluggable (`presence` option).
-- **Round 3** (`@scanoficus/detector-nn/docquadnet3`, optional): the round-2 network with a
-  refiner that also scores each corner, and the verified presence decision of scanoficus-ml
-  (`decision.json`, loaded as data). Offline at 5 % false positives on COCO calibration photos:
-  SmartDoc held-out 0.981, Dizaj test 0.893, RWMD 0.705. The refiner runs on every live frame
-  (about 10–13 ms per frame on an M5 Pro).
-- **Size.** The package is 18.1 KB min+gzip. The fp16 weights (round 1 688 kB; round 2
+  `CONFIDENT_SCORE`. On single photos that hybrid is worse than the network alone, because the
+  classic detector is confidently wrong on many of them (RWMD-Extended: see round 4).
+- **Round 4** (`@scanoficus/detector-nn/docquadnet4`, optional; the demo's default): a newer
+  main network, a refiner that moves each corner onto the true corner from 64×64 crops of the
+  frame (2 passes) and scores it, and the verified presence decision of scanoficus-ml
+  (`decision.json`, loaded as data, pinned to the weights). The controller gives detectors the
+  full still through the optional `DocumentDetector.detectStill`. Offline, held-out, network
+  alone: SmartDoc 0.983, MIDV-500 0.877, MIDV-2019 0.860, Dizaj test 0.882, RWMD 0.685, 6.6 %
+  false positives on photos without a document; on the fresh RWMD-Extended set (503 photos)
+  0.707, against 0.560 for the classic-first hybrid with round 1 (the old default) and 0.450
+  for the classic detector. The refiner runs on every live frame (about 4–8 ms per frame on an
+  M5 Pro). Rounds 2 and 3 are no longer in the package; the demo keeps them for comparison
+  (`apps/demo/models/`).
+- **Size.** The package is 18.4 KB min+gzip. The fp16 weights (round 1 688 kB; round 4
   688 kB + refiner 244 kB) ship in its `models/<bundle>/` folders with their license and
   attribution and are fetched at runtime; each graph names its weights' SHA-256, so mismatched
   files are rejected.
@@ -271,8 +273,8 @@ const scanner = new ScannerController({
 - **Parity.** On the same input, the outputs match the NumPy reference within 5·10⁻⁶ (CPU and
   WebGL2 with float32 activations). End to end with GPU preprocessing, the corners match within
   2·10⁻⁵ (float32) and 7·10⁻⁴ (float16 activations).
-- **License.** The weights are BSD-3. They require the SmartDoc CC BY 4.0 attribution (rounds 2
-  and 3 also Dizaj, CC BY 4.0; round 3 also COCO / Flickr photos, CC BY 2.0, with an image list);
+- **License.** The weights are BSD-3. They require the SmartDoc CC BY 4.0 attribution (round 4
+  also Dizaj, CC BY 4.0, and COCO / Flickr photos, CC BY 2.0, with an image list);
   see the package README.
 
 ## Roadmap
