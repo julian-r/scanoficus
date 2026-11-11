@@ -3,7 +3,7 @@
 A document scanner for progressive web apps on iOS Safari and Android Chrome, modeled on Apple
 VisionKit's `VNDocumentCameraViewController`. Runtime dependencies are limited to the
 workspace's own packages (React is an optional peer), and there is no OpenCV. The whole
-scanner, UI included, is about 27 KB min+gzip.
+scanner, UI included, is about 29 KB min+gzip.
 
 - **Live edge detection** at camera frame rate, run in a Web Worker on a downscaled frame.
 - **Quad tracking**: an animated outline that is smoothed over time and reports when it is
@@ -130,7 +130,9 @@ The strategy and its evidence are documented in
   the `error` state, where the user can retry or import a photo.
 - **Frames:** `requestVideoFrameCallback` (Safari 15.4+, Chrome 83+) with a
   `requestAnimationFrame` fallback. Detection runs in a module Web Worker, falling back to the
-  main thread.
+  main thread. The default worker URL works unbundled, with Vite and with webpack 5 / Next.js.
+  For other bundlers, pass `workerUrl` or `worker` (see the
+  [core README](packages/core/README.md#the-detection-worker)).
 - **Stills:** by default, the current video frame at stream resolution. On iPhone,
   `takePhoto()` returned only preview-sized images and failed with maximum photo settings.
   Choose `camera: { resolution: 'max' }` (3024×4032 at 30 fps was measured on iPhone) for
@@ -154,14 +156,14 @@ min+gzip, as measured by `pnpm size` (budget: 40 KB for core):
 
 | Entry                                                            |                     Size |
 | ---------------------------------------------------------------- | -----------------------: |
-| `@scanoficus/core` (all exports)                                 |                  20.8 KB |
-| `@scanoficus/core/controller` (camera, detection, render, PDF)   |                  19.6 KB |
+| `@scanoficus/core` (all exports)                                 |                  22.3 KB |
+| `@scanoficus/core/controller` (camera, detection, render, PDF)   |                  21.1 KB |
 | `@scanoficus/core/detect`                                        |                   6.6 KB |
 | `@scanoficus/core/render` (WebGL2 + CPU filters)                 |                   6.5 KB |
 | `@scanoficus/core/worker-entry` (detector worker)                |                   6.5 KB |
-| `@scanoficus/core/warp` · `/filters` · `/camera` · `/pdf`        | 3.0 · 2.2 · 2.1 · 1.7 KB |
-| `@scanoficus/elements/define` (including core)                   |                  27.3 KB |
-| `@scanoficus/react` (own code, without elements, core and React) |                   1.3 KB |
+| `@scanoficus/core/warp` · `/filters` · `/camera` · `/pdf`        | 3.0 · 2.2 · 2.6 · 1.7 KB |
+| `@scanoficus/elements/define` (including core)                   |                  28.9 KB |
+| `@scanoficus/react` (own code, without elements, core and React) |                   1.4 KB |
 
 ## Detector quality (synthetic benchmark)
 
@@ -170,19 +172,21 @@ sheet with text-like strokes under a random camera pose, plus noise, blur and sh
 reports the share of scenes with IoU ≥ 0.9 and the mean corner error as a percentage of the
 image diagonal. Times are measured with Node 26 on an Apple-silicon Mac:
 
-| class                                | IoU ≥ 0.9 | mean IoU | corner error | ms/frame |
-| ------------------------------------ | --------: | -------: | -----------: | -------: |
-| easy                                 |     100 % |    1.000 |      0.004 % |      5.0 |
-| perspective (tilt ≤ 40°, roll ≤ 45°) |     100 % |    1.000 |      0.004 % |      5.2 |
-| noisy + blurred                      |     100 % |    0.999 |      0.014 % |      5.1 |
-| shadow (gradient + cast shadow)      |     100 % |    1.000 |      0.005 % |      5.4 |
-| low contrast (paper on light table)  |      85 % |    0.971 |       0.68 % |      5.2 |
-| touching / crossing the frame border |      99 % |    0.991 |       0.25 % |      5.1 |
-| textured / cluttered background      |    97.7 % |    0.994 |       0.17 % |      5.4 |
-| no document (false positives)        |       0 % |        – |            – |      3.7 |
+| class                                                   | IoU ≥ 0.9 | mean IoU | corner error | ms/frame |
+| ------------------------------------------------------- | --------: | -------: | -----------: | -------: |
+| easy                                                    |     100 % |    1.000 |      0.004 % |      5.0 |
+| perspective (tilt ≤ 40°, roll ≤ 45°)                    |     100 % |    1.000 |      0.004 % |      5.2 |
+| noisy + blurred                                         |     100 % |    0.999 |      0.014 % |      5.1 |
+| shadow (gradient + cast shadow)                         |     100 % |    1.000 |      0.005 % |      5.4 |
+| low contrast (paper on light table)                     |      85 % |    0.971 |       0.68 % |      5.2 |
+| touching / crossing the frame border                    |      99 % |    0.991 |       0.25 % |      5.1 |
+| textured / cluttered background                         |    97.7 % |    0.994 |       0.17 % |      5.4 |
+| no document, with rectangular clutter (false positives) |     6.3 % |        – |            – |      4.1 |
 
 The synthetic sheets have perfectly straight edges, so these corner errors are far lower than
-real photos will give. Evaluation on SmartDoc 2015 is on the roadmap.
+real photos will give. Every false positive in the document-free class is a uniform
+rectangular object (a book, a box): an edge-based detector cannot tell such objects from
+paper. Evaluation on SmartDoc 2015 is on the roadmap.
 
 ## Roadmap
 

@@ -28,15 +28,45 @@ scanner.finish();
 const pdf = await scanner.exportPdf({ pageSize: 'a4' });
 ```
 
-By default the detector runs in a module worker created from `./worker-entry.js` next to the
-package files. If your bundler pre-bundles dependencies and breaks that URL, create the worker
-yourself, for example with Vite:
+### The detection worker
+
+By default, `ScannerController` creates and owns a module worker started with
+`new Worker(new URL('./worker-entry.js', import.meta.url), { type: 'module' })`, using the
+entry shipped next to the package files. This works in the following setups, which are checked
+by `pnpm check:browser` where noted:
+
+| Setup                                                                                | Works by default?                                                                     |
+| ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
+| Serving `dist/` unbundled (import map or plain ESM)                                  | yes (checked)                                                                         |
+| Vite dev and build, from the package or from source (`@scanoficus/source` condition) | yes (checked); the worker is bundled                                                  |
+| webpack 5 / Next.js                                                                  | expected: both recognize `new Worker(new URL(…, import.meta.url))` (not checked here) |
+| esbuild, or bundlers or dependency pre-bundling that do not handle the pattern       | no: use `workerUrl` or `worker`                                                       |
+
+To control the worker yourself, use one of these:
 
 ```ts
-import DetectorWorker from '@scanoficus/core/worker-entry?worker';
 import { createDetectorWorker } from '@scanoficus/core/worker';
+// 1. Your own URL to a served copy of dist/worker-entry.js and its chunks:
+const detector = createDetectorWorker({ workerUrl: '/assets/scanoficus/worker-entry.js' });
+// 2. A bundler-created worker, e.g. Vite:
+import DetectorWorker from '@scanoficus/core/worker-entry?worker';
+const detector2 = createDetectorWorker({ worker: new DetectorWorker() });
 
-new ScannerController({ detector: createDetectorWorker({ worker: new DetectorWorker() }) });
+// Let the controller own (and dispose) it, with automatic main-thread fallback:
+new ScannerController({
+  createDetector: () => createDetectorWorker({ worker: new DetectorWorker() }),
+});
 ```
 
-If the worker cannot start, the controller falls back to detecting on the main thread.
+Worker failures are terminal and descriptive. A script that cannot be loaded, a crash, a
+message deserialization error, or no answer within `timeoutMs` (10 s) makes every pending and
+later `detect()` reject. The message names the cause and the worker URL, for example
+`Detector worker failed to load: the browser gave no details (worker: …/worker-entry.js)`.
+Browsers do not report why a worker script failed to load: check the network panel for a 404.
+`ScannerController` then switches to main-thread detection and emits a non-fatal `error`
+event that starts with `Falling back to main-thread detection:`. A detector passed as
+`detector` is owned by the caller: it is neither disposed nor replaced.
+
+If you reference library source files directly (for example through an alias), import the
+worker entry by its package export (`@scanoficus/core/worker-entry`) rather than by its file
+path, which may change.
