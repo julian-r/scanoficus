@@ -221,8 +221,9 @@ export async function openCamera(
   const photoTimeoutMs = options.photoTimeoutMs ?? 5000;
   // Serializes takePhoto() and applyConstraints(): overlapping calls reconfigure the capture
   // session concurrently, which older Safari versions handle badly. `fence` additionally delays
-  // reconfiguration (only) until an abandoned, timed-out native takePhoto() has settled; it is
-  // awaited outside the queue, so frame captures never wait for a photo that may never settle.
+  // reconfiguration (only) until an abandoned, timed-out native takePhoto() has settled. It is
+  // only ever awaited outside the queue, so frame captures never wait for a photo that may
+  // never settle.
   let queue: Promise<unknown> = Promise.resolve();
   let fence: Promise<unknown> = Promise.resolve();
   const serialized = <T>(task: () => Promise<T>): Promise<T> => {
@@ -230,7 +231,18 @@ export async function openCamera(
     queue = run.catch(() => undefined);
     return run;
   };
-  const reconfigure = <T>(task: () => Promise<T>): Promise<T> => fence.then(() => serialized(task));
+  const reconfigure = async <T>(task: () => Promise<T>): Promise<T> => {
+    for (;;) {
+      const observed = fence;
+      await observed;
+      // A capture queued ahead may have installed a new fence while this task waited for its
+      // turn: then give the turn back and wait for the new fence outside the queue.
+      const turn = await serialized(async () =>
+        fence === observed ? { ran: true as const, value: await task() } : { ran: false as const },
+      );
+      if (turn.ran) return turn.value;
+    }
+  };
 
   const frameStill = async (): Promise<StillCapture> => {
     const image = await captureVideoFrame(video);

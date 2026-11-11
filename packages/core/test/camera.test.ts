@@ -259,4 +259,57 @@ describe('camera startup and capture fencing', () => {
     expect(torchApplied).toBe(false);
     void torch;
   });
+
+  it('fences a torch change requested while takePhoto() is still pending', async () => {
+    const { video, track } = setup(async () => {});
+    let settlePhoto: () => void = () => {};
+    vi.stubGlobal(
+      'ImageCapture',
+      class {
+        takePhoto(): Promise<Blob> {
+          return new Promise((resolve) => {
+            settlePhoto = () => resolve(new Blob(['x']));
+          });
+        }
+      },
+    );
+    const session = await openCamera(video, { stillCapture: 'photo', photoTimeoutMs: 20 });
+    const applied: unknown[] = [];
+    track.applyConstraints = async (c: unknown) => {
+      applied.push(c);
+    };
+    const capture = session.captureStill();
+    const torch = session.setTorch(true); // requested before the photo times out
+    expect((await capture).method).toBe('video-frame');
+    expect((await session.captureStill()).method).toBe('video-frame');
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(applied).toEqual([]); // still fenced by the abandoned native photo
+    settlePhoto();
+    expect(await torch).toBe(true);
+    expect(applied).toEqual([{ advanced: [{ torch: true }] }]);
+  });
+
+  it('never applies a torch requested during a takePhoto() that never settles', async () => {
+    const { video, track } = setup(async () => {});
+    vi.stubGlobal(
+      'ImageCapture',
+      class {
+        takePhoto(): Promise<Blob> {
+          return new Promise(() => {});
+        }
+      },
+    );
+    const session = await openCamera(video, { stillCapture: 'photo', photoTimeoutMs: 20 });
+    let applied = false;
+    track.applyConstraints = async () => {
+      applied = true;
+    };
+    const capture = session.captureStill();
+    void session.setTorch(true);
+    expect((await capture).method).toBe('video-frame');
+    expect((await session.captureStill()).method).toBe('video-frame');
+    expect((await session.captureStill()).method).toBe('video-frame');
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(applied).toBe(false);
+  });
 });
