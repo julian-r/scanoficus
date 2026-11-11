@@ -160,7 +160,12 @@ describe('<scan-document>', () => {
         return () => {};
       },
       grabFrame: () => gray(40, 30),
-      captureStill: async () => ({ image: gray(40, 30), width: 40, height: 30 }),
+      captureStill: async () => ({
+        image: gray(40, 30),
+        width: 40,
+        height: 30,
+        matchesPreview: true,
+      }),
       setTorch: async () => false,
       onEnded: () => {},
       stop: () => {},
@@ -183,6 +188,11 @@ describe('<scan-document>', () => {
     expect((root.querySelector('scan-camera') as HTMLElement).hidden).toBe(true);
     expect((root.querySelector('scan-review') as HTMLElement).hidden).toBe(false);
     expect(element.pages).toHaveLength(1);
+    // Live attributes are forwarded after connection.
+    element.setAttribute('page-size', 'letter');
+    expect(root.querySelector('scan-review')?.getAttribute('page-size')).toBe('letter');
+    element.setAttribute('auto-capture', 'true');
+    expect(element.controller?.getSnapshot().autoCapture).toBe(true);
     element.remove();
   });
 });

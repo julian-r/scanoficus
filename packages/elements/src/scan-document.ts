@@ -131,6 +131,23 @@ export class ScanDocumentElement extends BaseElement {
     }
   }
 
+  static get observedAttributes(): string[] {
+    return ['page-size', 'auto-capture'];
+  }
+
+  /**
+   * `page-size` and `auto-capture` take effect immediately; `filter` only applies to a
+   * controller created by the element (read on connect).
+   */
+  attributeChangedCallback(name: string, _old: string | null, value: string | null): void {
+    if (name === 'page-size') {
+      if (value === null) this.review.removeAttribute('page-size');
+      else this.review.setAttribute('page-size', value);
+    } else if (name === 'auto-capture' && this._controller) {
+      this._controller.setAutoCapture(value !== 'false');
+    }
+  }
+
   connectedCallback(): void {
     if (!this._controller) {
       const autoCapture = this.getAttribute('auto-capture') !== 'false';
@@ -175,8 +192,6 @@ export class ScanDocumentElement extends BaseElement {
       offChange();
       offError();
     };
-    const pageSize = this.getAttribute('page-size');
-    if (pageSize) this.review.setAttribute('page-size', pageSize);
     this.review.controller = controller;
     this.camera.controller = controller;
     this.render();

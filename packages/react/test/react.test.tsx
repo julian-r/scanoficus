@@ -97,4 +97,47 @@ describe('<DocumentScanner>', () => {
     unmount();
     expect(container.querySelector('scan-document')).toBeNull();
   });
+
+  it('configures the element-created controller from props before it connects', async () => {
+    const completed: ScanCompleteDetail[] = [];
+    const options = {
+      renderer,
+      detector: createMainThreadDetector(),
+      openCamera: () => new Promise<never>(() => {}),
+    };
+    const container = document.createElement('div');
+    document.body.append(container);
+    const root = createRoot(container);
+    const render = (pageSize: 'a4' | 'letter') =>
+      act(() =>
+        root.render(
+          <DocumentScanner
+            options={options}
+            autoCapture={false}
+            filter="bw"
+            pageSize={pageSize}
+            onComplete={(d) => completed.push(d)}
+          />,
+        ),
+      );
+    render('a4');
+    const element = container.querySelector('scan-document') as ScanDocumentElement;
+    const controller = element.controller as ScannerController;
+    expect(controller.getSnapshot().autoCapture).toBe(false);
+    const page = await act(() => controller.addImage(createRgba(20, 10)));
+    expect(page.filter).toBe('bw');
+
+    const review = element.shadowRoot?.querySelector('scan-review') as HTMLElement & {
+      save(): Promise<void>;
+    };
+    const mediaBox = async () => {
+      await act(() => review.save());
+      const text = new TextDecoder('latin1').decode(await completed.at(-1)!.pdf.arrayBuffer());
+      return /\/MediaBox \[([^\]]+)\]/.exec(text)?.[1];
+    };
+    expect(await mediaBox()).toBe('0 0 595.28 841.89');
+    render('letter');
+    expect(await mediaBox()).toBe('0 0 612 792');
+    act(() => root.unmount());
+  });
 });

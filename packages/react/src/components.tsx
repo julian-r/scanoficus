@@ -35,9 +35,10 @@ interface HostProps {
 
 /**
  * Mounts a scanoficus custom element imperatively inside a `<div>`: the element is created
- * with `document.createElement` on the client, its properties are assigned before it is
- * connected (so it never creates a controller of its own when one is passed), attributes and
- * event listeners are kept in sync with the props. This avoids the differences in how React 18
+ * with `document.createElement` on the client, its properties and attributes are applied
+ * before it is connected (so its initial configuration is honored and it never creates a
+ * controller of its own when one is passed), and attributes, properties and event listeners
+ * are kept in sync with later prop changes. This avoids the differences in how React 18
  * and 19 pass props to custom elements and keeps server rendering to an empty `<div>`.
  */
 function useScanElement<T extends HTMLElement>(
@@ -52,12 +53,19 @@ function useScanElement<T extends HTMLElement>(
   handlersRef.current = handlers;
   const propertiesRef = useRef(properties);
   propertiesRef.current = properties;
+  const attributesRef = useRef(attributes);
+  attributesRef.current = attributes;
 
   useClientLayoutEffect(() => {
     defineScanElements();
     const el = document.createElement(tag) as T;
     el.style.height = '100%';
+    // Properties and attributes are applied before connecting: the element reads its
+    // configuration (and may create its controller) in connectedCallback.
     Object.assign(el, propertiesRef.current);
+    for (const [name, value] of Object.entries(attributesRef.current)) {
+      if (value !== null) el.setAttribute(name, value);
+    }
     const listeners = Object.keys(handlersRef.current).map((type) => {
       const listener = (event: Event) => handlersRef.current[type]?.(event);
       el.addEventListener(type, listener);
