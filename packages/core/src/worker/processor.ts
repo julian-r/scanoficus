@@ -5,7 +5,7 @@ import {
   detectDocument,
 } from '../detect/detector.ts';
 import { scaleQuad } from '../geometry/quad.ts';
-import { fitLongSide, type GrayImage, type RgbaImage, rgbaToGray } from '../image.ts';
+import { fitLongSide, type RgbaImage } from '../image.ts';
 
 /**
  * A camera frame handed to a {@link DocumentDetector}: an `ImageBitmap` (e.g. from
@@ -49,8 +49,8 @@ export type DetectorWorkerMessage = DetectResponse | { ready: true };
 type Canvas2D = OffscreenCanvas | HTMLCanvasElement;
 
 /**
- * Converts frames to gray at detection resolution and runs {@link detectDocument}, reusing all
- * buffers between frames. Shared by the worker entry and the main-thread detector.
+ * Reads frames at detection resolution and runs {@link detectDocument} on the RGBA pixels (luma
+ * plus colour edges), reusing all buffers between frames. Shared by the worker entry and the main-thread detector.
  */
 export class FrameProcessor {
   private readonly context = new DetectorContext();
@@ -61,11 +61,11 @@ export class FrameProcessor {
     const maxSide = options.maxSide ?? 384;
     if (isImageBitmap(frame)) {
       try {
-        const gray = this.bitmapToGray(frame, maxSide);
-        const detection = detectDocument(gray, options, this.context);
+        const pixels = this.bitmapToPixels(frame, maxSide);
+        const detection = detectDocument(pixels, options, this.context);
         return (
           detection &&
-          scaleDetection(detection, frame.width / gray.width, frame.height / gray.height)
+          scaleDetection(detection, frame.width / pixels.width, frame.height / pixels.height)
         );
       } finally {
         frame.close();
@@ -77,12 +77,12 @@ export class FrameProcessor {
     ) {
       throw new TypeError('Expected an ImageBitmap or RGBA pixels with ImageData layout');
     }
-    // detectDocument area-downscales internally and returns frame coordinates.
-    return detectDocument(rgbaToGray(frame), options, this.context);
+    // detectDocument area-downscales internally, uses colour edges and returns frame coordinates.
+    return detectDocument(frame, options, this.context);
   }
 
   /** Draws the bitmap downscaled by the browser (cheap, GPU-assisted) and reads it back. */
-  private bitmapToGray(bitmap: ImageBitmap, maxSide: number): GrayImage {
+  private bitmapToPixels(bitmap: ImageBitmap, maxSide: number): RgbaImage {
     const size = fitLongSide(bitmap.width, bitmap.height, maxSide);
     if (!this.canvas) {
       this.canvas =
@@ -101,8 +101,7 @@ export class FrameProcessor {
       | null;
     if (!ctx) throw new Error('2D canvas context unavailable');
     ctx.drawImage(bitmap, 0, 0, size.width, size.height);
-    const pixels = ctx.getImageData(0, 0, size.width, size.height);
-    return rgbaToGray(pixels);
+    return ctx.getImageData(0, 0, size.width, size.height);
   }
 }
 

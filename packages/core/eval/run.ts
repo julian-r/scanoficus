@@ -1,10 +1,10 @@
 /**
  * Synthetic evaluation of the document detector.
  *
- * Usage: `pnpm eval [--n 300] [--classes easy,shadow] [--failures 8]`
+ * Usage: `pnpm eval [--n 300] [--classes easy,shadow] [--failures 8] [--gray]`
  *
  * For every difficulty class, renders N seeded scenes at 384×288, runs `detectDocument` on the
- * gray image and reports: found rate, success rate (IoU ≥ 0.9), mean IoU and mean/p90 corner
+ * RGBA image (as the live pipeline does; `--gray`: on its luma) and reports: found rate, success rate (IoU ≥ 0.9), mean IoU and mean/p90 corner
  * error (% of the image diagonal) over found documents, and mean/p95 detection time. For the
  * document-free class 'none', "found" is the false-positive rate. Failure cases are written to
  * `eval-out/` as PNG (green: ground truth, red: detection).
@@ -22,6 +22,7 @@ const { values } = parseArgs({
     n: { type: 'string', default: '300' },
     classes: { type: 'string', default: SCENE_CLASSES.join(',') },
     failures: { type: 'string', default: '8' },
+    gray: { type: 'boolean', default: false },
   },
 });
 const n = Number(values.n);
@@ -37,7 +38,8 @@ const quantile = (sorted: number[], q: number) =>
 
 // Warm up the JIT so that timings reflect steady-state per-frame cost.
 for (let s = 0; s < 20; s++) {
-  detectDocument(rgbaToGray(generateScene('easy', 10_000 + s).image), {}, context);
+  const image = generateScene('easy', 10_000 + s).image;
+  detectDocument(values.gray ? rgbaToGray(image) : image, {}, context);
 }
 
 const rows: string[][] = [];
@@ -51,8 +53,9 @@ for (const kind of classes) {
   for (let seed = 0; seed < n; seed++) {
     const scene = generateScene(kind, seed);
     const gray = rgbaToGray(scene.image);
+    const input = values.gray ? gray : scene.image;
     const t0 = performance.now();
-    const detection = detectDocument(gray, {}, context);
+    const detection = detectDocument(input, {}, context);
     times.push(performance.now() - t0);
     const outcome = evaluateDetection(scene.quad, detection?.quad ?? null, gray.width, gray.height);
     if (outcome.found) found++;

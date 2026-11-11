@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { DetectorContext, detectDocument, sharpness } from '../src/detect/index.ts';
-import { createGray, rgbaToGray } from '../src/image.ts';
+import { createGray, createRgba, rgbaToGray } from '../src/image.ts';
 import { evaluateDetection } from './support/metrics.ts';
 import { generateScene, type SceneClass } from './support/synthetic.ts';
 
@@ -46,7 +46,8 @@ describe('detectDocument on synthetic scenes', () => {
   }
 
   // Document-free scenes include uniform rectangular objects (books, boxes), which an edge-based
-  // detector cannot tell from paper: 17.5% on these 40 seeds, 9.7% on the 300-seed eval.
+  // detector cannot tell from paper: 12.5% on these 40 seeds, 4.7% on the 300-seed eval with
+  // gray input (6.3% with RGBA input).
   it('rarely reports documents in document-free scenes', () => {
     let falsePositives = 0;
     for (let seed = 1000; seed < 1000 + SEEDS; seed++) {
@@ -111,24 +112,107 @@ describe('detectDocument API', () => {
     expect(screen.score).toBeLessThan(0.7);
   });
 
-  it('prefers the page over a framed block of content on it', () => {
-    // A page (200) on a table (120) whose top-left corner fades into the table, with a block of
-    // content (170) framed by dark lines on it. The block's edges are stronger and it scores
-    // higher, but the page encloses it and the margin between them is brighter than the block.
-    const gray = drawRects(120, [
-      [60, 40, 324, 250, 200],
-      [120, 90, 270, 200, 40],
-      [122, 92, 268, 198, 170],
-    ]);
-    for (let y = 40; y < 100; y++) {
-      for (let x = 60; x < 100; x++) gray.data[y * 384 + x] = 120 + (x - 60) * 2;
+  /** `gray` mirrored in X and/or Y. */
+  function mirror(gray: ReturnType<typeof createGray>, mx: boolean, my: boolean) {
+    const out = createGray(gray.width, gray.height);
+    for (let y = 0; y < gray.height; y++) {
+      for (let x = 0; x < gray.width; x++) {
+        const sx = mx ? gray.width - 1 - x : x;
+        const sy = my ? gray.height - 1 - y : y;
+        out.data[y * gray.width + x] = gray.data[sy * gray.width + sx];
+      }
     }
-    const detection = detectDocument(gray, { candidates: true, minScore: 0 })!;
-    const xs = detection.quad.map((p) => p.x).sort((a, b) => a - b);
-    expect(Math.abs(xs[0] - 60)).toBeLessThan(2);
-    expect(Math.abs(xs[3] - 324)).toBeLessThan(2);
-    const block = detection.candidates!.find((c) => c.quad.every((p) => p.x > 110));
-    expect(block!.score).toBeGreaterThan(detection.score);
+    return out;
+  }
+
+  // A page (200) on a table (120) whose top-left corner fades into the table, with a block of
+  // content (170) framed by dark lines on it. The block's edges are stronger and it scores
+  // higher, but the page encloses it and the margin between them is brighter than the block.
+  // The page is symmetric in X (40–344), so the same checks hold for every mirrored copy; the
+  // mirrored copies give the candidates both corner orientations.
+  for (const [mx, my] of [
+    [false, false],
+    [true, false],
+    [false, true],
+    [true, true],
+  ] as const) {
+    it(`prefers the page over a framed block of content on it (mirrored x ${mx}, y ${my})`, () => {
+      const page = drawRects(120, [
+        [40, 20, 344, 270, 200],
+        [100, 70, 290, 230, 40],
+        [102, 72, 288, 228, 170],
+      ]);
+      for (let y = 20; y < 60; y++) {
+        for (let x = 40; x < 100; x++) {
+          const fade = Math.min(1, ((x - 40) / 60) * ((y - 20) / 40) * 2);
+          page.data[y * 384 + x] = Math.round(120 + 80 * fade);
+        }
+      }
+      const gray = mirror(page, mx, my);
+      const detection = detectDocument(gray, { candidates: true, minScore: 0 })!;
+      const xs = detection.quad.map((p) => p.x).sort((a, b) => a - b);
+      expect(Math.abs(xs[0] - 40)).toBeLessThan(2);
+      expect(Math.abs(xs[3] - 344)).toBeLessThan(2);
+      const block = detection.candidates!.find((c) => c.quad.every((p) => p.x > 90));
+      expect(block!.score).toBeGreaterThan(detection.score);
+    });
+  }
+
+  it('returns a document with two sides on the frame border at the default threshold', () => {
+    // A page (210) on a dark table (50) that leaves the frame at the top and on the left.
+    const gray = drawRects(50, [[0, 0, 250, 190, 210]]);
+    const detection = detectDocument(gray);
+    expect(detection).not.toBeNull();
+    const xs = detection!.quad.map((p) => p.x).sort((a, b) => a - b);
+    const ys = detection!.quad.map((p) => p.y).sort((a, b) => a - b);
+    expect(xs[0]).toBeLessThan(1);
+    expect(Math.abs(xs[3] - 250)).toBeLessThan(1.5);
+    expect(ys[0]).toBeLessThan(1);
+    expect(Math.abs(ys[3] - 190)).toBeLessThan(1.5);
+  });
+
+  it('uses colour edges for RGBA input: warm paper on a cool table of similar brightness', () => {
+    const image = createRgba(384, 288);
+    let seed = 7;
+    const random = () => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed / 0x7fffffff;
+    };
+    for (let y = 0; y < 288; y++) {
+      for (let x = 0; x < 384; x++) {
+        const paper = x >= 80 && x < 300 && y >= 50 && y < 240;
+        const color = paper ? [232, 220, 186] : [204, 219, 238];
+        const noise = (random() - 0.5) * 16;
+        const p = 4 * (y * 384 + x);
+        for (let c = 0; c < 3; c++) image.data[p + c] = color[c] + noise;
+        image.data[p + 3] = 255;
+      }
+    }
+    const gray = detectDocument(rgbaToGray(image), { minScore: 0 });
+    expect(gray === null || gray.score < 0.5).toBe(true);
+    const color = detectDocument(image)!;
+    expect(color.score).toBeGreaterThan(0.9);
+    const truth = [
+      { x: 80, y: 50 },
+      { x: 300, y: 50 },
+      { x: 300, y: 240 },
+      { x: 80, y: 240 },
+    ];
+    color.quad.forEach((p, i) => {
+      expect(Math.hypot(p.x - truth[i].x, p.y - truth[i].y)).toBeLessThan(1);
+    });
+  });
+
+  it('gives the same result for RGBA input without chroma as for its luma', () => {
+    const scene = generateScene('perspective', 5);
+    const gray = detectDocument(rgbaToGray(scene.image))!;
+    const neutral = createRgba(scene.image.width, scene.image.height);
+    const luma = rgbaToGray(scene.image).data;
+    for (let i = 0; i < luma.length; i++) {
+      neutral.data.fill(luma[i], 4 * i, 4 * i + 3);
+      neutral.data[4 * i + 3] = 255;
+    }
+    expect(detectDocument(neutral)).toEqual(gray);
   });
 
   it('returns null for a blank frame and for tiny images', () => {

@@ -31,34 +31,51 @@ export function convolveSeparable(
   out: Float32Array,
 ): void {
   const r = (kernel.length - 1) >> 1;
+  // Interior taps are paired (symmetric kernel) and fully unrolled for the 9-tap kernel of the
+  // detector (σ = 1.2); other sizes and the borders take the generic loop.
+  const [c0, c1, c2, c3, c4] = r === 4 ? kernel.subarray(4) : [0, 0, 0, 0, 0];
   for (let y = 0; y < height; y++) {
     const row = y * width;
     for (let x = 0; x < width; x++) {
-      let acc = 0;
-      if (x >= r && x < width - r) {
-        for (let k = -r; k <= r; k++) acc += src[row + x + k] * kernel[k + r];
-      } else {
-        for (let k = -r; k <= r; k++) {
-          const xx = x + k < 0 ? 0 : x + k >= width ? width - 1 : x + k;
-          acc += src[row + xx] * kernel[k + r];
-        }
+      const c = row + x;
+      if (r === 4 && x >= 4 && x < width - 4) {
+        tmp[c] =
+          src[c] * c0 +
+          (src[c - 1] + src[c + 1]) * c1 +
+          (src[c - 2] + src[c + 2]) * c2 +
+          (src[c - 3] + src[c + 3]) * c3 +
+          (src[c - 4] + src[c + 4]) * c4;
+        continue;
       }
-      tmp[row + x] = acc;
+      let acc = 0;
+      for (let k = -r; k <= r; k++) {
+        const xx = x + k < 0 ? 0 : x + k >= width ? width - 1 : x + k;
+        acc += src[row + xx] * kernel[k + r];
+      }
+      tmp[c] = acc;
     }
   }
+  const w = width;
   for (let y = 0; y < height; y++) {
-    const interior = y >= r && y < height - r;
+    const row = y * width;
+    if (r === 4 && y >= 4 && y < height - 4) {
+      for (let i = row; i < row + width; i++) {
+        out[i] =
+          tmp[i] * c0 +
+          (tmp[i - w] + tmp[i + w]) * c1 +
+          (tmp[i - 2 * w] + tmp[i + 2 * w]) * c2 +
+          (tmp[i - 3 * w] + tmp[i + 3 * w]) * c3 +
+          (tmp[i - 4 * w] + tmp[i + 4 * w]) * c4;
+      }
+      continue;
+    }
     for (let x = 0; x < width; x++) {
       let acc = 0;
-      if (interior) {
-        for (let k = -r; k <= r; k++) acc += tmp[(y + k) * width + x] * kernel[k + r];
-      } else {
-        for (let k = -r; k <= r; k++) {
-          const yy = y + k < 0 ? 0 : y + k >= height ? height - 1 : y + k;
-          acc += tmp[yy * width + x] * kernel[k + r];
-        }
+      for (let k = -r; k <= r; k++) {
+        const yy = y + k < 0 ? 0 : y + k >= height ? height - 1 : y + k;
+        acc += tmp[yy * width + x] * kernel[k + r];
       }
-      out[y * width + x] = acc;
+      out[row + x] = acc;
     }
   }
 }

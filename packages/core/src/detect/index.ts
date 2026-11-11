@@ -1,5 +1,5 @@
 /**
- * Classic (non-ML) document detection on gray frames, temporal quad tracking and a focus measure.
+ * Classic (non-ML) document detection on gray or RGBA frames, temporal quad tracking and a focus measure.
  *
  * @module
  */

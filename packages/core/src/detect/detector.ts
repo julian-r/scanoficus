@@ -6,8 +6,16 @@ import {
   type Quad,
   quadArea,
   scaleQuad,
+  signedArea,
 } from '../geometry/quad.ts';
-import { downscaleGray, fitLongSide, type GrayImage } from '../image.ts';
+import {
+  downscaleGray,
+  fitLongSide,
+  type GrayImage,
+  type RgbaImage,
+  rgbaToGray,
+} from '../image.ts';
+import { resampleArea } from '../internal/resample.ts';
 import {
   convolveSeparable,
   gaussianKernel,
@@ -19,6 +27,7 @@ import {
 } from './edges.ts';
 import { HoughTransform } from './hough.ts';
 import { intersectLines, type Line, LineFitter, lineThrough } from './lines.ts';
+import { PARAMS } from './params.ts';
 
 /** Options for {@link detectDocument}. */
 export interface DetectOptions {
@@ -41,23 +50,26 @@ export interface DetectOptions {
 
 /**
  * Default `minScore` of {@link detectDocument}. Calibrated at the default processing size (384)
- * on real data (see docs/benchmarks.md): about 7 % of photos without any document (desks,
- * tables, screens) yield a quad of at least this score, and 98 % of the returned quads on the
- * SmartDoc tuning split are right (Jaccard index ≥ 0.9).
+ * with RGBA input on the tuning data (see docs/benchmarks.md): about 6 % of photos without any
+ * document (desks, tables, screens) yield a quad of at least this score, and 99.5 % of the
+ * returned quads on the SmartDoc tuning split are right (Jaccard index ≥ 0.9; MIDV-500 tuning
+ * half: 92 %).
  */
-export const DEFAULT_MIN_SCORE = 0.75;
+export const DEFAULT_MIN_SCORE = 0.74;
 
 /**
- * Score from which a detection is reliable: about 2 % of photos without any document reach it,
- * and 99.9 % of the quads at or above it on the SmartDoc tuning split are right. Below it (or
- * without a detection), a hybrid scanner can escalate the frame to a slower, learned detector.
+ * Score from which a detection is reliable: all quads at or above it on the SmartDoc tuning split
+ * and 95 % on the MIDV-500 tuning half are right, and about 3 % of photos without any document
+ * reach it. Below it (or without a detection), a hybrid scanner can escalate the frame to a
+ * slower, learned detector.
  */
-export const CONFIDENT_SCORE = 0.85;
+export const CONFIDENT_SCORE = 0.8;
 
 /**
  * A quad with a confidence score in `[0, 1]`: the edge support along its sides (mostly the
- * length-weighted mean, partly the weakest side), lowered for sides on the frame border, quads
- * below 10 % of the frame and an inside darker than the surroundings. See {@link
+ * length-weighted mean, a little the weakest side), times 0.85 for a side on the frame border
+ * (0.81 for two), times a mild size preference for quads below 25 % of the frame
+ * (`(area / 25 %)^0.15`), and lowered if the inside is darker than the surroundings. See {@link
  * DEFAULT_MIN_SCORE} and {@link CONFIDENT_SCORE} for calibrated thresholds.
  */
 export interface ScoredQuad {
@@ -77,18 +89,13 @@ export interface Detection extends ScoredQuad {
 
 /** Standard deviation of the pre-blur at the processing resolution. */
 const BLUR_SIGMA = 1.2;
-/** Canny thresholds: high = max(MIN_HIGH, HIGH_PER_MEDIAN · median gradient), low = high / 2. */
+/** Canny thresholds: high = max(MIN_HIGH, `PARAMS.highPerMedian` · median gradient), low = high / 2. */
 const MIN_HIGH_THRESHOLD = 1;
-const HIGH_PER_MEDIAN = 2.5;
 /** Number of Hough lines considered when assembling quads, and per 10° sector. */
 const MAX_LINES = 30;
 const MAX_LINES_PER_SECTOR = 10;
 /** The four frame borders are appended to the Hough lines as "virtual" sides. */
 const FRAME_LINES = 4;
-/** Score multiplier per side lying on the frame border (the document continues beyond it). */
-const FRAME_PENALTY = 0.85;
-/** Quads smaller than this fraction of the frame are slightly penalized (∝ area^0.25). */
-const FULL_SIZE_AREA = 0.1;
 /** Band (px) around a line within which edge pixels count as support. */
 const SUPPORT_BAND = 1.5;
 /** Support profiles are binned along the line in steps of this many pixels. */
@@ -101,14 +108,13 @@ const SIN_MIN_ADJACENT = Math.sin((30 * Math.PI) / 180);
 const COS_MAX_OPPOSITE = Math.cos((45 * Math.PI) / 180);
 /** A side must be at least this much inside the frame to be judged. */
 const MIN_VISIBLE = 0.5;
-/** Exponent of the paper-brightness factor (inside vs. surrounding band, see `brightnessFactor`). */
-const BRIGHTNESS_EXPONENT = 0.5;
 /** Inner region and surrounding band of `brightnessFactor`, as scale factors about the centroid. */
 const INNER_SCALE = 0.85;
 const OUTER_SCALE = 1.15;
-/** Minimum score of an enclosing candidate, relative to the best (see `preferEnclosing`). */
-const ENCLOSING_SCORE = 0.85;
+/** Brightness of the margin around a block of content, relative to the block (`preferEnclosing`). */
 const ENCLOSING_BRIGHTNESS = 1;
+/** Minimum distance (px) of the enclosed quad's corners from the enclosing quad's sides. */
+const ENCLOSING_MARGIN = 2;
 /** Number of top candidates that are refined and re-scored. */
 const REFINE_CANDIDATES = 6;
 
@@ -121,6 +127,8 @@ export class DetectorContext {
   width = 0;
   height = 0;
   small: GrayImage | null = null;
+  /** Luma of RGBA input at the input size. */
+  luma: GrayImage | null = null;
   blurTmp: Float32Array = new Float32Array(0);
   blurred: Float32Array = new Float32Array(0);
   gx: Float32Array = new Float32Array(0);
@@ -129,6 +137,16 @@ export class DetectorContext {
   nms: Float32Array = new Float32Array(0);
   edges: Uint8Array = new Uint8Array(0);
   edgeList: Int32Array = new Int32Array(0);
+  /**
+   * Edge pixels in row-major order: flat index and pixel-center coordinates, with the first
+   * entry of every row in `rowStart` (so that the edges near a line can be found by rows).
+   */
+  edgeP: Int32Array = new Int32Array(0);
+  edgeX: Float32Array = new Float32Array(0);
+  edgeY: Float32Array = new Float32Array(0);
+  rowStart: Int32Array = new Int32Array(0);
+  /** Scratch list of edge entries returned by `gatherNear`. */
+  near: Int32Array = new Int32Array(0);
   /** Per row: prefix sums of the gray values (`width + 1` entries per row). */
   rowPrefix: Float32Array = new Float32Array(0);
   histogram: Uint32Array = new Uint32Array(2048);
@@ -143,6 +161,11 @@ export class DetectorContext {
   /** Per line: visible parameter range `[t0, t1]` inside the frame. */
   visible: Float32Array = new Float32Array(MAX_LINES * 2);
   supportBins = 0;
+  /** Colour input only: the chroma plane and its gradient (allocated on first use). */
+  chroma: Float32Array = new Float32Array(0);
+  cgx: Float32Array = new Float32Array(0);
+  cgy: Float32Array = new Float32Array(0);
+  cmag: Float32Array = new Float32Array(0);
 
   /** Ensures all buffers match a `width × height` processing size. */
   ensure(width: number, height: number): void {
@@ -158,16 +181,32 @@ export class DetectorContext {
     this.nms = new Float32Array(n);
     this.edges = new Uint8Array(n);
     this.edgeList = new Int32Array(n);
+    this.edgeP = new Int32Array(n);
+    this.edgeX = new Float32Array(n);
+    this.edgeY = new Float32Array(n);
+    this.rowStart = new Int32Array(height + 1);
+    this.near = new Int32Array(n);
     this.rowPrefix = new Float32Array((width + 1) * height);
     this.hough = new HoughTransform(width, height);
     this.supportBins = Math.ceil((2 * Math.hypot(width, height)) / SUPPORT_BIN) + 2;
     this.supportPrefix = new Int32Array(MAX_LINES * (this.supportBins + 1));
     this.binFlags = new Uint8Array(this.supportBins);
+    this.chroma = new Float32Array(0);
+  }
+
+  /** Allocates the colour buffers on first use at the current size. */
+  ensureColor(): void {
+    const n = this.width * this.height;
+    if (this.chroma.length === n) return;
+    this.chroma = new Float32Array(n);
+    this.cgx = new Float32Array(n);
+    this.cgy = new Float32Array(n);
+    this.cmag = new Float32Array(n);
   }
 }
 
 /**
- * Detects the most likely document quadrilateral in a gray image.
+ * Detects the most likely document quadrilateral in a gray or RGBA image.
  *
  * Pipeline (at ≤ `maxSide` px): Gaussian blur → Sobel → Canny (non-maximum suppression,
  * hysteresis with thresholds derived from the median gradient magnitude) → orientation-
@@ -179,7 +218,7 @@ export class DetectorContext {
  *
  * The score of a quad is the fraction of each side's visible length that is supported by edge
  * pixels whose gradient is perpendicular to the side, blended with the weakest side, weighted
- * by a mild preference for quads above 10 % of the frame, and lowered if the inside is darker
+ * by a mild preference for quads above 25 % of the frame, and lowered if the inside is darker
  * than the band around it (paper is almost always brighter than what it lies on; screens,
  * windows and dark furniture fronts are not). The contrast polarity may change along a side
  * (glare on a glossy table), so it is not required to be consistent.
@@ -187,24 +226,37 @@ export class DetectorContext {
  * Working with lines rather than closed contours makes the detector tolerant to broken edges
  * (shadows, low contrast, occlusions), rounded or folded corners, and documents with corners
  * slightly outside the frame (corners are line intersections and may lie outside the image).
- * A document that continues beyond the frame is closed by the frame border, which earns only a
- * small fixed support; at most two adjacent frame sides are allowed so that the frame itself is
- * never reported. Sides that are mostly outside the frame are rejected.
+ * A document that continues beyond the frame is closed by the frame border. Frame sides carry
+ * no edge evidence, so the score is lowered (× 0.85 for one, × 0.81 for two) but a
+ * well-supported quad with two frame sides still passes the default threshold. At most two
+ * adjacent frame sides are allowed so that the frame itself is never reported. Sides that are
+ * mostly outside the frame are rejected.
  *
- * @param gray - Gray image (any size; downscaled internally to `maxSide`).
+ * With RGBA input (e.g. `ImageData`), the luma (as {@link rgbaToGray}) is used as for gray input,
+ * and a yellow–blue chroma gradient adds edges where the luma gradient is weak (white paper on a
+ * light table). This costs about 2 ms per frame at 384 px. Gray input works as before.
+ *
+ * @param image - Gray or RGBA image (any size; downscaled internally to `maxSide`).
  * @param context - Reusable buffers; pass the same context every frame to avoid allocations.
- * @returns The best quad (TL, TR, BR, BL) in `gray`'s pixel coordinates, or `null` if no
+ * @returns The best quad (TL, TR, BR, BL) in `image`'s pixel coordinates, or `null` if no
  *   candidate scores at least `minScore`.
  */
 export function detectDocument(
-  gray: GrayImage,
+  image: GrayImage | RgbaImage,
   options: DetectOptions = {},
   context: DetectorContext = new DetectorContext(),
 ): Detection | null {
   const maxSide = options.maxSide ?? 384;
-  const minArea = options.minArea ?? 0.04;
+  const minArea = options.minArea ?? PARAMS.minArea;
   const minScore = options.minScore ?? DEFAULT_MIN_SCORE;
   const ctx = context;
+  const rgba = image.data.length > 0 && image.data.length === 4 * image.width * image.height;
+  let gray = image as GrayImage;
+  if (rgba) {
+    const reusable = ctx.luma?.width === image.width && ctx.luma.height === image.height;
+    gray = rgbaToGray(image as RgbaImage, reusable ? (ctx.luma ?? undefined) : undefined);
+    ctx.luma = gray;
+  }
 
   const target = fitLongSide(gray.width, gray.height, maxSide);
   let work = gray;
@@ -219,10 +271,15 @@ export function detectDocument(
 
   convolveSeparable(work.data, width, height, ctx.kernel, ctx.blurTmp, ctx.blurred);
   sobel(ctx.blurred, width, height, ctx.gx, ctx.gy, ctx.mag);
+  if (rgba && PARAMS.chromaWeight > 0) {
+    ctx.ensureColor();
+    addColorGradient(ctx, image as RgbaImage);
+  }
   nonMaximumSuppression(ctx.gx, ctx.gy, ctx.mag, width, height, ctx.nms);
   const median = medianPositive(ctx.mag, ctx.histogram);
-  const high = Math.max(MIN_HIGH_THRESHOLD, HIGH_PER_MEDIAN * median);
+  const high = Math.max(MIN_HIGH_THRESHOLD, PARAMS.highPerMedian * median);
   const edgeCount = hysteresis(ctx.nms, width, height, high / 2, high, ctx.edges, ctx.edgeList);
+  sortEdges(ctx);
 
   const minVotes = Math.max(12, 0.08 * Math.min(width, height));
   const lineCount = (ctx.hough as HoughTransform).detect(
@@ -237,8 +294,8 @@ export function detectDocument(
   );
   if (lineCount < 2) return null;
   for (let i = 0; i < lineCount; i++) {
-    ctx.lines[i] = refitLine(ctx, ctx.lines[i], edgeCount);
-    buildSupportProfile(ctx, i, edgeCount);
+    ctx.lines[i] = refitLine(ctx, ctx.lines[i]);
+    buildSupportProfile(ctx, i);
   }
   ctx.lines[lineCount] = { nx: 1, ny: 0, rho: 0 };
   ctx.lines[lineCount + 1] = { nx: 0, ny: 1, rho: 0 };
@@ -246,10 +303,11 @@ export function detectDocument(
   ctx.lines[lineCount + 3] = { nx: 0, ny: 1, rho: height };
 
   const shortlist = enumerateQuads(ctx, lineCount, minArea * width * height);
+  if (!shortlist.length) return null;
   buildRowPrefix(ctx, work.data);
   const refined: ScoredQuad[] = [];
   for (const candidate of shortlist) {
-    const quad = refineQuad(ctx, candidate.quad, edgeCount);
+    const quad = refineQuad(ctx, candidate.quad);
     const score = scoreQuadBySampling(ctx, quad) * brightnessFactor(ctx, quad);
     if (score <= 0) continue;
     if (refined.some((r) => maxCornerDistance(r.quad, quad) < 2)) continue;
@@ -272,15 +330,112 @@ export function detectDocument(
   return detection;
 }
 
+/**
+ * Colour edges: computes the yellow–blue opponent plane ((R + G) / 2 − B) of `rgba` at the
+ * processing size (area-downscaled if needed), blurs it like the luma plane and replaces the luma
+ * gradient at each pixel by its gradient (times `PARAMS.chromaWeight`) where that is stronger.
+ * White paper on a light table often differs more in hue (warm paper, cool or grey table) than in
+ * brightness. The red–green plane added little on the tuning split for its cost.
+ */
+function addColorGradient(ctx: DetectorContext, rgba: RgbaImage): void {
+  const { width, height, gx, gy, mag, chroma, blurred } = ctx;
+  const n = rgba.width * rgba.height;
+  const full = n === width * height;
+  const plane = full ? chroma : new Float32Array(n);
+  const data = rgba.data;
+  for (let i = 0, p = 0; i < n; i++, p += 4) plane[i] = 0.5 * (data[p] + data[p + 1]) - data[p + 2];
+  if (!full) resampleArea(plane, rgba.width, rgba.height, chroma, width, height);
+  // The luma blur is no longer needed once its gradient exists, so its buffer is reused.
+  convolveSeparable(chroma, width, height, ctx.kernel, ctx.blurTmp, blurred);
+  sobel(blurred, width, height, ctx.cgx, ctx.cgy, ctx.cmag);
+  const weight = PARAMS.chromaWeight;
+  for (let i = 0; i < width * height; i++) {
+    const m = weight * ctx.cmag[i];
+    if (m > mag[i]) {
+      mag[i] = m;
+      gx[i] = weight * ctx.cgx[i];
+      gy[i] = weight * ctx.cgy[i];
+    }
+  }
+}
+
+/** Lists the edge pixels in row-major order into `edgeP`, `edgeX`, `edgeY` and `rowStart`. */
+function sortEdges(ctx: DetectorContext): void {
+  const { edges, edgeP, edgeX, edgeY, rowStart, width, height } = ctx;
+  let k = 0;
+  for (let y = 0; y < height; y++) {
+    rowStart[y] = k;
+    const row = y * width;
+    for (let x = 0; x < width; x++) {
+      if (!edges[row + x]) continue;
+      edgeP[k] = row + x;
+      edgeX[k] = x + 0.5;
+      edgeY[k] = y + 0.5;
+      k++;
+    }
+  }
+  rowStart[height] = k;
+}
+
+/**
+ * Collects into `ctx.near` the sorted-edge entries within `band` (+1 px) of `line` and inside
+ * the box `[x0, x1] × [y0, y1]`, row by row; returns their number. A superset: callers apply
+ * their exact tests.
+ */
+function gatherNear(
+  ctx: DetectorContext,
+  line: Line,
+  band: number,
+  x0: number,
+  x1: number,
+  y0: number,
+  y1: number,
+): number {
+  const { edgeX, rowStart, near, height } = ctx;
+  const { nx, ny, rho } = line;
+  const pad = band + 1;
+  // Rows the band crosses within [x0, x1]: from the line's y at both ends (if not vertical).
+  if (Math.abs(ny) > 1e-6) {
+    const ya = (rho - nx * x0) / ny;
+    const yb = (rho - nx * x1) / ny;
+    const spread = pad / Math.abs(ny);
+    y0 = Math.max(y0, Math.min(ya, yb) - spread);
+    y1 = Math.min(y1, Math.max(ya, yb) + spread);
+  }
+  const r0 = Math.max(0, Math.floor(y0 - 0.5));
+  const r1 = Math.min(height - 1, Math.ceil(y1 - 0.5));
+  let count = 0;
+  for (let r = r0; r <= r1; r++) {
+    let lo = x0;
+    let hi = x1;
+    if (Math.abs(nx) > 1e-6) {
+      const xa = (rho - ny * (r + 0.5) - pad) / nx;
+      const xb = (rho - ny * (r + 0.5) + pad) / nx;
+      lo = Math.max(lo, Math.min(xa, xb));
+      hi = Math.min(hi, Math.max(xa, xb));
+    }
+    if (lo > hi) continue;
+    for (let e = rowStart[r], end = rowStart[r + 1]; e < end; e++) {
+      const x = edgeX[e];
+      if (x < lo) continue;
+      if (x > hi) break;
+      near[count++] = e;
+    }
+  }
+  return count;
+}
+
 /** Re-fits a Hough line to nearby edge pixels with matching orientation (Tukey IRLS). */
-function refitLine(ctx: DetectorContext, line: Line, edgeCount: number): Line {
-  const { edgeList, gx, gy, mag, width, fitter } = ctx;
+function refitLine(ctx: DetectorContext, line: Line): Line {
+  const { edgeP, edgeX, edgeY, near, gx, gy, mag, fitter } = ctx;
   const cosTol = Math.cos((10 * Math.PI) / 180);
   fitter.reset();
-  for (let e = 0; e < edgeCount; e++) {
-    const p = edgeList[e];
-    const x = (p % width) + 0.5;
-    const y = ((p / width) | 0) + 0.5;
+  const count = gatherNear(ctx, line, 2.5, 0, ctx.width, 0, ctx.height);
+  for (let j = 0; j < count; j++) {
+    const e = near[j];
+    const p = edgeP[e];
+    const x = edgeX[e];
+    const y = edgeY[e];
     const d = line.nx * x + line.ny * y - line.rho;
     if (d < -2.5 || d > 2.5) continue;
     if (Math.abs(gx[p] * line.nx + gy[p] * line.ny) < cosTol * mag[p]) continue;
@@ -295,17 +450,19 @@ function refitLine(ctx: DetectorContext, line: Line, edgeCount: number): Line {
  * parameter `t` (position along the line), so that the support of any segment can be read in
  * O(1) while enumerating quads. Also records the parameter range visible inside the frame.
  */
-function buildSupportProfile(ctx: DetectorContext, index: number, edgeCount: number): void {
-  const { edgeList, gx, gy, mag, width, height, supportBins, binFlags } = ctx;
+function buildSupportProfile(ctx: DetectorContext, index: number): void {
+  const { edgeP, edgeX, edgeY, near, gx, gy, mag, width, height, supportBins, binFlags } = ctx;
   const line = ctx.lines[index];
   const dx = -line.ny;
   const dy = line.nx;
   const offset = Math.hypot(width, height);
   binFlags.fill(0);
-  for (let e = 0; e < edgeCount; e++) {
-    const p = edgeList[e];
-    const x = (p % width) + 0.5;
-    const y = ((p / width) | 0) + 0.5;
+  const count = gatherNear(ctx, line, SUPPORT_BAND, 0, width, 0, height);
+  for (let j = 0; j < count; j++) {
+    const e = near[j];
+    const p = edgeP[e];
+    const x = edgeX[e];
+    const y = edgeY[e];
     const d = line.nx * x + line.ny * y - line.rho;
     if (d < -SUPPORT_BAND || d > SUPPORT_BAND) continue;
     if (Math.abs(gx[p] * line.nx + gy[p] * line.ny) < COS_SUPPORT * mag[p]) continue;
@@ -394,8 +551,10 @@ function combineEvidence(sides: readonly SideEvidence[], areaRatio: number): num
     supported += s.support * s.visible;
     if (s.support < weakest) weakest = s.support;
   }
-  const support = 0.6 * (supported / visible) + 0.4 * weakest;
-  return support * FRAME_PENALTY ** frameSides * Math.min(1, areaRatio / FULL_SIZE_AREA) ** 0.25;
+  const { meanWeight, framePenalty, secondFramePenalty, fullSizeArea, sizeExponent } = PARAMS;
+  const support = meanWeight * (supported / visible) + (1 - meanWeight) * weakest;
+  const frame = frameSides ? framePenalty * (frameSides > 1 ? secondFramePenalty : 1) : 1;
+  return support * frame * Math.min(1, areaRatio / fullSizeArea) ** sizeExponent;
 }
 
 /**
@@ -533,7 +692,7 @@ function isFrameSide(a: Point, b: Point, width: number, height: number): boolean
  * corners. Sides without enough evidence keep their current line. Returns the input if
  * refinement would produce an invalid quad.
  */
-function refineQuad(ctx: DetectorContext, quad: Quad, edgeCount: number): Quad {
+function refineQuad(ctx: DetectorContext, quad: Quad): Quad {
   let current = quad;
   for (const band of [3, 1.5]) {
     const lines: Line[] = [];
@@ -541,9 +700,7 @@ function refineQuad(ctx: DetectorContext, quad: Quad, edgeCount: number): Quad {
       const a = current[s];
       const b = current[(s + 1) % 4];
       lines.push(
-        isFrameSide(a, b, ctx.width, ctx.height)
-          ? lineThrough(a, b)
-          : refineSide(ctx, a, b, band, edgeCount),
+        isFrameSide(a, b, ctx.width, ctx.height) ? lineThrough(a, b) : refineSide(ctx, a, b, band),
       );
     }
     const next: Point[] = [];
@@ -560,14 +717,8 @@ function refineQuad(ctx: DetectorContext, quad: Quad, edgeCount: number): Quad {
 }
 
 /** Robust sub-pixel line fit to the edge pixels supporting side `a → b`. */
-function refineSide(
-  ctx: DetectorContext,
-  a: Point,
-  b: Point,
-  band: number,
-  edgeCount: number,
-): Line {
-  const { edgeList, gx, gy, mag, width, fitter } = ctx;
+function refineSide(ctx: DetectorContext, a: Point, b: Point, band: number): Line {
+  const { edgeP, edgeX, edgeY, near, gx, gy, mag, width, fitter } = ctx;
   const line = lineThrough(a, b);
   const dx = -line.ny;
   const dy = line.nx;
@@ -579,10 +730,20 @@ function refineSide(
   const hi = Math.max(ta, tb) - margin;
   const cosTol = Math.cos((20 * Math.PI) / 180);
   fitter.reset();
-  for (let e = 0; e < edgeCount; e++) {
-    const p = edgeList[e];
-    let x = (p % width) + 0.5;
-    let y = ((p / width) | 0) + 0.5;
+  const count = gatherNear(
+    ctx,
+    line,
+    band,
+    Math.min(a.x, b.x) - band,
+    Math.max(a.x, b.x) + band,
+    Math.min(a.y, b.y) - band,
+    Math.max(a.y, b.y) + band,
+  );
+  for (let j = 0; j < count; j++) {
+    const e = near[j];
+    const p = edgeP[e];
+    let x = edgeX[e];
+    let y = edgeY[e];
     const d = line.nx * x + line.ny * y - line.rho;
     if (d < -band || d > band) continue;
     const t = x * dx + y * dy;
@@ -700,18 +861,21 @@ function quadSum(ctx: DetectorContext, quad: Quad, out: { sum: number; count: nu
 
 const sumScratch = { sum: 0, count: 0 };
 
-/**
- * Paper-brightness factor in (0, 1]: 1 if the inside of the quad (shrunk to {@link INNER_SCALE}
- * about its centroid) is at least as bright on average as the band around it (up to
- * {@link OUTER_SCALE}), else (inside / band)^{@link BRIGHTNESS_EXPONENT}. Paper is almost always
- * brighter than what it lies on, while screens, windows, doors and dark furniture fronts are not.
- */
+/** `quad` scaled by `f` about its vertex centroid. */
 function scaleAboutCentroid(quad: Quad, f: number): Quad {
   const cx = (quad[0].x + quad[1].x + quad[2].x + quad[3].x) / 4;
   const cy = (quad[0].y + quad[1].y + quad[2].y + quad[3].y) / 4;
   return quad.map((p) => ({ x: cx + (p.x - cx) * f, y: cy + (p.y - cy) * f })) as unknown as Quad;
 }
 
+/**
+ * Paper-brightness factor in (0, 1]: 1 if the inside of the quad (shrunk to {@link INNER_SCALE}
+ * about its centroid) is at least as bright on average as the band around it (up to
+ * {@link OUTER_SCALE}), else (inside / band)^`PARAMS.brightnessExponent`. Paper is almost always
+ * brighter than what it lies on, while screens, windows, doors and dark furniture fronts are not.
+ * A band with less than 5 % of the quad's pixels inside the frame (a quad filling the frame) is
+ * not judged.
+ */
 function brightnessFactor(ctx: DetectorContext, quad: Quad): number {
   const scaled = (f: number) => scaleAboutCentroid(quad, f);
   quadSum(ctx, scaled(INNER_SCALE), sumScratch);
@@ -722,19 +886,23 @@ function brightnessFactor(ctx: DetectorContext, quad: Quad): number {
   const quadCount = sumScratch.count;
   quadSum(ctx, scaled(OUTER_SCALE), sumScratch);
   const bandCount = sumScratch.count - quadCount;
-  if (bandCount <= 0) return 1;
+  if (bandCount < 0.05 * quadCount) return 1;
   const band = (sumScratch.sum - quadTotal) / bandCount;
-  return inner >= band ? 1 : ((inner + 1) / (band + 1)) ** BRIGHTNESS_EXPONENT;
+  return inner >= band ? 1 : ((inner + 1) / (band + 1)) ** PARAMS.brightnessExponent;
 }
 
-/** True if every corner of `inner` lies inside (or within 1 px of) the convex quad `outer`. */
+/**
+ * True if every corner of `inner` lies at least {@link ENCLOSING_MARGIN} px inside every side of
+ * the convex quad `outer`. Works for both corner orientations of `outer`.
+ */
 function encloses(outer: Quad, inner: Quad): boolean {
+  const orientation = signedArea(outer) < 0 ? -1 : 1;
   for (const p of inner) {
     for (let i = 0; i < 4; i++) {
       const a = outer[i];
       const b = outer[(i + 1) % 4];
-      const cross = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
-      if (cross < -Math.hypot(b.x - a.x, b.y - a.y)) return false;
+      const cross = orientation * ((b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x));
+      if (cross < ENCLOSING_MARGIN * Math.hypot(b.x - a.x, b.y - a.y)) return false;
     }
   }
   return true;
@@ -742,7 +910,7 @@ function encloses(outer: Quad, inner: Quad): boolean {
 
 /**
  * Moves a candidate that encloses the best one to the front if it scores at least
- * {@link ENCLOSING_SCORE} of the best and the region between them is at least as bright as the
+ * `PARAMS.enclosingScore` of the best and the region between them is at least as bright as the
  * best quad's inside: then the best quad is a block of content (text, a picture) on a page and
  * the enclosing quad is the page. A table top around a page fails the brightness test.
  */
@@ -757,7 +925,7 @@ function preferEnclosing(ctx: DetectorContext, ranked: ScoredQuad[]): void {
   const bestCount = sumScratch.count;
   for (let i = 1; i < ranked.length; i++) {
     const c = ranked[i];
-    if (c.score < ENCLOSING_SCORE * best.score) break;
+    if (c.score < PARAMS.enclosingScore * best.score) break;
     if (!encloses(c.quad, best.quad)) continue;
     quadSum(ctx, c.quad, sumScratch);
     const ringCount = sumScratch.count - bestCount;
