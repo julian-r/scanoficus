@@ -45,7 +45,8 @@ onDetectorStatus((status) => {
 const credits = document.createElement('footer');
 credits.className = 'credits';
 credits.innerHTML = `Neural detector: DocQuadNet weights (BSD-3-Clause), trained with SmartDoc 2015
-frames (CC BY 4.0, © Chazalon et al.). <a href="${modelLicenseUrl}">Model license and attribution</a>.`;
+frames (CC BY 4.0, © Chazalon et al.); round 2 also with Dizaj photos (CC BY 4.0, Mendeley Data
+v3). <a href="${modelLicenseUrl}">Model license and attribution</a>.`;
 document.body.append(credits);
 
 let unmount: (() => void) | null = null;

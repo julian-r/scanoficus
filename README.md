@@ -166,7 +166,7 @@ min+gzip, as measured by `pnpm size` (budget: 40 KB for core):
 | `@scanoficus/core/warp` · `/filters` · `/camera` · `/pdf`        | 3.0 · 2.2 · 2.6 · 1.7 KB |
 | `@scanoficus/elements/define` (including core)                   |                  30.5 KB |
 | `@scanoficus/react` (own code, without elements, core and React) |                   1.4 KB |
-| `@scanoficus/detector-nn` (optional; own code, without weights)  |                  12.7 KB |
+| `@scanoficus/detector-nn` (optional; own code, without weights)  |                  16.5 KB |
 
 ## Detector quality (synthetic benchmark)
 
@@ -251,17 +251,23 @@ const scanner = new ScannerController({
   backgrounds and pages that leave the frame. On clean scenes the classic detector is still
   more precise; `createHybridDetector` uses the network only when the classic score is below
   `CONFIDENT_SCORE`.
-- **Size.** The package is 12.7 KB min+gzip. The fp16 weights (688 kB, 608 kB brotli) ship
-  in its `models/` folder with their license and attribution and are fetched at runtime; the
-  graph names the weights' SHA-256, so mismatched files are rejected.
+- **Round 2 + corner refiner** (`@scanoficus/detector-nn/docquadnet2`, optional): a second
+  network moves each corner onto the true corner from 64×64 crops of the full-resolution still
+  (2 passes). The controller gives detectors the full still through the new optional
+  `DocumentDetector.detectStill`. Offline: SmartDoc held-out 0.978, Dizaj test 0.788 at
+  threshold 0.98. The presence decision is pluggable (`presence` option).
+- **Size.** The package is 16.5 KB min+gzip. The fp16 weights (round 1 688 kB; round 2
+  688 kB + refiner 244 kB) ship in its `models/<bundle>/` folders with their license and
+  attribution and are fetched at runtime; each graph names its weights' SHA-256, so mismatched
+  files are rejected.
 - **Speed.** A 1280×720 frame takes 2–6 ms (median, depending on machine load) on an M5 Pro in
   headless Chrome, and the cold start is about 35–60 ms. The CPU fallback takes 100–160 ms
   per frame. Phones are not measured yet.
 - **Parity.** On the same input, the outputs match the NumPy reference within 5·10⁻⁶ (CPU and
   WebGL2 with float32 activations). End to end with GPU preprocessing, the corners match within
   2·10⁻⁵ (float32) and 7·10⁻⁴ (float16 activations).
-- **License.** The weights are BSD-3. They require the SmartDoc CC BY 4.0 attribution; see the
-  package README.
+- **License.** The weights are BSD-3. They require the SmartDoc CC BY 4.0 attribution (round 2
+  also the Dizaj CC BY 4.0 attribution); see the package README.
 
 ## Roadmap
 

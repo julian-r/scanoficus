@@ -22,6 +22,10 @@ localStorage:
   network, then classic edge refinement near its quad, on 768-px frames instead of 384.
 - **Hybrid**: the classic detector first, and the network only when the classic score is
   below `CONFIDENT_SCORE`.
+- **Neural v2 + refiner**: round 2 of the network (threshold 0.98) on live frames (raw quad),
+  and the corner refiner on the full-resolution still after capture and on imported photos
+  (`detectStill`). The Debug overlay shows the still's size and time. Its model files (930 kB)
+  are only fetched when this option is used.
 
 The network runs in a worker when WebGL2 works on an `OffscreenCanvas` there, else on the main
 thread. If the model or WebGL2 is unavailable, or the network fails, the demo falls back to
