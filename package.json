@@ -8,14 +8,15 @@
     "node": ">=24"
   },
   "scripts": {
-    "build": "pnpm -r --filter \"./packages/**\" build",
-    "test": "pnpm -r --filter \"./packages/**\" test",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
     "lint": "biome check .",
     "format": "biome check --write .",
-    "typecheck": "pnpm -r --filter \"./packages/**\" typecheck",
+    "typecheck": "pnpm -r typecheck",
     "size": "size-limit",
     "eval": "pnpm --filter @scanoficus/core eval",
-    "dev:demo": "pnpm --filter @scanoficus/demo dev"
+    "dev:demo": "pnpm --filter @scanoficus/demo dev",
+    "preview:demo": "pnpm --filter @scanoficus/demo preview"
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.6",
