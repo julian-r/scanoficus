@@ -38,16 +38,23 @@ const browser = await chromium.launch({
   args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'],
 });
 
-/** Counts Worker construction/termination and worker error events inside the page. */
-const WORKER_PROBE = () => {
-  const stats = { created: [], terminated: 0, errors: [] };
+/**
+ * Counts Worker construction/termination and worker error events inside the page, and records
+ * the scanner's `scan-error` events (which carry the controller's non-fatal "Falling back to
+ * main-thread detection" notice). With `silent`, detector workers never receive requests,
+ * simulating a worker that loads but never answers.
+ */
+const WORKER_PROBE = (silent) => {
+  const stats = { created: [], terminated: 0, errors: [], scanErrors: [] };
   window.__workers = stats;
+  document.addEventListener('scan-error', (e) => stats.scanErrors.push(e.detail.error.message));
   const NativeWorker = window.Worker;
   window.Worker = class extends NativeWorker {
     constructor(url, options) {
       super(url, options);
       stats.created.push(String(url));
       this.addEventListener('error', (e) => stats.errors.push(e.message || 'error'));
+      if (silent && String(url).includes('worker-entry')) this.postMessage = () => {};
     }
     terminate() {
       stats.terminated++;
@@ -123,20 +130,21 @@ const DETECT_IN_PAGE = async (moduleUrl) => {
   server.close();
 }
 
-/** Opens and closes the demo's live scanner twice; checks workers and fallback. */
-async function checkDemo(label, url) {
+/**
+ * Opens and closes the demo's live scanner `rounds` times and returns what happened: worker
+ * URLs, terminations, worker error events and the scanner's fallback notices.
+ */
+async function runDemo(url, { rounds = 2, silent = false } = {}) {
   const page = await browser.newPage();
-  const logs = [];
-  page.on('console', (m) => logs.push(m.text()));
-  page.on('pageerror', (e) => logs.push(`pageerror: ${e.message}`));
-  await page.addInitScript(WORKER_PROBE);
+  await page.addInitScript(WORKER_PROBE, silent);
   await page.goto(`${url}#/live`);
-  for (let round = 0; round < 2; round++) {
+  for (let round = 0; round < rounds; round++) {
     await page.getByText('Start scanning').click();
+    // A silent worker only times out after 10 s; detection then continues on the main thread.
     await page.waitForFunction(
       () => document.querySelector('scan-document')?.controller?.getSnapshot().detection,
       null,
-      { timeout: 15000 },
+      { timeout: 25000 },
     );
     await page.evaluate(() => {
       const camera = document
@@ -147,24 +155,39 @@ async function checkDemo(label, url) {
     await page.waitForFunction(() => !document.querySelector('scan-document'));
   }
   const stats = await page.evaluate(() => window.__workers);
-  const detectorWorkers = stats.created.filter((u) => u.includes('worker-entry'));
+  await page.close();
+  return {
+    ...stats,
+    detectorWorkers: stats.created.filter((u) => u.includes('worker-entry')),
+    fallback: stats.scanErrors.filter((m) => m.startsWith('Falling back')),
+  };
+}
+
+/** Checks a demo build: default worker URL, worker cleanup, no fallback; and that fallback is caught. */
+async function checkDemo(label, url) {
+  const result = await runDemo(url);
   check(
     `${label}: live scanner uses the default worker URL`,
-    detectorWorkers.length === 2,
-    stats.created.join(', '),
+    result.detectorWorkers.length === 2,
+    result.created.join(', '),
   );
   check(
     `${label}: every detector worker is terminated on close`,
-    stats.terminated >= detectorWorkers.length,
-    `created ${stats.created.length}, terminated ${stats.terminated}`,
+    result.terminated >= result.detectorWorkers.length,
+    `created ${result.created.length}, terminated ${result.terminated}`,
   );
-  const fallback = logs.filter((l) => /Falling back|Detector worker/.test(l));
   check(
     `${label}: no main-thread fallback or worker errors`,
-    fallback.length === 0 && stats.errors.length === 0,
-    [...fallback, ...stats.errors].join(' | '),
+    result.fallback.length === 0 && result.errors.length === 0,
+    [...result.scanErrors, ...result.errors].join(' | '),
   );
-  await page.close();
+  // Control: a worker that loads but never answers must be reported as a fallback.
+  const silent = await runDemo(url, { rounds: 1, silent: true });
+  check(
+    `${label}: a silent worker is detected as a main-thread fallback`,
+    silent.fallback.length === 1 && /did not answer/.test(silent.fallback[0]),
+    silent.scanErrors.join(' | '),
+  );
 }
 
 // ---- 2. demo under Vite dev ------------------------------------------------------------------

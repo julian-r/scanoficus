@@ -1,14 +1,18 @@
 /**
  * Packs the libraries (`pnpm pack`), installs the tarballs into a fresh temporary project and
  * checks that every runtime export resolves and imports in Node, the worker entry is shipped,
- * and all type declarations resolve for both `Bundler` and `NodeNext` module resolution.
+ * all type declarations resolve for both `Bundler` and `NodeNext` module resolution, and — in
+ * a small Vite app consuming the installed package (dev server with dependency pre-bundling,
+ * and production build) — the default detector worker URL loads and detects a document in
+ * headless Chrome (`channel: 'chrome'`, override with CHROME_PATH).
  * Run after `pnpm build`: `pnpm check:pack`.
  */
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { chromium } from 'playwright-core';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const tmp = mkdtempSync(join(tmpdir(), 'scanoficus-pack-'));
@@ -42,6 +46,8 @@ try {
         ...tarballs,
         react: reactDev.react,
         '@types/react': reactDev['@types/react'],
+        vite: JSON.parse(readFileSync(join(root, 'apps/demo/package.json'), 'utf8')).devDependencies
+          .vite,
       },
     }),
   );
@@ -119,6 +125,61 @@ export const all = [${specifiers.map((_, i) => `t${i}`).join(', ')}];
       tmp,
     );
     console.log(`types ok: ${resolution}`);
+  }
+
+  // Installed-package Vite app: the default worker URL must work in dev and build.
+  const app = join(tmp, 'vite-app');
+  run('mkdir', ['-p', app], tmp);
+  writeFileSync(
+    join(app, 'index.html'),
+    '<!doctype html><script type="module" src="./main.js"></script>',
+  );
+  writeFileSync(
+    join(app, 'main.js'),
+    `import { createDetectorWorker } from '@scanoficus/core/worker';
+const canvas = new OffscreenCanvas(384, 288);
+const ctx = canvas.getContext('2d');
+ctx.fillStyle = '#222';
+ctx.fillRect(0, 0, 384, 288);
+ctx.fillStyle = '#eee';
+ctx.beginPath();
+ctx.moveTo(90, 40); ctx.lineTo(300, 60); ctx.lineTo(280, 250); ctx.lineTo(70, 230);
+ctx.closePath();
+ctx.fill();
+const detector = createDetectorWorker();
+detector.detect(ctx.getImageData(0, 0, 384, 288)).then(
+  (detection) => { window.result = { detection }; },
+  (error) => { window.result = { error: String(error) }; },
+);
+`,
+  );
+  const vite = await import(pathToFileURL(join(tmp, 'node_modules/vite/dist/node/index.js')).href);
+  const browser = await chromium.launch({
+    ...(process.env.CHROME_PATH
+      ? { executablePath: process.env.CHROME_PATH }
+      : { channel: 'chrome' }),
+    headless: true,
+  });
+  const probe = async (label, url) => {
+    const page = await browser.newPage();
+    await page.goto(url);
+    await page.waitForFunction(() => window.result, null, { timeout: 20000 });
+    const result = await page.evaluate(() => window.result);
+    await page.close();
+    if (!result.detection) throw new Error(`${label}: worker detection failed: ${result.error}`);
+    console.log(`vite ${label} (installed package): default worker detects a document`);
+  };
+  try {
+    const dev = await vite.createServer({ root: app, logLevel: 'error', server: { port: 0 } });
+    await dev.listen();
+    await probe('dev', dev.resolvedUrls.local[0]);
+    await dev.close();
+    await vite.build({ root: app, logLevel: 'error' });
+    const preview = await vite.preview({ root: app, logLevel: 'error', preview: { port: 0 } });
+    await probe('build', preview.resolvedUrls.local[0]);
+    await new Promise((resolve) => preview.httpServer.close(resolve));
+  } finally {
+    await browser.close();
   }
 } finally {
   rmSync(tmp, { recursive: true, force: true });
