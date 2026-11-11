@@ -1,4 +1,4 @@
-/** Per-frame metrics and their aggregation for the benchmark report and montages. */
+/** Per-frame metrics, their aggregation and table formatting for the benchmark reports. */
 import { QuadTracker } from '../src/detect/index.ts';
 import { type Quad, quadArea } from '../src/geometry/index.ts';
 import { cornerError, smartDocJaccard, visibleFraction, visibleIoU } from './metrics.ts';
@@ -32,10 +32,14 @@ export interface FrameMetrics {
   score: number;
 }
 
-/** Primary per-frame score: SmartDoc JI for SmartDoc, visible-region IoU for MIDV. */
+/**
+ * Primary per-frame score (higher is better): SmartDoc JI for SmartDoc, visible-region IoU for
+ * MIDV, and for the no-document negatives 1 minus the confidence of the (false) detection.
+ */
 export function frameScore(clip: ClipResult, frame: FrameResult, size: number): number {
-  const truth = unpackQuad(frame.truth);
   const run = frame.runs[size];
+  if (!frame.truth) return run.quad ? 1 - run.score : 1;
+  const truth = unpackQuad(frame.truth);
   const quad = run.quad ? unpackQuad(run.quad) : null;
   return clip.dataset === 'smartdoc'
     ? smartDocJaccard(truth, quad, clip.reference)
@@ -55,6 +59,7 @@ export function clipMetrics(
   const tracker = new QuadTracker();
   const interval = frameIntervalMs(clip);
   return clip.frames.map((frame) => {
+    if (!frame.truth) throw new Error(`${clip.dataset}/${clip.id} has no ground-truth quads`);
     const truth = unpackQuad(frame.truth);
     const run = frame.runs[size];
     let quad: Quad | null = run.quad ? unpackQuad(run.quad) : null;
@@ -124,4 +129,62 @@ export function quantile(values: readonly number[], q: number): number {
   if (!values.length) return Number.NaN;
   const sorted = [...values].sort((a, b) => a - b);
   return sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))];
+}
+
+/** Outcome of the detector on a no-document frame: any returned quad is a false positive. */
+export interface NegativeMetrics {
+  found: boolean;
+  /** Confidence of the returned quad (0 if none). */
+  score: number;
+  ms: number;
+}
+
+export function negativeMetrics(clip: ClipResult, size: number): NegativeMetrics[] {
+  return clip.frames.map((frame) => {
+    const run = frame.runs[size];
+    return { found: run.quad !== null, score: run.quad ? run.score : 0, ms: run.ms };
+  });
+}
+
+/** Share of negative frames with a returned quad of confidence ≥ `threshold`. */
+export function falsePositiveRate(metrics: readonly NegativeMetrics[], threshold = 0): number {
+  return metrics.filter((m) => m.found && m.score >= threshold).length / metrics.length;
+}
+
+export const pct = (v: number, digits = 1) =>
+  Number.isFinite(v) ? `${(100 * v).toFixed(digits)} %` : '–';
+export const num = (v: number, digits = 3) => (Number.isFinite(v) ? v.toFixed(digits) : '–');
+
+/** Markdown table; the first column is left-aligned, the others right-aligned. */
+export function table(header: string[], rows: string[][]): string {
+  const align = header.map((_, i) => (i === 0 ? '---' : '---:'));
+  return [header, align, ...rows].map((r) => `| ${r.join(' | ')} |`).join('\n');
+}
+
+export const METRIC_HEADER = [
+  'frames',
+  'JI',
+  'found',
+  'IoU',
+  'IoU≥0.9',
+  'IoU≥0.95',
+  'corner err',
+  'p90 err',
+  'ms',
+  'p95 ms',
+];
+
+export function metricCells(a: Aggregate): string[] {
+  return [
+    String(a.frames),
+    num(a.ji),
+    pct(a.found),
+    num(a.iou),
+    pct(a.iou90),
+    pct(a.iou95),
+    pct(a.cornerMean, 2),
+    pct(a.cornerP90, 2),
+    num(a.msMean, 1),
+    num(a.msP95, 1),
+  ];
 }

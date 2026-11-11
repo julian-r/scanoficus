@@ -18,7 +18,8 @@ export interface DetectorRun {
 
 export interface FrameResult {
   index: number;
-  truth: PackedQuad;
+  /** Ground truth; `null` for the no-document negatives. */
+  truth: PackedQuad | null;
   /** Keyed by processing long side. */
   runs: Record<number, DetectorRun>;
 }
@@ -37,6 +38,11 @@ export interface ClipResult {
   minScore: number | null;
   /** `minArea` passed to the detector, `null` for the default. */
   minArea: number | null;
+  /**
+   * Detector that produced the run (absent in runs of the classic detector made before this
+   * field existed). `options` are the detector options that differ from its defaults.
+   */
+  detector?: { name: string; options?: Record<string, unknown>; [key: string]: unknown };
   frames: FrameResult[];
 }
 

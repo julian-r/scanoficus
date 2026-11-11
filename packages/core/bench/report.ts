@@ -2,9 +2,14 @@
  * Markdown tables from the raw results of `pnpm bench`.
  *
  * Usage: `pnpm bench:report [--run full] [--datasets smartdoc,midv500,midv2019] [--detail 384]
- *   [--diagnostic <run>]`
+ *   [--diagnostic <run>] [--thresholds 0.6,0.7,0.8]`
+ *   or `pnpm bench:report --runs full,relaxed,nn-x@256 [--out <file>]`
  *
- * Writes `eval-out/bench/<run>/report.md` and prints it. Metrics (see docs/benchmarks.md):
+ * With `--run`, writes `eval-out/bench/<run>/report.md` (summary by split, negatives, then the
+ * detailed tables per dataset) and prints it. With `--runs`, compares several runs side by side
+ * (summary by split and negatives only) and writes `eval-out/bench/compare.md` or `--out`. A run
+ * is evaluated at `--detail` px if it has that size, else at its first size; `name@size` picks
+ * the size explicitly. Metrics (see docs/benchmarks.md):
  * SmartDoc JI (official Challenge 1 Jaccard index, mean over frames, misses score 0), visible-
  * region image IoU and the shares of frames with IoU ≥ 0.9 / 0.95 (misses count as failures),
  * mean / p90 corner error in % of the image diagonal over frames with a detection, detection
@@ -15,9 +20,20 @@
  * (e.g. `--min-area 0.02 --min-score 0`); failures are then split into causes.
  */
 import { writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { DATASETS, type DatasetName } from './datasets.ts';
-import { type Aggregate, aggregate, clipMetrics, type FrameMetrics } from './report-data.ts';
+import {
+  aggregate,
+  clipMetrics,
+  type FrameMetrics,
+  METRIC_HEADER,
+  metricCells,
+  num,
+  pct,
+  table,
+} from './report-data.ts';
+import { parseRunSpec, summarySections } from './report-summary.ts';
 import { type ClipResult, loadRun, runDir } from './results.ts';
 
 const { values } = parseArgs({
@@ -26,52 +42,31 @@ const { values } = parseArgs({
     datasets: { type: 'string', default: DATASETS.join(',') },
     detail: { type: 'string', default: '384' },
     diagnostic: { type: 'string' },
+    runs: { type: 'string' },
+    out: { type: 'string' },
+    thresholds: { type: 'string', default: '0.6,0.7,0.8' },
   },
 });
 const detail = Number(values.detail);
+const thresholds = values.thresholds.split(',').map(Number);
+if (values.runs) {
+  const specs = values.runs.split(',').map(parseRunSpec);
+  const markdown = `${['# Detector comparison', ...summarySections(specs, detail, thresholds)].join('\n\n')}\n`;
+  const out = values.out
+    ? resolve(process.env.INIT_CWD ?? process.cwd(), values.out)
+    : new URL('../eval-out/bench/compare.md', import.meta.url);
+  writeFileSync(out, markdown);
+  console.log(markdown);
+  process.exit(0);
+}
 /** `detectDocument`'s default `minArea` (fraction of the frame). */
 const DEFAULT_MIN_AREA = 0.08;
 const TITLES: Record<DatasetName, string> = {
   smartdoc: 'SmartDoc 2015 Challenge 1',
   midv500: 'MIDV-500',
   midv2019: 'MIDV-2019',
+  negatives: 'No-document negatives',
 };
-
-const pct = (v: number, digits = 1) =>
-  Number.isFinite(v) ? `${(100 * v).toFixed(digits)} %` : '–';
-const num = (v: number, digits = 3) => (Number.isFinite(v) ? v.toFixed(digits) : '–');
-
-function table(header: string[], rows: string[][]): string {
-  const align = header.map((_, i) => (i === 0 ? '---' : '---:'));
-  return [header, align, ...rows].map((r) => `| ${r.join(' | ')} |`).join('\n');
-}
-
-const METRIC_HEADER = [
-  'frames',
-  'JI',
-  'found',
-  'IoU',
-  'IoU≥0.9',
-  'IoU≥0.95',
-  'corner err',
-  'p90 err',
-  'ms',
-  'p95 ms',
-];
-function metricCells(a: Aggregate): string[] {
-  return [
-    String(a.frames),
-    num(a.ji),
-    pct(a.found),
-    num(a.iou),
-    pct(a.iou90),
-    pct(a.iou95),
-    pct(a.cornerMean, 2),
-    pct(a.cornerP90, 2),
-    num(a.msMean, 1),
-    num(a.msP95, 1),
-  ];
-}
 
 interface Labeled {
   clip: ClipResult;
@@ -133,8 +128,12 @@ function causes(main: FrameMetrics[], relaxed: FrameMetrics[], smartdoc: boolean
   return [String(failures), ...counts.map((c) => pct(failures ? c / failures : Number.NaN))];
 }
 
-const sections: string[] = [`# Detector benchmark — run \`${values.run}\``];
+const sections: string[] = [
+  `# Detector benchmark — run \`${values.run}\``,
+  ...summarySections([{ name: values.run }], detail, thresholds),
+];
 for (const dataset of values.datasets.split(',') as DatasetName[]) {
+  if (dataset === 'negatives') continue; // in the summary
   const clips = loadRun(values.run, dataset);
   if (!clips.length) continue;
   const smartdoc = dataset === 'smartdoc';

@@ -2,25 +2,31 @@
  * Dataset adapters for the real-data detector benchmark. Each adapter lists the clips of a
  * dataset as {@link BenchClip}s: an ordered sequence of frame files with their ground-truth quad
  * (TL, TR, BR, BL in frame pixels) and the size of the document's reference frame used by the
- * SmartDoc Jaccard index.
+ * SmartDoc Jaccard index. The `negatives` dataset has no document in any frame (quad `null`).
  */
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import type { Quad } from '../src/geometry/index.ts';
+import { loadNegatives } from './negatives.ts';
 
-export type DatasetName = 'smartdoc' | 'midv500' | 'midv2019';
-export const DATASETS: readonly DatasetName[] = ['smartdoc', 'midv500', 'midv2019'];
+export type DatasetName = 'smartdoc' | 'midv500' | 'midv2019' | 'negatives';
+export const DATASETS: readonly DatasetName[] = ['smartdoc', 'midv500', 'midv2019', 'negatives'];
+/** Images per negatives clip (images of one pixel size are grouped into clips). */
+const NEGATIVES_PER_CLIP = 100;
 
 /** One frame with its ground truth. */
 export interface BenchFrame {
-  /** 1-based frame number within the clip. */
+  /** 1-based frame number within the clip (the COCO image id for the negatives). */
   index: number;
   /** Absolute path of the frame image. */
   path: string;
-  /** Ground-truth document quad (TL, TR, BR, BL), corners may lie outside the frame. */
-  quad: Quad;
+  /**
+   * Ground-truth document quad (TL, TR, BR, BL), corners may lie outside the frame; `null` for
+   * the no-document negatives.
+   */
+  quad: Quad | null;
 }
 
 /** A video clip (consecutive frames of one document on one background / condition). */
@@ -28,9 +34,9 @@ export interface BenchClip {
   dataset: DatasetName;
   /** Unique within the dataset, safe as a file name (e.g. `background01-datasheet001`). */
   id: string;
-  /** Background (SmartDoc) or capture condition (MIDV). */
+  /** Background (SmartDoc), capture condition (MIDV) or image source (negatives). */
   background: string;
-  /** Document type (SmartDoc) or ID document type (MIDV). */
+  /** Document type (SmartDoc), ID document type (MIDV) or `none` (negatives). */
   docType: string;
   /** Size of the document's reference frame (SmartDoc: model size in 0.1 mm). */
   reference: { width: number; height: number };
@@ -113,9 +119,42 @@ export function datasetsRoot(): string {
 }
 
 export function loadClips(dataset: DatasetName, root: string = datasetsRoot()): BenchClip[] {
-  return dataset === 'smartdoc'
-    ? loadSmartDoc(join(root, 'smartdoc15-ch1'))
-    : loadMidv(dataset, root);
+  if (dataset === 'smartdoc') return loadSmartDoc(join(root, 'smartdoc15-ch1'));
+  if (dataset === 'negatives') return loadNegativeClips(root);
+  return loadMidv(dataset, root);
+}
+
+/**
+ * No-document negatives (see `negatives.ts`): images of the same pixel size are grouped into
+ * clips of at most {@link NEGATIVES_PER_CLIP}, ordered by COCO image id, with ids such as
+ * `coco-640x480-01`. The reference frame is the image size (unused).
+ */
+function loadNegativeClips(root: string): BenchClip[] {
+  const { dir, images } = loadNegatives(root);
+  const bySize = new Map<string, typeof images>();
+  for (const image of [...images].sort((a, b) => a.id - b.id)) {
+    const key = `${image.width}x${image.height}`;
+    bySize.set(key, [...(bySize.get(key) ?? []), image]);
+  }
+  const clips: BenchClip[] = [];
+  for (const [size, group] of [...bySize].sort(([a], [b]) => a.localeCompare(b))) {
+    for (let start = 0; start < group.length; start += NEGATIVES_PER_CLIP) {
+      const chunk = group.slice(start, start + NEGATIVES_PER_CLIP);
+      clips.push({
+        dataset: 'negatives',
+        id: `coco-${size}-${String(start / NEGATIVES_PER_CLIP + 1).padStart(2, '0')}`,
+        background: 'coco',
+        docType: 'none',
+        reference: { width: chunk[0].width, height: chunk[0].height },
+        frames: chunk.map((image) => ({
+          index: image.id,
+          path: join(dir, 'images', image.file),
+          quad: null,
+        })),
+      });
+    }
+  }
+  return clips;
 }
 
 /**

@@ -38,8 +38,9 @@ verifies and unpacks them. Downloads resume after an interruption, and finished 
 skipped on re-runs. The script needs `curl`, `tar`, `unzip`, `shasum` and `openssl`.
 
 ```sh
-pnpm bench:fetch                                  # all three (≈ 1 GB + 2 × ≈ 7.5 GB download)
+pnpm bench:fetch                                  # all (≈ 1 GB + 2 × ≈ 7.5 GB + 1.2 GB download)
 pnpm bench:fetch --datasets smartdoc              # SmartDoc only
+pnpm bench:fetch --datasets negatives             # no-document negatives (COCO subset)
 pnpm bench:fetch --datasets midv500 --midv-types 01,02,03 --keep-archives
 ```
 
@@ -48,6 +49,8 @@ pnpm bench:fetch --datasets midv500 --midv-types 01,02,03 --keep-archives
 | [SmartDoc 2015 Challenge 1](https://github.com/jchazalon/smartdoc15-ch1-dataset), release v2.0.0 | All 150 clips (5 backgrounds × 30 documents of 6 types), 24,889 frames of 1920×1080, GT quad per frame                                                | CC BY 4.0 (`LICENCE` in the archive). Cite Burie et al., ICDAR 2015. "Original images remain the property of their respective authors."                                                       | `frames.tar.gz` (1.0 GB) from the GitHub release, verified with the published SHA-256. No registration.                                                                          |
 | [MIDV-500](https://arxiv.org/abs/1807.05786)                                                     | 10 of 50 ID document types (every 5th: 01, 06, 11, …, 46). All 10 clips per type (5 conditions × 2 phones), 30 frames each: 3,000 frames of 1080×1920 | `license.txt` on the FTP server: CC BY-SA 2.5. Source images are public-domain or openly licensed Wikimedia images (see `documents.pdf`). Cite Arlazarov et al., Computer Optics 43(5), 2019. | `ftp://smartengines.com/midv-500/dataset/<type>.zip` (≈ 0.65 GB each), verified with `md5.txt`. Anonymous FTP, no registration. Only `images/` and `ground_truth/` are unpacked. |
 | [MIDV-2019](https://arxiv.org/abs/1910.04009)                                                    | The same 10 types. All 4 clips per type (distorted / low light × 2 phones), 30 frames each: 1,200 frames of 2160×3840                                 | `license.txt` on the FTP server: CC BY-SA 2.5. Cite Bulatov et al., ICMV 2019 (Proc. SPIE 11433).                                                                                             | `ftp://smartengines.com/midv-500/extra/midv-2019/dataset/<type>.zip` (≈ 0.75 GB each), verified with `md5.txt`. No registration.                                                 |
+
+| No-document negatives (COCO 2017 subset, see `packages/core/bench/negatives.ts`) | 785 photos (of 800 selected: 230 val2017, 570 train2017; mostly 640×480) of tables, desks, rooms, screens, laptops, keyboards, phones and remotes without any annotated book, paper, cardboard or banner and without a caption that mentions printed matter. 15 images with a frame added in photo editing (uniform 3-px rim on all sides) are skipped | Annotations CC BY 4.0 (COCO). Images: Flickr, only those under CC BY 2.0, CC BY-SA 2.0, CC BY-ND 2.0 or "no known copyright restrictions" (all permit evaluation use). Used locally only, never redistributed. | Panoptic + caption annotation zips (0.86 + 0.25 GB, only for the selection), then the 800 images (119 MB) from `images.cocodataset.org`. `manifest.json` lists ids, licenses and Flickr URLs. |
 
 No dataset needed a registration. MIDV-2020 (a 124 GB university mirror behind a form and
 license acceptance) was not used. The MIDV subset is fixed (every 5th document type) rather
@@ -104,15 +107,43 @@ run is for diagnosis only. The benchmark numbers use the defaults.
 16 worker threads. MIDV-500 takes 16 s and MIDV-2019 8 s. No frame sampling was needed, so
 every frame is evaluated.
 
+**Evaluation protocol (tuning / held-out split).** Detector changes must not be fitted to the
+frames they are judged on, so the real data is split (`packages/core/bench/splits.ts`):
+
+- SmartDoc is split by document type. Each of the 6 types has 5 documents, each filmed on all 5
+  backgrounds. The tuning split holds datasheet, magazine and patent (15 documents, 75 clips,
+  12,622 frames). The held-out split holds letter, paper and tax (15 documents, 75 clips,
+  12,267 frames). No document is in both, and both contain every background.
+- MIDV-500 and MIDV-2019 are held out entirely (other documents, devices and conditions).
+- The no-document negatives are a separate false-positive check. They are used to calibrate
+  score thresholds, never to rank candidates on positives.
+
+Detector changes are developed on the tuning split only: failure montages (`--split tune`),
+diagnostic runs and parameter choices. Held-out numbers are reported, not optimized. Every
+change is logged in the [experiment log](#experiment-log) with its tuning result before the
+held-out result is looked at.
+
+**False-positive rate.** On the negatives, any returned quad is a false positive. The report
+gives the share of images with a quad, and with a quad of score ≥ 0.6 / 0.7 / 0.8.
+
 ### Running it
 
 ```sh
 pnpm bench                       # all datasets, sizes 256,384,512, default options → eval-out/bench/full/
 pnpm bench --datasets smartdoc --sizes 384 --min-area 0.02 --min-score 0 --run relaxed
 pnpm bench --datasets smartdoc --workers 1 --step 10 --run timing
+pnpm bench --split tune --sizes 384 --run my-variant --options '{"minArea":0.04}'  # tuning split only
 pnpm bench:report --diagnostic relaxed    # markdown tables → packages/core/eval-out/bench/full/report.md
-pnpm bench:montage --dataset smartdoc --mode worst      # or --mode failures; PNG pages + legend
+pnpm bench:report --runs full,my-variant,nn-model@256   # side by side → eval-out/bench/compare.md
+pnpm bench:montage --dataset smartdoc --mode worst --split tune  # or --mode failures; PNG pages + legend
 ```
+
+`--detector <name>` selects a detector registered in `packages/core/bench/detectors.ts`
+(default `classic`, the library's `detectDocument`), and `--options` passes it JSON options.
+Each run directory holds one approach. Other detectors (e.g. a neural network evaluated
+outside this repository) can write their predictions into their own run directory in the same
+per-clip JSON format (`packages/core/bench/results.ts`), and `bench:report --runs` scores them
+in the same way.
 
 Results are stored per clip (`eval-out/bench/<run>/<dataset>/<clip>.json`). An interrupted
 run resumes and skips finished clips. Delete a run directory to recompute it. Montages

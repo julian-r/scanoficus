@@ -2,14 +2,16 @@
  * Failure montages for the real-data benchmark: frames with the ground truth (green), the
  * detection (red) and the best runner-up candidate (blue, thin), numbered, with a legend file.
  *
- * Usage: `pnpm bench:montage [--run full] [--dataset smartdoc] [--size 384]
+ * Usage: `pnpm bench:montage [--run full] [--dataset smartdoc] [--size 384] [--split tune]
  *   [--mode worst|failures] [--k 24] [--per-clip 2] [--threshold 0.9] [--seed 1]`
  *
  * - `worst`: the K lowest-scoring frames per background, at most `per-clip` per clip.
  * - `failures`: a seeded random sample of K frames per background among those scoring below
  *   `threshold`, at most `per-clip` per clip (for estimating failure-mode shares).
  *
- * The score is the SmartDoc Jaccard index for SmartDoc and the visible-region IoU for MIDV.
+ * The score is the SmartDoc Jaccard index for SmartDoc, the visible-region IoU for MIDV and
+ * 1 − detector confidence of the false detection for the negatives. `--split tune` restricts
+ * the frames to the tuning split (look only at those while developing the detector).
  * Pages of 12 tiles go to `eval-out/bench/montage/`.
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -21,6 +23,7 @@ import { type DatasetName, loadClips } from './datasets.ts';
 import { decodeFrames } from './frames.ts';
 import { frameScore } from './report-data.ts';
 import { type ClipResult, loadRun, type PackedQuad } from './results.ts';
+import { splitOf } from './splits.ts';
 
 const { values } = parseArgs({
   options: {
@@ -32,6 +35,7 @@ const { values } = parseArgs({
     'per-clip': { type: 'string', default: '2' },
     threshold: { type: 'string', default: '0.9' },
     seed: { type: 'string', default: '1' },
+    split: { type: 'string' },
   },
 });
 const dataset = values.dataset as DatasetName;
@@ -69,7 +73,9 @@ const paths = new Map<string, string>();
 for (const clip of loadClips(dataset)) {
   for (const f of clip.frames) paths.set(`${clip.id}#${f.index}`, f.path);
 }
-const clips = loadRun(values.run, dataset);
+const clips = loadRun(values.run, dataset).filter(
+  (clip) => !values.split || splitOf(clip) === values.split,
+);
 const backgrounds = [...new Set(clips.map((c) => c.background))].sort();
 const random = new Random(Number(values.seed));
 
@@ -100,8 +106,11 @@ for (const background of backgrounds) {
   const legend: string[] = [];
   for (let page = 0; page * TILES_PER_PAGE < picks.length; page++) {
     const tiles = picks.slice(page * TILES_PER_PAGE, (page + 1) * TILES_PER_PAGE);
-    const { width, height } = tiles[0].clip.frameSize;
-    const tileHeight = Math.round((TILE_WIDTH * height) / width);
+    const tileHeight = Math.max(
+      ...tiles.map(({ clip }) =>
+        Math.round((TILE_WIDTH * clip.frameSize.height) / clip.frameSize.width),
+      ),
+    );
     const rows = Math.ceil(tiles.length / COLUMNS);
     const sheet = createRgba(COLUMNS * TILE_WIDTH, rows * tileHeight);
     for (let t = 0; t < tiles.length; t++) {
@@ -125,7 +134,7 @@ for (const background of backgrounds) {
       if (!image) throw new Error(`cannot decode ${path}`);
       const tile = image as RgbaImage;
       const run = frame.runs[size];
-      drawQuad(tile, frame.truth, scale, [0, 255, 0], 2);
+      if (frame.truth) drawQuad(tile, frame.truth, scale, [0, 255, 0], 2);
       if (run.candidates[0]) drawQuad(tile, run.candidates[0], scale, [40, 120, 255], 1);
       if (run.quad) drawQuad(tile, run.quad, scale, [255, 0, 0], 2);
       drawNumber(tile, number, 6, 6);

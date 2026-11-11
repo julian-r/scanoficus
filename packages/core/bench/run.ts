@@ -1,37 +1,40 @@
 /**
- * Runs the classic detector over real dataset frames and stores the raw per-frame results.
+ * Runs a detector over real dataset frames and stores the raw per-frame results.
  *
- * Usage: `pnpm bench [--datasets smartdoc,midv500,midv2019] [--sizes 256,384,512]
- *   [--workers N] [--step 1] [--run full] [--clips <regex>]
- *   [--min-score <s>] [--min-area <a>]`
+ * Usage: `pnpm bench [--datasets smartdoc,midv500,midv2019,negatives] [--sizes 256,384,512]
+ *   [--workers N] [--step 1] [--run full] [--clips <regex>] [--split tune|heldout]
+ *   [--detector classic] [--options '<json>'] [--min-score <s>] [--min-area <a>]`
  *
  * Each clip is processed by one worker thread: ffmpeg decodes every `step`-th frame at full
  * resolution to gray, the library's `downscaleGray` reduces it to each long side in `sizes`
- * (as the live pipeline hands the detector an already downscaled frame), and `detectDocument`
- * runs with default options (plus `candidates: true` to record the ranked alternatives). Only
- * the `detectDocument` call is timed. `--min-score` and `--min-area` override the detector
- * defaults for diagnostic runs only (with `--min-score 0`, the best candidate of every frame is
- * recorded); benchmark numbers use the defaults. Results go to
- * `eval-out/bench/<run>/<dataset>/<clip>.json`; finished clips are skipped, so an interrupted run
- * resumes where it stopped. `pnpm bench:report` turns them into tables.
+ * (as the live pipeline hands the detector an already downscaled frame), and the detector named
+ * by `--detector` (see `detectors.ts`; default `classic`, the library's `detectDocument`) runs
+ * with the JSON `--options` (default: none, i.e. the detector defaults). Only the detector call is
+ * timed. `--min-score` and `--min-area` are shortcuts for those options, meant for diagnostic runs
+ * (with `--min-score 0`, the best candidate of every frame is recorded). `--split` restricts the
+ * run to the tuning or held-out clips (see `splits.ts`; the negatives belong to neither and are
+ * always included). Results go to `eval-out/bench/<run>/<dataset>/<clip>.json`; finished clips
+ * are skipped, so an interrupted run resumes where it stopped. `pnpm bench:report` turns them
+ * into tables.
  */
 import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { availableParallelism } from 'node:os';
 import { parseArgs } from 'node:util';
 import { isMainThread, parentPort, Worker, workerData } from 'node:worker_threads';
-import { DetectorContext, detectDocument } from '../src/detect/index.ts';
 import type { Quad } from '../src/geometry/index.ts';
 import { downscaleGray, type GrayImage } from '../src/image.ts';
 import { type BenchClip, DATASETS, type DatasetName, loadClips } from './datasets.ts';
+import { BENCH_DETECTORS } from './detectors.ts';
 import { decodeFrames, probeSize } from './frames.ts';
 import { type ClipResult, clipResultPath, type FrameResult, packQuad, runDir } from './results.ts';
+import { type Split, splitOf } from './splits.ts';
 
 interface Job {
   clip: BenchClip;
   sizes: number[];
   step: number;
-  minScore: number | undefined;
-  minArea: number | undefined;
+  detector: string;
+  options: Record<string, unknown>;
   /** `file:` URL of the result file (URLs cannot be posted to workers). */
   file: string;
 }
@@ -45,15 +48,22 @@ if (isMainThread) {
       step: { type: 'string', default: '1' },
       run: { type: 'string', default: 'full' },
       clips: { type: 'string' },
+      split: { type: 'string' },
+      detector: { type: 'string', default: 'classic' },
+      options: { type: 'string', default: '{}' },
       'min-score': { type: 'string' },
       'min-area': { type: 'string' },
     },
   });
   const sizes = values.sizes.split(',').map(Number);
   const step = Number(values.step);
-  const optional = (v: string | undefined) => (v === undefined ? undefined : Number(v));
-  const minScore = optional(values['min-score']);
-  const minArea = optional(values['min-area']);
+  if (!(values.detector in BENCH_DETECTORS)) {
+    throw new Error(`Unknown detector ${values.detector}; known: ${Object.keys(BENCH_DETECTORS)}`);
+  }
+  const options = JSON.parse(values.options) as Record<string, unknown>;
+  if (values['min-score'] !== undefined) options.minScore = Number(values['min-score']);
+  if (values['min-area'] !== undefined) options.minArea = Number(values['min-area']);
+  const split = values.split as Split | undefined;
   const workers = Number(values.workers);
   const filter = values.clips ? new RegExp(values.clips) : null;
   const jobs: Job[] = [];
@@ -69,9 +79,13 @@ if (isMainThread) {
     mkdirSync(new URL(`${dataset}/`, runDir(values.run)), { recursive: true });
     for (const clip of clips) {
       if (filter && !filter.test(clip.id)) continue;
+      const clipSplit = splitOf(clip);
+      if (split && clipSplit !== null && clipSplit !== split) continue;
       const file = clipResultPath(values.run, dataset, clip.id);
       if (existsSync(file)) skipped++;
-      else jobs.push({ clip, sizes, step, minScore, minArea, file: file.href });
+      else {
+        jobs.push({ clip, sizes, step, detector: values.detector, options, file: file.href });
+      }
     }
   }
   console.log(`${jobs.length} clips to run (${skipped} already done), ${workers} workers`);
@@ -124,14 +138,14 @@ if (isMainThread) {
   }
 }
 
-async function runClip({ clip, sizes, step, minScore, minArea, file }: Job): Promise<number> {
+async function runClip({ clip, sizes, step, detector, options, file }: Job): Promise<number> {
   const selected = clip.frames.filter((_, i) => i % step === 0);
   const size = probeSize(selected[0].path);
   const last = probeSize(selected[selected.length - 1].path);
   if (last.width !== size.width || last.height !== size.height) {
     throw new Error('frames of one clip differ in size');
   }
-  const contexts = sizes.map(() => new DetectorContext());
+  const detectors = sizes.map((s) => BENCH_DETECTORS[detector](s, options));
   const small: (GrayImage | undefined)[] = sizes.map(() => undefined);
   const results: FrameResult[] = [];
   // Warm up the JIT on the first frame so that timings reflect the steady state.
@@ -147,14 +161,10 @@ async function runClip({ clip, sizes, step, minScore, minArea, file }: Job): Pro
         const work = downscaleGray(gray, sizes[s], small[s]);
         if (work !== gray) small[s] = work;
         if (!warm) {
-          for (let k = 0; k < 5; k++) detectDocument(work, { maxSide: sizes[s] }, contexts[s]);
+          for (let k = 0; k < 5; k++) BENCH_DETECTORS[detector](sizes[s], options).detect(work);
         }
         const t0 = performance.now();
-        const detection = detectDocument(
-          work,
-          { maxSide: sizes[s], minScore, minArea, candidates: true },
-          contexts[s],
-        );
+        const detection = detectors[s].detect(work);
         const ms = performance.now() - t0;
         const sx = gray.width / work.width;
         const sy = gray.height / work.height;
@@ -169,7 +179,7 @@ async function runClip({ clip, sizes, step, minScore, minArea, file }: Job): Pro
           : { quad: null, score: 0, ms: Math.round(ms * 1e3) / 1e3, candidates: [] };
       }
       warm = true;
-      results.push({ index: frame.index, truth: packQuad(frame.quad), runs });
+      results.push({ index: frame.index, truth: frame.quad && packQuad(frame.quad), runs });
     },
   );
   const result: ClipResult = {
@@ -181,8 +191,9 @@ async function runClip({ clip, sizes, step, minScore, minArea, file }: Job): Pro
     frameSize: size,
     step,
     sizes,
-    minScore: minScore ?? null,
-    minArea: minArea ?? null,
+    minScore: typeof options.minScore === 'number' ? options.minScore : null,
+    minArea: typeof options.minArea === 'number' ? options.minArea : null,
+    detector: { name: detector, options },
     frames: results,
   };
   const tmp = new URL(`${file}.tmp`);
