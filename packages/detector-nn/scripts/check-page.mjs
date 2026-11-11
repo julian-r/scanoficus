@@ -15,6 +15,7 @@ import {
   rgbaToRgb,
 } from '@scanoficus/detector-nn';
 import { DOCQUADNET2 } from '@scanoficus/detector-nn/docquadnet2';
+import { DOCQUADNET3 } from '@scanoficus/detector-nn/docquadnet3';
 
 // The weights are resolved from the graph's `weights.file` (and checked against it). The
 // detector checks below use the package's default URLs instead.
@@ -486,6 +487,66 @@ export async function batchSelfTest() {
   }
 }
 
+/**
+ * Round 3 on the GPU: per pass from Python's pass inputs (crops vs the bit-exact CPU crops,
+ * the 3 outputs vs NumPy), then the whole detector with the built-in decision (live frames: the
+ * refiner runs for the decision) against the NumPy and ONNX references.
+ */
+export async function round3Parity({ precision }) {
+  const meta = await (await fetch('/fixtures/round3.json')).json();
+  const bundle = await loadBundle(DOCQUADNET3);
+  const runner = new GlRunner(bundle.main, { precision, refiner: bundle.refiner.model });
+  const cpu = new CpuRunner(bundle.refiner.model);
+  let captured = null;
+  const detector = createNnDetector({
+    bundle,
+    precision,
+    backend: 'webgl2',
+    clipToFrame: false,
+    presence: (s) => {
+      captured = bundle.decision.score(s);
+      return bundle.decision.rule(s);
+    },
+  });
+  const results = [];
+  for (const c of meta.cases) {
+    const image = await frame(c);
+    const rgb = { width: c.width, height: c.height, data: rgbaToRgb(image) };
+    const r = { name: c.name, document: c.numpy.presence > 0.5, cropMismatched: 0, heads: 0 };
+    runner.run(image);
+    const [ww, wh] = c.work;
+    c.numpy.passes.forEach((pass, k) => {
+      const q = pass.quad.map(([x, y]) => ({ x: x / ww, y: y / wh })); // normalized, as round 3
+      const settings = { ...bundle.refiner, scales: [bundle.decision.spec.scales[k]] };
+      const gpu = runner.refine(q, settings);
+      const gpuCrops = runner.readCrops();
+      const cpuCrops = [];
+      refineCornersCpu(rgb, q, settings, (x, n) => cpu.run(x, n), cpuCrops);
+      for (let i = 0; i < gpuCrops.length; i++)
+        if (gpuCrops[i] !== cpuCrops[0][i]) r.cropMismatched++;
+      gpu.passes[0].offsets.forEach(([dx, dy], n) => {
+        const [ex, ey, el] = pass.heads[n];
+        const l = gpu.passes[0].cornerLogits[n];
+        r.heads = Math.max(r.heads, Math.abs(dx - ex), Math.abs(dy - ey), Math.abs(l - el));
+      });
+    });
+    captured = null;
+    const detection = await detector.detect(image);
+    r.score = captured ? Math.abs(captured.score - c.numpy.score) : null;
+    r.scoreOnnx = captured ? Math.abs(captured.score - c.onnx.score) : null;
+    r.accept = !!detection;
+    r.expected = c.numpy.accept;
+    r.expectedOnnx = c.onnx.accept;
+    r.quad = detection ? quadError(detection.quad, c.numpy.quad) : null;
+    r.quadOnnx = detection ? quadError(detection.quad, c.onnx.quad) : null;
+    r.crops = c.numpy.passes.length * 4 * 64 * 64 * 3;
+    results.push(r);
+  }
+  runner.dispose();
+  detector.dispose();
+  return results;
+}
+
 /** A 4000×3000 (12 MP) still: the 640×480 page scene drawn large by the browser. */
 async function still12(meta) {
   const c = meta.cases.find((x) => x.name.startsWith('page'));
@@ -509,6 +570,7 @@ export async function bench({
   runs,
   warmup,
   v2,
+  v3,
   refinerLive,
   still,
 }) {
@@ -517,25 +579,33 @@ export async function bench({
   let image = await frame(c);
   let big = null;
   if (input === 'still12') big = await still12(meta);
-  if (input === 'rgba384') {
-    // What the ScannerController hands to detectors by default: the camera frame drawn at a
-    // long side of 384 px (here 384×216) by the browser.
+  const long = /^rgba(\d+)$/.exec(input)?.[1];
+  if (long) {
+    // What the ScannerController hands to detectors: the camera frame drawn at a long side of
+    // `detection.maxSide` (384 by default, 768 for the demo's refining choices) by the browser.
+    const w = Number(long);
+    const h = Math.round((w * image.height) / image.width);
     const source = new OffscreenCanvas(image.width, image.height);
     source.getContext('2d').putImageData(image, 0, 0);
-    const ctx = new OffscreenCanvas(384, 216).getContext('2d');
-    ctx.drawImage(source, 0, 0, 384, 216);
-    image = ctx.getImageData(0, 0, 384, 216);
+    const ctx = new OffscreenCanvas(w, h).getContext('2d');
+    ctx.drawImage(source, 0, 0, w, h);
+    image = ctx.getImageData(0, 0, w, h);
   }
   const next = async () =>
     big ? createImageBitmap(big) : input === 'bitmap' ? createImageBitmap(image) : image;
-  const extra = v2 ? { bundle: DOCQUADNET2, refiner: { live: !!refinerLive, still: true } } : {};
+  const versioned = v3 ? DOCQUADNET3 : v2 ? DOCQUADNET2 : null;
+  const extra = v3
+    ? { bundle: DOCQUADNET3 } // the decision runs the refiner on live frames by default
+    : v2
+      ? { bundle: DOCQUADNET2, refiner: { live: !!refinerLive, still: true } }
+      : {};
   const call = (d, f) => (still ? d.detectStill(f) : d.detect(f));
   const cold = {};
   let detector;
   const t0 = performance.now();
   if (thread === 'worker') {
     detector = createNnDetectorWorker({
-      ...(v2 ? {} : MODEL),
+      ...(versioned ? {} : MODEL),
       ...extra,
       backend,
       precision,
@@ -543,11 +613,11 @@ export async function bench({
       timeoutMs: 120000,
     });
   } else {
-    const loaded = v2 ? await loadBundle(DOCQUADNET2) : { model: await loadModel(MODEL) };
+    const loaded = versioned ? await loadBundle(versioned) : { model: await loadModel(MODEL) };
     cold.loadModel = performance.now() - t0;
     const t1 = performance.now();
     detector = createNnDetector({
-      ...(v2 ? { ...extra, bundle: loaded } : { model: loaded.model }),
+      ...(versioned ? { ...extra, bundle: loaded } : { model: loaded.model }),
       backend,
       precision,
       refine,

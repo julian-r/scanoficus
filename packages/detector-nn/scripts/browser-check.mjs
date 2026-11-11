@@ -24,6 +24,7 @@ const jsonOut = args.includes('--json') ? args[args.indexOf('--json') + 1] : nul
 const fixtures = JSON.parse(await readFile(join(pkg, 'test/fixtures/cases.json'), 'utf8'));
 const refinerFixtures = JSON.parse(await readFile(join(pkg, 'test/fixtures/refiner.json'), 'utf8'));
 const scenes = [...fixtures.cases, ...refinerFixtures.cases];
+// round3.json uses the same scenes as refiner.json.
 
 const failures = [];
 const check = (name, ok, details = '') => {
@@ -38,8 +39,8 @@ const rewrite = (code) =>
     .replace(/(["'])@scanoficus\/core\1/g, '"/packages/core/dist/index.js"')
     .replace(/(["'])@scanoficus\/detector-nn\1/g, '"/packages/detector-nn/dist/index.js"')
     .replace(
-      /(["'])@scanoficus\/detector-nn\/docquadnet2\1/g,
-      '"/packages/detector-nn/dist/docquadnet2.js"',
+      /(["'])@scanoficus\/detector-nn\/(docquadnet\d)\1/g,
+      '"/packages/detector-nn/dist/$2.js"',
     );
 
 const types = { '.js': 'text/javascript', '.mjs': 'text/javascript', '.json': 'application/json' };
@@ -215,6 +216,31 @@ for (const precision of ['float32', 'float16']) {
       `${max('refinedVsOnnx', docs).toFixed(4)} px vs the ONNX pipeline`,
   );
 }
+// ---- round 3: 3-output refiner and the built-in decision -------------------------------------
+for (const precision of ['float32', 'float16']) {
+  const results = await inPage('round3Parity', { precision });
+  report[`round3 ${precision}`] = results;
+  const docs = results.filter((r) => r.document);
+  const max = (key, list = results) => Math.max(...list.map((r) => r[key] ?? 0));
+  const mismatched = results.reduce((n, r) => n + r.cropMismatched, 0);
+  const total = results.reduce((n, r) => n + r.crops, 0);
+  const wrong = results.filter((r) => r.accept !== r.expected || r.accept !== r.expectedOnnx);
+  const t = precision === 'float32' ? { heads: 1e-3, score: 0.05 } : { heads: 0.05, score: 0.3 };
+  check(
+    `${precision}: round-3 refiner (3 outputs) from Python's pass inputs vs NumPy`,
+    max('heads', docs) < t.heads && mismatched < 0.001 * total,
+    `outputs ${max('heads', docs).toExponential(2)} (documents); crops: ${mismatched} of ` +
+      `${total} values differ from the CPU crops`,
+  );
+  check(
+    `${precision}: round-3 decision (score, accept/reject) vs NumPy and ONNX`,
+    wrong.length === 0 && max('score', docs) < t.score,
+    `score vs NumPy ${max('score', docs).toFixed(4)} (all frames ${max('score').toFixed(4)}), vs ONNX ` +
+      `${max('scoreOnnx', docs).toFixed(4)}; quad vs NumPy ${max('quad').toFixed(4)} px, vs ONNX ` +
+      `${max('quadOnnx').toFixed(4)} px; ${results.length - wrong.length}/${results.length} decisions equal`,
+  );
+}
+
 for (const [label, arg] of [
   ['main thread', { worker: false }],
   ['worker', { worker: true }],
@@ -379,6 +405,19 @@ if (benchMode) {
       label: 'still',
     },
   );
+  // Round 3: the decision needs the refiner on every live frame.
+  for (const thread of ['main', 'worker']) {
+    for (const input of ['rgba384', 'rgba768', 'rgba']) {
+      configs.push({
+        thread,
+        backend: 'webgl2',
+        precision: 'float32',
+        input,
+        v3: true,
+        label: 'v3',
+      });
+    }
+  }
   report.bench = [];
   console.log(
     '\nthread  backend precision input   model  | cold total (load / init / 1st frame) | warm p50 / p95 ms',
