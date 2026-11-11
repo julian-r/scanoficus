@@ -11,6 +11,7 @@ export {
   type CameraFeatures,
   type CameraOptions,
   type CameraSession,
+  type CameraStartStage,
   listCameras,
   openCamera,
   type StillCapture,

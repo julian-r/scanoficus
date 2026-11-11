@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { PDFDocument } from 'pdf-lib';
 import { describe, expect, it } from 'vitest';
+import { CameraError, type CameraOptions } from '../src/camera/index.ts';
 import {
   type ScannerCamera,
   ScannerController,
@@ -245,5 +246,80 @@ describe('ScannerController', () => {
     expect(camera.stopped).toBe(true);
     expect(controller.state).toBe('idle');
     await expect(controller.start(video)).rejects.toThrow('disposed');
+  });
+
+  it('retries a recoverable startup failure once, then succeeds', async () => {
+    const camera = new FakeCamera();
+    const opens: CameraOptions[] = [];
+    const { controller } = setup({
+      openCamera: async (_video, options) => {
+        opens.push(options);
+        if (opens.length === 1) {
+          options.onStage?.('playing');
+          throw new CameraError('aborted', 'Camera startup was interrupted');
+        }
+        return camera;
+      },
+    });
+    await controller.start(video);
+    expect(opens).toHaveLength(2);
+    expect(controller.state).toBe('scanning');
+    expect(controller.getSnapshot().cameraStage).toBeNull();
+  });
+
+  it('surfaces repeated recoverable failures and recovers via retry()', async () => {
+    let fail = true;
+    let opens = 0;
+    const { controller } = setup({
+      openCamera: async () => {
+        opens++;
+        if (fail) throw new CameraError('start-timeout', 'The camera delivered no frames');
+        return new FakeCamera();
+      },
+    });
+    await controller.start(video);
+    expect(opens).toBe(2);
+    expect(controller.state).toBe('error');
+    expect((controller.getSnapshot().error as CameraError).recoverable).toBe(true);
+    fail = false;
+    await controller.retry();
+    expect(controller.state).toBe('scanning');
+  });
+
+  it('does not retry a permission denial', async () => {
+    let opens = 0;
+    const { controller } = setup({
+      openCamera: async () => {
+        opens++;
+        throw new CameraError('permission-denied', 'Camera permission was denied');
+      },
+    });
+    await controller.start(video);
+    expect(opens).toBe(1);
+    expect(controller.state).toBe('error');
+  });
+
+  it('cancels a pending start when stopped', async () => {
+    const camera = new FakeCamera();
+    let resolveOpen: (c: ScannerCamera) => void = () => {};
+    let signal: AbortSignal | undefined;
+    const { controller } = setup({
+      openCamera: (_video, options) => {
+        signal = options.signal;
+        options.onStage?.('acquiring');
+        return new Promise((resolve) => {
+          resolveOpen = resolve;
+        });
+      },
+    });
+    const pending = controller.start(video);
+    expect(controller.getSnapshot().cameraStage).toBe('acquiring');
+    controller.stop();
+    expect(signal?.aborted).toBe(true);
+    resolveOpen(camera);
+    await pending;
+    expect(camera.stopped).toBe(true);
+    expect(controller.state).toBe('idle');
+    expect(controller.getSnapshot()).toMatchObject({ error: null, cameraStage: null });
   });
 });

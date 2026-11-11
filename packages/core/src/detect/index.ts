@@ -10,5 +10,5 @@ export {
   detectDocument,
   type ScoredQuad,
 } from './detector.ts';
-export { sharpness } from './sharpness.ts';
+export { type Rect, sharpness } from './sharpness.ts';
 export { QuadTracker, type QuadTrackerOptions, type TrackerState } from './tracker.ts';

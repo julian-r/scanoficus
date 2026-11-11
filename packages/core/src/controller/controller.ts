@@ -1,4 +1,9 @@
-import type { CameraFeatures, CameraOptions } from '../camera/camera.ts';
+import {
+  CameraError,
+  type CameraFeatures,
+  type CameraOptions,
+  type CameraStartStage,
+} from '../camera/camera.ts';
 import { FrameGrabber, watchPageVisibility } from '../camera/frames.ts';
 import type { Detection, DetectOptions } from '../detect/detector.ts';
 import { sharpness } from '../detect/sharpness.ts';
@@ -63,7 +68,11 @@ export interface LiveDetection {
   stable: boolean;
   /** Auto-capture progress in [0, 1] (stable and sharp time / required time). */
   progress: number;
-  /** Laplacian-variance sharpness of the frame and its ratio to the recent maximum. */
+  /**
+   * Laplacian-variance sharpness of the document region (whole frame without a detection) and
+   * its ratio to the recent maximum; only the ratio is used for auto-capture, because absolute
+   * values depend on scene and scale.
+   */
   sharpness: number;
   relativeSharpness: number;
   /** Duration of the last detection and detection rate. */
@@ -80,6 +89,8 @@ export interface ScannerSnapshot {
   readonly torch: boolean;
   readonly features: CameraFeatures | null;
   readonly error: Error | null;
+  /** Camera startup stage while `starting` (acquiring → playing → waiting-for-frames). */
+  readonly cameraStage: CameraStartStage | null;
 }
 
 /** Events emitted by {@link ScannerController}. */
@@ -152,6 +163,8 @@ export class ScannerController {
   private camera: ScannerCamera | null = null;
   private video: HTMLVideoElement | null = null;
   private stopFrames: (() => void) | null = null;
+  private startGeneration = 0;
+  private cancelStart: (() => void) | null = null;
   private unwatchVisibility: (() => void) | null = null;
   private stallTimer: ReturnType<typeof setInterval> | null = null;
   private resumeWhenVisible = false;
@@ -183,6 +196,7 @@ export class ScannerController {
       torch: false,
       features: null,
       error: null,
+      cameraStage: null,
     };
   }
 
@@ -222,30 +236,66 @@ export class ScannerController {
     const target = video ?? this.video;
     if (!target) throw NOT_STARTED;
     if (this.camera && target === this.video) return;
+    if (this.state === 'starting' && target === this.video) return;
     this.releaseCamera();
     this.video = target;
     this.setState('starting');
+    // Every start gets a generation; stop(), page hide or a newer start cancel older ones.
+    this.watchLifecycle();
+    const generation = ++this.startGeneration;
+    const abort = new AbortController();
+    this.cancelStart = () => abort.abort();
+    const open = this.options.openCamera ?? openScannerCamera;
+    const attempt = async (): Promise<ScannerCamera> => {
+      try {
+        return await open(target, {
+          ...this.options.camera,
+          signal: abort.signal,
+          onStage: (stage) => {
+            if (generation === this.startGeneration) this.update({ cameraStage: stage });
+          },
+        });
+      } catch (error) {
+        // iOS: getUserMedia can succeed while play()/the first frame never completes, and a
+        // plain retry then works. Retry once automatically while the page is visible.
+        const retryable =
+          error instanceof CameraError &&
+          error.recoverable &&
+          !abort.signal.aborted &&
+          (typeof document === 'undefined' || document.visibilityState === 'visible');
+        if (!retryable) throw error;
+        return open(target, { ...this.options.camera, signal: abort.signal });
+      }
+    };
     try {
-      const open = this.options.openCamera ?? openScannerCamera;
-      const camera = await open(target, this.options.camera ?? {});
-      if (this.disposed || this.state !== 'starting') {
+      const camera = await attempt();
+      if (this.disposed || generation !== this.startGeneration) {
         camera.stop();
         return;
       }
+      this.cancelStart = null;
       this.camera = camera;
       camera.onEnded(() => {
         if (this.camera === camera) this.fail(new Error('The camera stopped unexpectedly'));
       });
-      this.update({ features: camera.features, torch: false, error: null });
+      this.update({ features: camera.features, torch: false, error: null, cameraStage: null });
       this.tracker.reset();
       this.stableSince = null;
       this.lastFrameAt = this.now();
       this.stopFrames = camera.onFrame(() => this.onFrame());
-      this.watchLifecycle();
+      this.startStallWatchdog();
       this.setState('scanning');
     } catch (error) {
+      if (generation !== this.startGeneration || this.disposed) return; // cancelled
+      this.cancelStart = null;
+      this.update({ cameraStage: null });
       this.fail(asError(error));
     }
+  }
+
+  /** Retries opening the camera after an error (same as `start()` with the last video). */
+  retry(): Promise<void> {
+    return this.start();
   }
 
   /** Releases the camera and returns to `idle`. Pages are kept. */
@@ -427,7 +477,7 @@ export class ScannerController {
     const maxSide = this.options.detection?.maxSide ?? 384;
     const frame = camera.grabFrame(maxSide);
     if (!frame) return;
-    const frameSharpness = sharpness(rgbaToGray(frame));
+    const gray = rgbaToGray(frame);
     this.busy = true;
     const started = this.now();
     this.detectWithFallback(frame)
@@ -435,6 +485,8 @@ export class ScannerController {
         this.busy = false;
         if (this.camera !== camera || this.state !== 'scanning') return;
         if (this.emitter.has('frame')) this.emitter.emit('frame', { image: frame, detection });
+        // Focus is judged on the document region, so the background does not dominate.
+        const frameSharpness = sharpness(gray, detection ? boundingBox(detection.quad) : undefined);
         this.handleDetection(camera, frame, detection, frameSharpness, this.now() - started);
       })
       .catch((error) => {
@@ -619,15 +671,24 @@ export class ScannerController {
         }
       },
     );
+  }
+
+  /** Fails into the recoverable `error` state if a running camera stops delivering frames. */
+  private startStallWatchdog(): void {
+    if (this.stallTimer !== null) clearInterval(this.stallTimer);
     const timeout = this.options.stallTimeoutMs ?? 4000;
     this.stallTimer = setInterval(() => {
       if (this.state === 'scanning' && this.now() - this.lastFrameAt > timeout) {
-        this.fail(new Error('The camera stopped delivering frames'));
+        this.fail(new CameraError('start-timeout', 'The camera stopped delivering frames'));
       }
     }, 1000);
   }
 
   private releaseCamera(): void {
+    // Invalidate (and abort) any pending start.
+    this.startGeneration++;
+    this.cancelStart?.();
+    this.cancelStart = null;
     this.stopFrames?.();
     this.stopFrames = null;
     if (this.stallTimer !== null) clearInterval(this.stallTimer);
@@ -638,8 +699,9 @@ export class ScannerController {
     this.stableSince = null;
     this.capturedQuad = null;
     this.tracker.reset();
-    if (this.snapshot.detection || this.snapshot.torch)
-      this.update({ detection: null, torch: false });
+    if (this.snapshot.detection || this.snapshot.torch || this.snapshot.cameraStage) {
+      this.update({ detection: null, torch: false, cameraStage: null });
+    }
   }
 
   private fail(error: Error): void {
@@ -684,6 +746,14 @@ function releasePage(page: ScanPage, others: readonly ScanPage[]): void {
   URL.revokeObjectURL(page.url);
   if (others.some((p) => p.source === page.source)) return;
   if ('close' in page.source) page.source.close();
+}
+
+function boundingBox(quad: Quad): { x: number; y: number; width: number; height: number } {
+  const xs = quad.map((p) => p.x);
+  const ys = quad.map((p) => p.y);
+  const x = Math.min(...xs);
+  const y = Math.min(...ys);
+  return { x, y, width: Math.max(...xs) - x, height: Math.max(...ys) - y };
 }
 
 function asError(error: unknown): Error {
