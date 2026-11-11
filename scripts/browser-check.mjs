@@ -349,7 +349,7 @@ async function checkDetectorChoices(label, url) {
     await page.getByText('Start scanning').click();
     const live = await page
       .waitForFunction(
-        (page) => {
+        ([page, choice]) => {
           const d = document.querySelector('scan-document')?.controller?.getSnapshot().detection;
           if (!d?.quad) return null;
           // Largest corner distance to the page (640×480 scene) as a fraction of the diagonal.
@@ -362,9 +362,16 @@ async function checkDetectorChoices(label, url) {
             ) / 800;
           if (error > 0.02) return null;
           const panel = document.querySelector('.debug-panel pre')?.textContent ?? '';
-          return { error, status: window.scanoficusDetector, panel };
+          const status = window.scanoficusDetector;
+          // Wait for the chosen detector itself (Hybrid answers with the classic worker until
+          // the network is ready) and for the overlay to show it.
+          if (choice !== 'classic' && !status?.error && !/· worker ·/.test(status?.running ?? '')) {
+            return null;
+          }
+          if (!panel.includes(status?.running ?? '\u0000')) return null;
+          return { error, status, panel };
         },
-        SCENE.page,
+        [SCENE.page, choice],
         { timeout: 40000, polling: 100 },
       )
       .then((h) => h.jsonValue())
