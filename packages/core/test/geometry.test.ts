@@ -197,7 +197,14 @@ describe('convexIoU', () => {
 });
 
 /** Projects a w×h rectangle with a pinhole camera (focal f, principal point c) after a 3D tilt. */
-function projectRectangle(w: number, h: number, tiltX: number, tiltY: number, f: number, c: Point): Quad {
+function projectRectangle(
+  w: number,
+  h: number,
+  tiltX: number,
+  tiltY: number,
+  f: number,
+  c: Point,
+): Quad {
   const corners = [
     [-w / 2, -h / 2],
     [w / 2, -h / 2],
