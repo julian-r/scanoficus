@@ -22,8 +22,8 @@ scanner, UI included, is about 27 KB min+gzip.
 
 **Status:** pre-release (0.0.0). The algorithms are tested in Node and the UI flows in headless
 Chrome with a fake camera. Real-device testing is still to come (see
-[Browser support](#browser-support)). The live demo is deployed from `main` to GitHub Pages:
-<https://julian-r.github.io/scanoficus/>.
+[Browser support](#browser-support)). Once the repository is on GitHub, every push to `main`
+deploys the demo to GitHub Pages (`.github/workflows/pages.yml`).
 
 ## Packages
 
