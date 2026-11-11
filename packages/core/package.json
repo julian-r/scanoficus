@@ -65,9 +65,10 @@
     "eval": "node eval/run.ts"
   },
   "devDependencies": {
+    "@types/node": "26.6.6",
+    "pdf-lib": "1.17.1",
     "tsdown": "0.23.7",
     "typescript": "7.0.2",
-    "vitest": "5.1.0",
-    "@types/node": "26.6.6"
+    "vitest": "5.1.0"
   }
 }
