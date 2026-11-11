@@ -1,9 +1,11 @@
-# COCO train2017 images used for DocQuadNet round 3 (scanoficus-ml data/coco-train-negatives.json).
+# COCO train2017 images used for DocQuadNet rounds 3 and 4 (the same images in the same roles) (scanoficus-ml data/coco-train-negatives.json).
 # Source: COCO train2017 (cocodataset.org; annotations CC BY 4.0), images from Flickr. Selection: license id 4 or 7; not in the evaluation negatives manifest; no book/paper/cardboard/banner segment and no document word in any caption; at least one indoor category; evenly spaced by id.
 # license 4: Attribution License (http://creativecommons.org/licenses/by/2.0/)
 # license 7: No known copyright restrictions (http://flickr.com/commons/usage/)
 # Changes: cropped (corner crops), resized, rotated and augmented for training.
-# Columns: COCO image id (images.cocodataset.org/train2017/<id, 12 digits>.jpg); role in round 3;
+# Columns: COCO image id (images.cocodataset.org/train2017/<id, 12 digits>.jpg);
+# role (refiner-training: trained the round-3 and round-4 refiners; decision-fit:
+# fitted the round-3 and round-4 decisions; validation);
 # license id at COCO collection time; Flickr photo page; status (ok: author and title from
 # Flickr's oEmbed endpoint; unavailable: the photo is no longer on Flickr; no-attribution-required:
 # license 7); author (Flickr name); title (empty: untitled on Flickr); the photo's license on

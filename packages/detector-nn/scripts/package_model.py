@@ -111,17 +111,31 @@ def pinned_decision(ml: Path, spec: dict, file: str, main_sha: str, refiner_sha:
     return decision
 
 
-#: Fields of the decision that the runtime reads (inline in the bundle module).
+#: Fields of the decision inline in the bundle module: what the runtime reads, and the export
+#: file it came from (so the module says which decision, e.g. decision.json or decision-4b.json).
 DECISION_KEYS = ["main", "refiner", "scales", "features", "weights", "bias", "threshold",
-                 "mainSha256", "refinerSha256"]
+                 "mainSha256", "refinerSha256", "exportFile"]
 
 COCO_ROLES = {"A": "refiner-training", "B": "decision-fit", "val": "validation"}
 
 
-def coco_credits(ml: Path, folder: Path, flickr_cache: Path) -> None:
+#: Which rounds used the COCO images, per decision bundle (the same images in the same roles).
+COCO_USED_BY = {
+    "docquadnet3": "DocQuadNet round 3",
+    "docquadnet4": "DocQuadNet rounds 3 and 4 (the same images in the same roles)",
+}
+COCO_ROLE_TEXT = {
+    "docquadnet3": "role (refiner-training: trained the round-3 refiner; decision-fit: fitted its decision;\n"
+                   "# validation)",
+    "docquadnet4": "role (refiner-training: trained the round-3 and round-4 refiners; decision-fit:\n"
+                   "# fitted the round-3 and round-4 decisions; validation)",
+}
+
+
+def coco_credits(ml: Path, folder: Path, flickr_cache: Path, bundle: str) -> None:
     """`coco-credits.csv`: every COCO train2017 image of data/coco-train-negatives.json with its
-    role in round 3 (subset A trained the refiner, subset B fitted the decision, the val split was
-    used for validation), its Flickr license, the Flickr photo page (https://flic.kr/p/<base58
+    role (subset A trained the refiners, subset B fitted the decisions, the val split was used
+    for validation), its Flickr license, the Flickr photo page (https://flic.kr/p/<base58
     id>), and for CC BY photos the author and title from Flickr's oEmbed endpoint
     (`fetch_flickr_credits.py`)."""
     import csv
@@ -160,11 +174,12 @@ def coco_credits(ml: Path, folder: Path, flickr_cache: Path) -> None:
                 row = ["ok", d["author"], d["title"], d["license"]]
         writer.writerow([e["id"], role, e["license"], page, *row, e["flickrUrl"]])
     header = [
-        "# COCO train2017 images used for DocQuadNet round 3 (scanoficus-ml data/coco-train-negatives.json).",
+        f"# COCO train2017 images used for {COCO_USED_BY[bundle]} (scanoficus-ml data/coco-train-negatives.json).",
         f"# Source: {m['source']}. Selection: {m['rule']}.",
         *(f"# license {k}: {v['name']} ({v['url']})" for k, v in sorted(licenses.items())),
         "# Changes: cropped (corner crops), resized, rotated and augmented for training.",
-        "# Columns: COCO image id (images.cocodataset.org/train2017/<id, 12 digits>.jpg); role in round 3;",
+        "# Columns: COCO image id (images.cocodataset.org/train2017/<id, 12 digits>.jpg);",
+        f"# {COCO_ROLE_TEXT[bundle]};",
         "# license id at COCO collection time; Flickr photo page; status (ok: author and title from",
         "# Flickr's oEmbed endpoint; unavailable: the photo is no longer on Flickr; no-attribution-required:",
         "# license 7); author (Flickr name); title (empty: untitled on Flickr); the photo's license on",
@@ -211,8 +226,17 @@ def main() -> None:
     parser.add_argument("--decision", action="append", default=[], metavar="BUNDLE=FILE",
                         help=f"decision file in export/<decision>/ for a bundle (default {DECISION_FILE})")
     args = parser.parse_args()
-    decision_files = dict(d.split("=", 1) for d in args.decision)
-    assert all(BUNDLES.get(b, {}).get("decision") for b in decision_files), decision_files
+    decision_files: dict[str, str] = {}
+    for d in args.decision:
+        bundle, sep, file = d.partition("=")
+        if not sep or not file:
+            parser.error(f"--decision {d!r}: expected BUNDLE=FILE, e.g. docquadnet4=decision-4b.json")
+        if not BUNDLES.get(bundle, {}).get("decision"):
+            with_decision = ", ".join(b for b, s in BUNDLES.items() if s.get("decision"))
+            parser.error(f"--decision {d!r}: {bundle!r} is not a bundle with a decision ({with_decision})")
+        if not (Path(args.ml) / "export" / BUNDLES[bundle]["decision"] / file).is_file():
+            parser.error(f"--decision {d!r}: export/{BUNDLES[bundle]['decision']}/{file} does not exist")
+        decision_files[bundle] = file
     ml = Path(args.ml)
     sys.path.insert(0, str(ml))
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -275,7 +299,7 @@ def main() -> None:
             (folder / "decision.json").write_text(json.dumps(decision, indent=1) + "\n")
             manifest["decision"] = "decision.json"
             if not args.keep_credits:
-                coco_credits(ml, folder, Path(args.flickr_cache))
+                coco_credits(ml, folder, Path(args.flickr_cache), bundle)
         (folder / "bundle.json").write_text(json.dumps(manifest, indent=1) + "\n")
         packaged[bundle] = {"main": main}
 

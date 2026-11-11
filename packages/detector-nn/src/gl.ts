@@ -412,9 +412,14 @@ export class GlRunner {
       const wanted = options.precision ?? 'auto';
       const precision = wanted === 'auto' ? support.precisions[0] : wanted;
       if (!precision || !support.precisions.includes(precision)) {
+        // float32 targets need EXT_color_buffer_float; float16 targets also work with
+        // EXT_color_buffer_half_float.
+        const needs =
+          wanted === 'float32'
+            ? 'EXT_color_buffer_float'
+            : 'EXT_color_buffer_float or EXT_color_buffer_half_float';
         throw new Error(
-          `WebGL2 cannot render to ${wanted === 'auto' ? 'float' : wanted} textures ` +
-            '(needs EXT_color_buffer_float or EXT_color_buffer_half_float)',
+          `WebGL2 cannot render to ${wanted === 'auto' ? 'float' : wanted} textures (needs ${needs})`,
         );
       }
       this.precision = precision;

@@ -278,8 +278,9 @@ async function checkDemo(label, url) {
 const CHOICES = ['classic', 'nn', 'nn-refine', 'hybrid', 'nn2-refiner', 'nn3', 'nn4'];
 
 /**
- * Without a stored choice, the demo defaults to Hybrid (WebGL2 works in headless Chrome) whose
- * network stage is round 1 with refinement on 768-px frames; a stored choice is kept.
+ * Without a stored choice, the demo defaults to Neural v4 (round 4 with float32 activations on
+ * 768-px frames) where WebGL2 renders to float32 textures (headless Chrome does), else to
+ * Classic; a stored choice is kept.
  */
 async function checkDefaultChoice(label, url) {
   const page = await browser.newPage();
@@ -342,7 +343,7 @@ async function checkDefaultChoice(label, url) {
     `${label}: without float32 render targets the default is Classic, and Neural v4 falls back`,
     halfChoice === 'classic' &&
       /Classic · worker \(fallback\)/.test(halfStatus.running ?? '') &&
-      /float32/.test(halfStatus.error ?? ''),
+      /float32 textures \(needs EXT_color_buffer_float\)/.test(halfStatus.error ?? ''),
     `${halfChoice}; ${halfStatus.failed ?? `${halfStatus.running}: ${halfStatus.error}`}`,
   );
   // A stored choice wins over the default.
@@ -471,10 +472,16 @@ async function checkDetectorChoices(label, url) {
         `${label}: debug overlay shows the detector ("${choice}")`,
         live.panel.includes(status.running) &&
           /cold start/.test(live.panel) &&
-          /detect p50/.test(live.panel),
+          /detect p50/.test(live.panel) &&
+          // Decision bundles name their decision file (shipped decision.json or a swapped one).
+          (choice === 'nn4'
+            ? /decision +export\/docquadnet4\/decision\.json/.test(live.panel)
+            : choice === 'nn3'
+              ? /decision +export\/docquadnet3\/decision\.json/.test(live.panel)
+              : !/decision /.test(live.panel)),
         live.panel
           .split('\n')
-          .filter((l) => /detector|cold|p50|fallback/.test(l))
+          .filter((l) => /detector|cold|p50|fallback|decision/.test(l))
           .join(' | '),
       );
     }

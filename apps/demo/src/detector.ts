@@ -104,6 +104,8 @@ export interface DetectorStatus {
   error: string | null;
   /** Transient trouble that did not end the network: context losses, failed frames. */
   notice: string | null;
+  /** The presence decision's source file (rounds 3 and 4), e.g. `export/docquadnet4/decision.json`. */
+  decision: string | null;
 }
 
 let current: DetectorStatus | null = null;
@@ -136,6 +138,7 @@ export function createDemoDetector(choice: DetectorChoice): DocumentDetector {
     stillSize: null,
     error: null,
     notice: null,
+    decision: null,
   };
   let lostFrames = 0;
   current = status;
@@ -187,6 +190,7 @@ export function createDemoDetector(choice: DetectorChoice): DocumentDetector {
         : choice === 'nn4'
           ? (await import('@scanoficus/detector-nn/docquadnet4')).DOCQUADNET4
           : undefined;
+    status.decision = decisionBundle?.decision?.exportFile ?? null;
     const options = {
       refine: REFINED.has(choice),
       backend: 'webgl2' as const, // never the slow CPU path in a live loop

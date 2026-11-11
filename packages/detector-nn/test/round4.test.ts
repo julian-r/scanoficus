@@ -238,6 +238,9 @@ describe('round-4 guards', () => {
     };
     const refit = fixture.decision;
     expect(refit.weights).not.toEqual(spec.weights);
+    // The inline decision names its source file: the shipped one, or the refit after a swap.
+    expect(spec.exportFile).toBe('export/docquadnet4/decision.json');
+    expect(refit.exportFile).toBe('export/docquadnet4/decision-4b.json');
     expect(refit.mainSha256).toBe(spec.mainSha256);
     const swapped = createDecision(refit);
     expect(fixture.vectors.length).toBeGreaterThanOrEqual(18);

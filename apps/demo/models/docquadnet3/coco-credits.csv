@@ -3,7 +3,9 @@
 # license 4: Attribution License (http://creativecommons.org/licenses/by/2.0/)
 # license 7: No known copyright restrictions (http://flickr.com/commons/usage/)
 # Changes: cropped (corner crops), resized, rotated and augmented for training.
-# Columns: COCO image id (images.cocodataset.org/train2017/<id, 12 digits>.jpg); role in round 3;
+# Columns: COCO image id (images.cocodataset.org/train2017/<id, 12 digits>.jpg);
+# role (refiner-training: trained the round-3 refiner; decision-fit: fitted its decision;
+# validation);
 # license id at COCO collection time; Flickr photo page; status (ok: author and title from
 # Flickr's oEmbed endpoint; unavailable: the photo is no longer on Flickr; no-attribution-required:
 # license 7); author (Flickr name); title (empty: untitled on Flickr); the photo's license on

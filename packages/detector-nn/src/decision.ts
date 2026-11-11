@@ -27,6 +27,11 @@ export interface DecisionSpec {
    */
   mainSha256: string;
   refinerSha256: string;
+  /**
+   * The scanoficus-ml file the decision was packaged from, e.g.
+   * `export/docquadnet4/decision.json` (added by `scripts/package_model.py`; informational).
+   */
+  exportFile?: string;
 }
 
 /** A loaded decision. */

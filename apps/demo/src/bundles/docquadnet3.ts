@@ -29,5 +29,6 @@ export const DOCQUADNET3: BundleSource = {
     threshold: -1.2528567820767722,
     mainSha256: '6ea1c21d6f8772d2980140270476a01c3e14a5e465ee6af444bae3e6f34f67ec',
     refinerSha256: '216d024894ca612d8e27b7de92327e9922da446b8c508dabc833943d74dfc7bb',
+    exportFile: 'export/docquadnet3/decision.json',
   },
 };

@@ -93,6 +93,7 @@ function detectorLines(status: DetectorStatus | null): string[] {
     status.stillMs === null
       ? ''
       : `still        ${status.stillMs.toFixed(0)} ms (${status.stillSize}, refiner)`,
+    status.decision && !status.error ? `decision     ${status.decision}` : '',
     status.error ? `fallback     ${status.error}` : '',
     status.notice ? `notice       ${status.notice}` : '',
   ];
