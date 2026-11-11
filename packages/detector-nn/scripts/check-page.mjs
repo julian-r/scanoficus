@@ -1,18 +1,24 @@
 // In-page half of scripts/browser-check.mjs: parity, robustness and timing checks of the
 // built package, loaded unbundled. Every export takes plain JSON arguments and returns JSON.
+
 import {
   bytesToInput,
+  CpuRunner,
   createNnDetector,
   createNnDetectorWorker,
   GlRunner,
+  loadBundle,
   loadModel,
   parseModel,
   preprocessRgba,
+  refineCornersCpu,
+  rgbaToRgb,
 } from '@scanoficus/detector-nn';
+import { DOCQUADNET2 } from '@scanoficus/detector-nn/docquadnet2';
 
 // The weights are resolved from the graph's `weights.file` (and checked against it). The
 // detector checks below use the package's default URLs instead.
-const MODEL = { graphUrl: '/models/docquadnet.json' };
+const MODEL = { graphUrl: '/models/docquadnet/docquadnet.json' };
 
 async function fixtures() {
   return (await fetch('/fixtures/cases.json')).json();
@@ -197,7 +203,7 @@ export async function contextLoss() {
 }
 
 /** Every texture, framebuffer and program created is deleted by dispose(). */
-export async function disposeCheck() {
+export async function disposeCheck({ v2 } = {}) {
   const meta = await fixtures();
   const canvas = new OffscreenCanvas(1, 1);
   const gl = canvas.getContext('webgl2', {
@@ -209,8 +215,15 @@ export async function disposeCheck() {
     preserveDrawingBuffer: false,
   });
   const counts = countObjects(gl);
-  const detector = createNnDetector({ ...MODEL, canvas, backend: 'webgl2' });
-  for (const c of meta.cases.slice(0, 3)) await detector.detect(await frame(c));
+  const detector = createNnDetector({
+    ...(v2 ? { bundle: DOCQUADNET2 } : MODEL),
+    canvas,
+    backend: 'webgl2',
+  });
+  for (const c of meta.cases.slice(0, 3)) {
+    await detector.detect(await frame(c));
+    if (v2) await detector.detectStill(await frame(c)); // refiner, pyramid of a 640×480 frame
+  }
   const live = { ...counts };
   detector.dispose();
   const rejected = await detector.detect(await frame(meta.cases[0])).then(
@@ -245,7 +258,7 @@ function countObjects(gl) {
  */
 export async function selfTestFailure() {
   const graph = await (await fetch(MODEL.graphUrl)).json();
-  const weights = await (await fetch(`/models/${graph.weights.file}`)).arrayBuffer();
+  const weights = await (await fetch(`/models/docquadnet/${graph.weights.file}`)).arrayBuffer();
   graph.selfTest.heads[8] += 1;
   const broken = parseModel(graph, weights);
   const canvas = new OffscreenCanvas(1, 1);
@@ -296,14 +309,124 @@ export async function synthetic({ precision }) {
   return results;
 }
 
+async function refinerFixtures() {
+  return (await fetch('/fixtures/refiner.json')).json();
+}
+
+const quadError = (quad, expected) => cornerError(quad, expected);
+
+/**
+ * Round 2 on the GPU vs the CPU path (whose crops are bit-exact with refiner.py, see
+ * test/refiner.test.ts) and vs the Python fixtures: main heads, per-pass crops and offsets from
+ * Python's pass quads, and the whole refinement from Python's raw quad.
+ */
+export async function refinerParity({ precision }) {
+  const meta = await refinerFixtures();
+  const bundle = await loadBundle(DOCQUADNET2);
+  const runner = new GlRunner(bundle.main, { precision, refiner: bundle.refiner.model });
+  const cpu = new CpuRunner(bundle.refiner.model);
+  const results = [];
+  for (const c of meta.cases) {
+    const image = await frame(c);
+    const rgb = { width: c.width, height: c.height, data: rgbaToRgb(image) };
+    const heads = runner.run(image);
+    const r = {
+      name: c.name,
+      document: c.main.presence > 0.5,
+      mainCorners: maxAbs(heads.subarray(0, 8), c.main.heads.slice(0, 8)),
+      mainLogit: Math.abs(heads[8] - c.main.heads[8]),
+      cropMismatched: 0,
+      cropMax: 0,
+      offsets: 0,
+      offsetsVsCpu: 0,
+    };
+    const s = c.work.width / c.width;
+    for (const pass of c.passes) {
+      const q = pass.quad.map(([x, y]) => ({ x: x / s, y: y / s }));
+      const settings = { ...bundle.refiner, scales: [pass.scale] };
+      const gpu = runner.refine(q, settings);
+      const gpuCrops = runner.readCrops();
+      const cpuCrops = [];
+      const ref = refineCornersCpu(rgb, q, settings, (x, n) => cpu.run(x, n), cpuCrops);
+      for (let i = 0; i < gpuCrops.length; i++) {
+        const d = Math.abs(gpuCrops[i] - cpuCrops[0][i]);
+        if (d) r.cropMismatched++;
+        r.cropMax = Math.max(r.cropMax, d);
+      }
+      gpu.passes[0].offsets.forEach(([dx, dy], n) => {
+        const [ex, ey] = pass.offsets[n];
+        const [cx, cy] = ref.passes[0].offsets[n];
+        r.offsets = Math.max(r.offsets, Math.abs(dx - ex), Math.abs(dy - ey));
+        r.offsetsVsCpu = Math.max(r.offsetsVsCpu, Math.abs(dx - cx), Math.abs(dy - cy));
+      });
+    }
+    const raw = c.main.rawQuad.map(([x, y]) => ({ x, y }));
+    r.refined = quadError(runner.refine(raw, bundle.refiner).quad, c.refined);
+    r.refinedVsOnnx = quadError(runner.refine(raw, bundle.refiner).quad, c.refinedOnnx);
+    r.crops = c.passes.length * 4 * 64 * 64 * 3;
+    results.push(r);
+  }
+  runner.dispose();
+  return results;
+}
+
+/** The round-2 detector API with stills: refined quads vs the Python pipeline. */
+export async function stillDetectors({ worker }) {
+  const meta = await refinerFixtures();
+  const options = { bundle: DOCQUADNET2, backend: 'webgl2', clipToFrame: false };
+  const detector = worker ? createNnDetectorWorker(options) : createNnDetector(options);
+  const results = [];
+  for (const c of meta.cases) {
+    const image = await frame(c);
+    for (const kind of ['rgba', 'bitmap']) {
+      const input = kind === 'rgba' ? image : await createImageBitmap(image);
+      const still = await detector.detectStill(input);
+      const live = await detector.detect(kind === 'rgba' ? image : await createImageBitmap(image));
+      results.push({
+        name: c.name,
+        kind,
+        detected: !!still,
+        expected: c.main.presence > 0.98,
+        still: still ? quadError(still.quad, c.refined) : null,
+        live: live ? quadError(live.quad, c.main.rawQuad) : null,
+      });
+    }
+  }
+  detector.dispose();
+  return results;
+}
+
+/** A 4000×3000 (12 MP) still: the 640×480 page scene drawn large by the browser. */
+async function still12(meta) {
+  const c = meta.cases.find((x) => x.name.startsWith('page'));
+  const source = new OffscreenCanvas(c.width, c.height);
+  source.getContext('2d').putImageData(await frame(c), 0, 0);
+  const big = new OffscreenCanvas(4000, 3000);
+  big.getContext('2d').drawImage(source, 0, 0, 4000, 3000);
+  return big;
+}
+
 const percentile = (sorted, p) =>
   sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))];
 
 /** Cold start and warm per-frame timings of one configuration. */
-export async function bench({ backend, precision, thread, refine, input, runs, warmup }) {
+export async function bench({
+  backend,
+  precision,
+  thread,
+  refine,
+  input,
+  runs,
+  warmup,
+  v2,
+  refinerLive,
+  still,
+}) {
   const meta = await fixtures();
   const c = meta.cases.find((x) => x.name.startsWith('tilted'));
   let image = await frame(c);
+  let big = null;
+  if (input === 'still12') big = await still12(meta);
   if (input === 'rgba384') {
     // What the ScannerController hands to detectors by default: the camera frame drawn at a
     // long side of 384 px (here 384×216) by the browser.
@@ -313,30 +436,45 @@ export async function bench({ backend, precision, thread, refine, input, runs, w
     ctx.drawImage(source, 0, 0, 384, 216);
     image = ctx.getImageData(0, 0, 384, 216);
   }
-  const next = async () => (input === 'bitmap' ? createImageBitmap(image) : image);
+  const next = async () =>
+    big ? createImageBitmap(big) : input === 'bitmap' ? createImageBitmap(image) : image;
+  const extra = v2 ? { bundle: DOCQUADNET2, refiner: { live: !!refinerLive, still: true } } : {};
+  const call = (d, f) => (still ? d.detectStill(f) : d.detect(f));
   const cold = {};
   let detector;
   const t0 = performance.now();
   if (thread === 'worker') {
-    detector = createNnDetectorWorker({ ...MODEL, backend, precision, refine, timeoutMs: 120000 });
+    detector = createNnDetectorWorker({
+      ...(v2 ? {} : MODEL),
+      ...extra,
+      backend,
+      precision,
+      refine,
+      timeoutMs: 120000,
+    });
   } else {
-    const model = await loadModel(MODEL);
+    const loaded = v2 ? await loadBundle(DOCQUADNET2) : { model: await loadModel(MODEL) };
     cold.loadModel = performance.now() - t0;
     const t1 = performance.now();
-    detector = createNnDetector({ model, backend, precision, refine });
+    detector = createNnDetector({
+      ...(v2 ? { ...extra, bundle: loaded } : { model: loaded.model }),
+      backend,
+      precision,
+      refine,
+    });
     await detector.ready();
     cold.init = performance.now() - t1;
   }
   const f0 = await next();
   const t2 = performance.now();
-  const first = await detector.detect(f0);
+  const first = await call(detector, f0);
   cold.firstFrame = performance.now() - t2;
   cold.total = performance.now() - t0;
   const times = [];
   for (let i = 0; i < warmup + runs; i++) {
     const f = await next();
     const t = performance.now();
-    await detector.detect(f);
+    await call(detector, f);
     if (i >= warmup) times.push(performance.now() - t);
   }
   const used = detector.backend ?? backend;

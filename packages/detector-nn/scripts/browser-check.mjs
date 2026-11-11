@@ -22,6 +22,8 @@ const args = process.argv.slice(2);
 const benchMode = args.includes('--bench');
 const jsonOut = args.includes('--json') ? args[args.indexOf('--json') + 1] : null;
 const fixtures = JSON.parse(await readFile(join(pkg, 'test/fixtures/cases.json'), 'utf8'));
+const refinerFixtures = JSON.parse(await readFile(join(pkg, 'test/fixtures/refiner.json'), 'utf8'));
+const scenes = [...fixtures.cases, ...refinerFixtures.cases];
 
 const failures = [];
 const check = (name, ok, details = '') => {
@@ -34,7 +36,11 @@ const rewrite = (code) =>
   code
     .replace(/(["'])@scanoficus\/core\/([\w-]+)\1/g, '"/packages/core/dist/$2.js"')
     .replace(/(["'])@scanoficus\/core\1/g, '"/packages/core/dist/index.js"')
-    .replace(/(["'])@scanoficus\/detector-nn\1/g, '"/packages/detector-nn/dist/index.js"');
+    .replace(/(["'])@scanoficus\/detector-nn\1/g, '"/packages/detector-nn/dist/index.js"')
+    .replace(
+      /(["'])@scanoficus\/detector-nn\/docquadnet2\1/g,
+      '"/packages/detector-nn/dist/docquadnet2.js"',
+    );
 
 const types = { '.js': 'text/javascript', '.mjs': 'text/javascript', '.json': 'application/json' };
 const server = createServer(async (req, res) => {
@@ -46,7 +52,7 @@ const server = createServer(async (req, res) => {
       return;
     }
     if (path.startsWith('/frame/')) {
-      const scene = fixtures.cases.find((c) => c.name === path.slice(7));
+      const scene = scenes.find((c) => c.name === path.slice(7));
       res.end(Buffer.from(renderScene(scene).data.buffer));
       return;
     }
@@ -173,6 +179,59 @@ for (const [label, arg] of [
   );
 }
 
+// ---- round 2: corner refiner ------------------------------------------------------------------
+for (const precision of ['float32', 'float16']) {
+  const results = await inPage('refinerParity', { precision });
+  report[`refiner ${precision}`] = results;
+  const docs = results.filter((r) => r.document);
+  const max = (key, list = results) => Math.max(...list.map((r) => r[key]));
+  const mismatched = results.reduce((n, r) => n + r.cropMismatched, 0);
+  const total = results.reduce((n, r) => n + r.crops, 0);
+  const t =
+    precision === 'float32'
+      ? { main: 1e-4, offsets: 1e-3, refined: 0.05 }
+      : { main: 2e-3, offsets: 2e-2, refined: 0.5 };
+  check(
+    `${precision}: round-2 main network end to end vs NumPy (documents)`,
+    max('mainCorners', docs) < t.main,
+    `corners ${max('mainCorners', docs).toExponential(2)} (all frames ` +
+      `${max('mainCorners').toExponential(2)}), logit ${max('mainLogit').toExponential(2)}`,
+  );
+  check(
+    `${precision}: refiner crops (GPU) vs the bit-exact CPU crops`,
+    max('cropMax') <= 1 && mismatched < 0.001 * total,
+    `${mismatched} of ${total} values differ by one level`,
+  );
+  check(
+    `${precision}: refiner offsets from Python's pass quads vs NumPy (documents)`,
+    max('offsets', docs) < t.offsets,
+    `${max('offsets', docs).toExponential(2)} half-crop units (CPU vs GPU ` +
+      `${max('offsetsVsCpu', docs).toExponential(2)})`,
+  );
+  check(
+    `${precision}: full refinement from the raw quad vs pipeline.py (documents)`,
+    max('refined', docs) < t.refined,
+    `${max('refined', docs).toFixed(4)} px vs the NumPy refiner, ` +
+      `${max('refinedVsOnnx', docs).toFixed(4)} px vs the ONNX pipeline`,
+  );
+}
+for (const [label, arg] of [
+  ['main thread', { worker: false }],
+  ['worker', { worker: true }],
+]) {
+  const results = await inPage('stillDetectors', arg);
+  report[`still ${label}`] = results;
+  const wrong = results.filter((r) => r.detected !== r.expected);
+  const worstStill = Math.max(...results.map((r) => r.still ?? 0));
+  const worstLive = Math.max(...results.map((r) => r.live ?? 0));
+  check(
+    `round 2, ${label}: detectStill refines, detect() stays raw, threshold 0.98`,
+    wrong.length === 0 && worstStill < 0.05 && worstLive < 0.05,
+    `${results.length} frames; still vs pipeline.py ${worstStill.toFixed(4)} px, live vs raw ` +
+      `${worstLive.toFixed(4)} px${wrong.length ? `; wrong decisions: ${wrong.map((r) => r.name)}` : ''}`,
+  );
+}
+
 // ---- robustness -------------------------------------------------------------------------------
 {
   const r = await inPage('contextLoss');
@@ -205,11 +264,11 @@ for (const [label, arg] of [
     `${r.error}; objects left ${JSON.stringify(r.leaked)}; backend ${r.backend}`,
   );
 }
-{
-  const r = await inPage('disposeCheck');
-  report.dispose = r;
+for (const v2 of [false, true]) {
+  const r = await inPage('disposeCheck', { v2 });
+  report[v2 ? 'dispose v2' : 'dispose'] = r;
   check(
-    'dispose deletes every texture, framebuffer and program',
+    `dispose deletes every texture, framebuffer and program${v2 ? ' (round 2 + refiner)' : ''}`,
     Object.values(r.leaked).every((n) => n === 0) && r.rejected,
     `live before dispose ${JSON.stringify(r.live)}, after ${JSON.stringify(r.leaked)}`,
   );
@@ -231,9 +290,68 @@ if (benchMode) {
     { thread: 'worker', backend: 'webgl2', precision: 'float32', input: 'rgba384' },
     { thread: 'worker', backend: 'cpu', input: 'bitmap', runs: 20 },
   ];
+  configs.push(
+    { thread: 'main', backend: 'webgl2', precision: 'float32', input: 'rgba', v2: true },
+    {
+      thread: 'main',
+      backend: 'webgl2',
+      precision: 'float32',
+      input: 'rgba',
+      v2: true,
+      refinerLive: true,
+      label: 'v2+ref',
+    },
+    {
+      thread: 'main',
+      backend: 'webgl2',
+      precision: 'float32',
+      input: 'rgba384',
+      v2: true,
+      refinerLive: true,
+      label: 'v2+ref',
+    },
+    {
+      thread: 'worker',
+      backend: 'webgl2',
+      precision: 'float32',
+      input: 'rgba',
+      v2: true,
+      refinerLive: true,
+      label: 'v2+ref',
+    },
+    {
+      thread: 'main',
+      backend: 'webgl2',
+      precision: 'float32',
+      input: 'still12',
+      v2: true,
+      still: true,
+      runs: 20,
+      label: 'still',
+    },
+    {
+      thread: 'worker',
+      backend: 'webgl2',
+      precision: 'float32',
+      input: 'still12',
+      v2: true,
+      still: true,
+      runs: 20,
+      label: 'still',
+    },
+    {
+      thread: 'main',
+      backend: 'cpu',
+      input: 'still12',
+      v2: true,
+      still: true,
+      runs: 3,
+      label: 'still',
+    },
+  );
   report.bench = [];
   console.log(
-    '\nthread  backend precision input   refine | cold total (load / init / 1st frame) | warm p50 / p95 ms',
+    '\nthread  backend precision input   model  | cold total (load / init / 1st frame) | warm p50 / p95 ms',
   );
   for (const config of configs) {
     const arg = { precision: 'auto', refine: false, runs: 100, warmup: 10, ...config };
@@ -246,7 +364,7 @@ if (benchMode) {
     );
     console.log(
       `${arg.thread.padEnd(7)} ${r.backend.padEnd(7)} ${(arg.backend === 'cpu' ? '–' : arg.precision).padEnd(9)} ` +
-        `${arg.input.padEnd(7)} ${String(!!arg.refine).padEnd(6)} | ${c.total.toFixed(1)} (${parts.join(' / ')}) | ` +
+        `${arg.input.padEnd(7)} ${(arg.label ?? (arg.v2 ? 'v2' : arg.refine ? 'edge' : 'v1')).padEnd(6)} | ${c.total.toFixed(1)} (${parts.join(' / ')}) | ` +
         `${r.p50.toFixed(2)} / ${r.p95.toFixed(2)}`,
     );
   }
