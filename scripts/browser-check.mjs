@@ -275,7 +275,7 @@ async function checkDemo(label, url) {
   );
 }
 
-const CHOICES = ['classic', 'nn', 'nn-refine', 'hybrid', 'nn2-refiner', 'nn3'];
+const CHOICES = ['classic', 'nn', 'nn-refine', 'hybrid', 'nn2-refiner', 'nn3', 'nn4'];
 
 /**
  * Without a stored choice, the demo defaults to Hybrid (WebGL2 works in headless Chrome) whose
@@ -285,16 +285,6 @@ async function checkDefaultChoice(label, url) {
   const page = await browser.newPage();
   await page.addInitScript(() => {
     localStorage.setItem('scanoficus-debug', '1');
-    // Record every status the demo publishes.
-    let value;
-    window.__statusLog = [];
-    Object.defineProperty(window, 'scanoficusDetector', {
-      get: () => value,
-      set: (v) => {
-        value = v;
-        window.__statusLog.push(v.running);
-      },
-    });
   });
   await page.goto(`${url}#/live`);
   const selected = await page.evaluate(() => document.getElementById('detector').value);
@@ -313,18 +303,47 @@ async function checkDefaultChoice(label, url) {
   const maxSide = await page.evaluate(
     () => document.querySelector('scan-document')?.options?.detection?.maxSide,
   );
-  const log = await page.evaluate(() => window.__statusLog);
   await page.close();
   check(
-    `${label}: the default detector is Hybrid (round 1 + refine, 768-px frames)`,
-    selected === 'hybrid' &&
-      status.choice === 'hybrid' &&
-      /round 1 \+ refine/.test(status.running) &&
+    `${label}: the default detector is Neural v4 (float32, 768-px frames)`,
+    selected === 'nn4' &&
+      status.choice === 'nn4' &&
+      /Neural v4 · worker · WebGL2 float32/.test(status.running) &&
       maxSide === 768 &&
-      log.some((r) => /classic until the network is ready/.test(r)) &&
       !status.error,
-    `${selected}; ${status.failed ?? status.running}; detection maxSide ${maxSide}; ` +
-      `classic answered first: ${log.some((r) => /classic until/.test(r))}`,
+    `${selected}; ${status.failed ?? status.running}; detection maxSide ${maxSide}`,
+  );
+  // Without float32 render targets (float16-only GPUs) the default is Classic.
+  const half = await browser.newPage();
+  await half.addInitScript(() => {
+    const get = WebGL2RenderingContext.prototype.getExtension;
+    WebGL2RenderingContext.prototype.getExtension = function (name) {
+      return name === 'EXT_color_buffer_float' ? null : get.call(this, name);
+    };
+  });
+  await half.goto(`${url}#/live`);
+  const halfChoice = await half.evaluate(() => document.getElementById('detector').value);
+  // A stored Neural v4 on such a GPU falls back to Classic (it needs float32). The override
+  // above does not reach workers, so the network runs on the main thread here.
+  await half.evaluate(() => localStorage.setItem('scanoficus-detector', 'nn4'));
+  await half.addInitScript(() => {
+    globalThis.OffscreenCanvas = undefined;
+  });
+  await half.reload();
+  await half.getByText('Start scanning').click();
+  const halfStatus = await half
+    .waitForFunction(() => window.scanoficusDetector?.error && window.scanoficusDetector, null, {
+      timeout: 40000,
+    })
+    .then((h) => h.jsonValue())
+    .catch((e) => ({ failed: String(e).split('\n')[0] }));
+  await half.close();
+  check(
+    `${label}: without float32 render targets the default is Classic, and Neural v4 falls back`,
+    halfChoice === 'classic' &&
+      /Classic · worker \(fallback\)/.test(halfStatus.running ?? '') &&
+      /float32/.test(halfStatus.error ?? ''),
+    `${halfChoice}; ${halfStatus.failed ?? `${halfStatus.running}: ${halfStatus.error}`}`,
   );
   // A stored choice wins over the default.
   const stored = await browser.newPage();
@@ -344,6 +363,16 @@ async function checkDetectorChoices(label, url) {
     await page.addInitScript((c) => {
       localStorage.setItem('scanoficus-detector', c);
       localStorage.setItem('scanoficus-debug', '1');
+      // Record every status the demo publishes.
+      let value;
+      window.__statusLog = [];
+      Object.defineProperty(window, 'scanoficusDetector', {
+        get: () => value,
+        set: (v) => {
+          value = v;
+          window.__statusLog.push(v.running);
+        },
+      });
     }, choice);
     await page.goto(`${url}#/live`);
     await page.getByText('Start scanning').click();
@@ -393,6 +422,18 @@ async function checkDetectorChoices(label, url) {
         : `corner error ${(live.error * 100).toFixed(2)} % of the diagonal; ${status.running}` +
             (network ? `, cold start ${Math.round(status.coldStartMs)} ms` : ''),
     );
+    if (!live.failed && choice === 'hybrid') {
+      const log = await page.evaluate(() => window.__statusLog);
+      check(
+        `${label}: Hybrid answers with Classic until round 1 + refine is ready`,
+        log.some((r) => /classic until the network is ready/.test(r)) &&
+          /round 1 \+ refine/.test(status.running) &&
+          (await page.evaluate(
+            () => document.querySelector('scan-document')?.options?.detection?.maxSide,
+          )) === 768,
+        log.join(' → '),
+      );
+    }
     if (!live.failed && choice === 'nn') {
       // A context loss (simulated through the demo's fault hook) skips frames but keeps the
       // network; any other failure falls back to Classic with the reason.
@@ -463,13 +504,13 @@ async function checkDetectorChoices(label, url) {
       )
       .then((h) => h.jsonValue())
       .catch((e) => ({ failed: String(e).split('\n')[0] }));
-    // Rounds 2 and 3 re-detect the full-resolution still with the corner refiner (detectStill).
+    // Rounds 2–4 re-detect the full-resolution still with the corner refiner (detectStill).
     const usedStill = photo.status?.stillSize === '640×480';
     check(
       `${label}: photo import with "${choice}" finds the page`,
       !photo.failed &&
         photo.error < 0.02 &&
-        usedStill === (choice === 'nn2-refiner' || choice === 'nn3'),
+        usedStill === (choice === 'nn2-refiner' || choice === 'nn3' || choice === 'nn4'),
       photo.failed ??
         `corner error ${(photo.error * 100).toFixed(2)} % of the diagonal` +
           (usedStill
@@ -544,9 +585,9 @@ async function checkDetectorChoices(label, url) {
   const hashed = (re) => assets.filter((f) => re.test(f));
   check(
     'vite build /scanoficus/: model graphs, weights, licenses and credits are content-hashed assets',
-    // Round 1 from the package, rounds 2 and 3 from apps/demo/models; two LICENSE.md
+    // Rounds 1 and 4 from the package, rounds 2 and 3 from apps/demo/models; two LICENSE.md
     // (package and demo); the coco-credits.csv of rounds 3 and 4 are equal (one asset).
-    ['docquadnet', 'docquadnet2'].every(
+    ['docquadnet', 'docquadnet2', 'docquadnet4'].every(
       (m) =>
         hashed(new RegExp(`^${m}-[\\w-]+\\.json$`)).length >= 1 &&
         hashed(new RegExp(`^${m}-[0-9a-f]{12}-[\\w-]+\\.bin$`)).length >= 1,

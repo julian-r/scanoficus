@@ -12,9 +12,17 @@ import {
  * not download it.
  */
 
-export type DetectorChoice = 'classic' | 'nn' | 'nn-refine' | 'hybrid' | 'nn2-refiner' | 'nn3';
+export type DetectorChoice =
+  | 'classic'
+  | 'nn'
+  | 'nn-refine'
+  | 'hybrid'
+  | 'nn2-refiner'
+  | 'nn3'
+  | 'nn4';
 
 export const DETECTOR_LABELS: Record<DetectorChoice, string> = {
+  nn4: 'Neural v4',
   classic: 'Classic',
   nn: 'Neural network',
   'nn-refine': 'Neural + refine',
@@ -25,44 +33,41 @@ export const DETECTOR_LABELS: Record<DetectorChoice, string> = {
 
 const STORAGE_KEY = 'scanoficus-detector';
 
-let webGl2: boolean | null = null;
+let float32Targets: boolean | null = null;
 
 /**
- * True if this page can render to a float texture with WebGL2 (what the network needs): the
- * extension alone is not enough, the framebuffer must be complete. Probed once per page.
+ * True if WebGL2 can render to float32 textures on this page: the extension alone is not
+ * enough, the framebuffer must be complete. Probed once per page.
  */
-export function hasWebGl2(): boolean {
-  if (webGl2 !== null) return webGl2;
-  webGl2 = false;
+export function hasFloat32WebGl2(): boolean {
+  if (float32Targets !== null) return float32Targets;
+  float32Targets = false;
   try {
     const gl = document.createElement('canvas').getContext('webgl2');
     if (!gl) return false;
-    for (const [extension, format] of [
-      ['EXT_color_buffer_float', gl.RGBA32F],
-      ['EXT_color_buffer_half_float', gl.RGBA16F],
-    ] as const) {
-      if (webGl2 || !gl.getExtension(extension)) continue;
+    if (gl.getExtension('EXT_color_buffer_float')) {
       const texture = gl.createTexture();
       gl.bindTexture(gl.TEXTURE_2D, texture);
-      gl.texStorage2D(gl.TEXTURE_2D, 1, format, 1, 1);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, 1, 1);
       const framebuffer = gl.createFramebuffer();
       gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
-      webGl2 = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+      float32Targets = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
     }
     gl.getExtension('WEBGL_lose_context')?.loseContext();
   } catch {
-    webGl2 = false;
+    float32Targets = false;
   }
-  return webGl2;
+  return float32Targets;
 }
 
 export function loadChoice(): DetectorChoice {
   const stored = localStorage.getItem(STORAGE_KEY);
   if (stored && Object.hasOwn(DETECTOR_LABELS, stored)) return stored as DetectorChoice;
-  // Default: the hybrid (classic v3 when confident, else round 1 + refinement), which had the
-  // best JI on every set with documents offline (scanoficus-datasets results/hybrid.md).
-  return hasWebGl2() ? 'hybrid' : 'classic';
+  // Default: round 4 alone (better held-out JI than the previous Hybrid default on every set,
+  // fewer false positives; see the demo README). Only with float32 render targets: with float16
+  // activations the decision near its threshold varies by GPU, so float16-only GPUs get Classic.
+  return hasFloat32WebGl2() ? 'nn4' : 'classic';
 }
 
 /** Choices whose network stage is round 1 with classic edge refinement. */
@@ -74,8 +79,8 @@ const REFINED = new Set<DetectorChoice>(['nn-refine', 'hybrid']);
  * still works at its calibrated 384 px); the others keep the default 384.
  */
 export function detectionMaxSide(choice: DetectorChoice): number | undefined {
-  // Round 3 refines live frames too (its decision needs the corner scores): 768 px as well.
-  return REFINED.has(choice) || choice === 'nn3' ? 768 : undefined;
+  // Rounds 3 and 4 refine live frames too (their decision needs the corner scores): 768 px.
+  return REFINED.has(choice) || choice === 'nn3' || choice === 'nn4' ? 768 : undefined;
 }
 
 export function saveChoice(choice: DetectorChoice): void {
@@ -167,22 +172,29 @@ export function createDemoDetector(choice: DetectorChoice): DocumentDetector {
     } catch (error) {
       return fallback(`Could not load the detector module: ${message(error)}`);
     }
-    // The model files come with the package (`models/`); Vite emits them as content-hashed
-    // assets, so the service worker's cache-first strategy can never serve a stale pair.
-    // Round 2 (with the corner refiner on stills; threshold 0.98 from the bundle) is a
-    // separate entry, so its files are only fetched when this choice is used.
-    // Rounds 2 and 3 come with the demo (apps/demo/models/), not with the npm package.
+    // Model files: rounds 1 and 4 come with the package (`models/`), rounds 2 and 3 with the
+    // demo (`apps/demo/models/`, not in the npm package). Vite emits all as content-hashed
+    // assets, so the service worker's cache-first strategy can never serve a stale pair, and
+    // each round's files are only fetched when its choice is used.
+    // Round 2 (corner refiner on stills; threshold 0.98 from the bundle).
     const v2 =
       choice === 'nn2-refiner' ? (await import('./bundles/docquadnet2.ts')).DOCQUADNET2 : undefined;
-    // Round 3: its decision.json is the presence rule; the refiner runs on live frames and
+    // Rounds 3 and 4: the decision is the presence rule; the refiner runs on live frames and
     // stills (the bundle's default).
-    const v3 =
-      choice === 'nn3' ? (await import('./bundles/docquadnet3.ts')).DOCQUADNET3 : undefined;
+    const decisionBundle =
+      choice === 'nn3'
+        ? (await import('./bundles/docquadnet3.ts')).DOCQUADNET3
+        : choice === 'nn4'
+          ? (await import('@scanoficus/detector-nn/docquadnet4')).DOCQUADNET4
+          : undefined;
     const options = {
       refine: REFINED.has(choice),
       backend: 'webgl2' as const, // never the slow CPU path in a live loop
       ...(v2 ? { bundle: v2, refiner: { live: false, still: true } } : {}),
-      ...(v3 ? { bundle: v3 } : {}),
+      ...(decisionBundle ? { bundle: decisionBundle } : {}),
+      // Round 4 (the default) only with float32: float16 decisions near the threshold vary by
+      // GPU. Without float32 targets (worker and main thread) it falls back to Classic.
+      ...(choice === 'nn4' ? { precision: 'float32' as const } : {}),
       ...(choice === 'hybrid' ? { threshold: nn.HYBRID_DEFAULTS.networkThreshold } : {}),
     };
     let network: DocumentDetector | null = null;
@@ -242,7 +254,7 @@ export function createDemoDetector(choice: DetectorChoice): DocumentDetector {
   });
   publish();
 
-  /** Full-resolution still detection (rounds 2 and 3; the others use the downscaled path). */
+  /** Full-resolution still detection (rounds 2–4; the others use the downscaled path). */
   const detectStill = async (
     still: DetectorFrame,
     options?: DetectOptions,
@@ -262,7 +274,7 @@ export function createDemoDetector(choice: DetectorChoice): DocumentDetector {
   };
 
   return {
-    ...(choice === 'nn2-refiner' || choice === 'nn3' ? { detectStill } : {}),
+    ...(choice === 'nn2-refiner' || choice === 'nn3' || choice === 'nn4' ? { detectStill } : {}),
     async detect(frame: DetectorFrame, options?: DetectOptions) {
       if (!detector && interim && !disposed) {
         return interim.detect(frame, { ...options, maxSide: 384 });
