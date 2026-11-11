@@ -235,7 +235,7 @@ Promise.all([
     }
     console.log(
       `vite ${label} (installed package): neural detectors load their packaged models ` +
-        '(round 1; round 2 + refiner on a still; round 3 with decision.json) ' +
+        '(round 1; round 2 + refiner on a still; round 3 with its pinned decision) ' +
         `(presence ${nn.presence.toFixed(3)})`,
     );
   };

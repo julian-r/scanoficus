@@ -54,7 +54,7 @@ under <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>. Chan
 cropped, rotated and augmented for training; labels converted. Content shown in the photos can
 belong to third parties (Mendeley Data). Round 3 also with 6,329 COCO train2017 photos (Flickr, CC
 BY 2.0 or no known copyright restrictions; cropped, resized and augmented),
-<a href="${cocoCreditsUrl}">list of images and sources</a>. <a href="${modelLicenseUrl}">Model
+<a href="${cocoCreditsUrl}">list of images with authors, titles and sources</a>. <a href="${modelLicenseUrl}">Model
 license and attribution</a>.`;
 document.body.append(credits);
 

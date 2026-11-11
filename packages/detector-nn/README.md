@@ -159,7 +159,13 @@ createDetector: () => createNnDetectorWorker({ bundle: DOCQUADNET3 }),
 
 - **Bundle.** The round-2 main network (its files in `models/docquadnet2/` are shared, not
   copied), a refiner with a third output per crop, the corner-confidence logit
-  (`docquadnet3-refiner`; offsets as round 2), and `decision.json` from scanoficus-ml.
+  (`docquadnet3-refiner`; offsets as round 2), and the decision of scanoficus-ml's
+  `decision.json`. The bundle module carries the decision's runtime fields inline (no file is
+  fetched for it); `models/docquadnet3/decision.json` is the copy for self-hosting.
+- **Pinned.** The packaged decision records the SHA-256 of the main network's and the refiner's
+  weights it was fitted with (`mainSha256`, `refinerSha256`, added by `package_model.py`).
+  `loadBundle` rejects a decision whose hashes do not match the loaded weights, or that has
+  none.
 - **Decision** (`scanoficus_ml/detectors.py` `OwnPipeline3`, features of
   `scanoficus_ml/verify.py`): `score = bias + Σ weights[k] · features[k]`, a document if
   `score > threshold`, with the features `z` (main presence logit, clipped to ±12), `cl_min` /
@@ -168,33 +174,41 @@ createDetector: () => createNnDetectorWorker({ bundle: DOCQUADNET3 }),
   (`createDecision`): new coefficients or a new threshold are a file swap; a feature this
   runtime cannot compute is refused with an error naming it. `Detection.score` is
   `sigmoid(score)` and the bundle's threshold `sigmoid(threshold)` (0.222), as in Python. A
-  `presence` option still replaces the rule.
+  `presence` option still replaces the rule. An explicit `threshold` is compared with
+  `sigmoid(score)` (a warning says so).
 - **The refiner runs on live frames too** (the decision needs its corner scores), so round 3
-  costs about 7 ms more per live frame than round 1 on the M5 Pro (see the speed table). Round 3
+  costs about 7 ms more per live frame than round 1 on an M5 Pro, more on phones (see the
+  speed table). Turning the refiner off (`refiner: false`, `live: false` or `still: false`)
+  makes `ready()` throw for a decision bundle, unless a `presence` rule is given: without the
+  corner scores the decision would reject every frame. Round 3
   starts the refiner from the network's normalized corners times the work-image size and maps
   the result back per axis, as `verify.run_pipeline` does (round 2: frame pixels times one
   scale, as `pipeline.py`); `RefinerSettings.coordinates` selects this.
-- **Precision.** With float16 activations the corner logits move by up to 0.03 and the score by
-  up to 0.26 (float32: 0.01): use float32 render targets for round 3 where available (the
-  default).
-- Vite inlines files below 4 kB, so `decision.json` becomes a `data:` URL in the bundle; a
-  Content-Security-Policy must then allow `connect-src data:`.
+- **Precision.** float32 render targets (the default where available) reproduce the NumPy
+  score within 0.05. With float16 activations the corner logits move by up to 0.03 and the
+  score shifts: float16 − float32 was −0.14 on average (sd 0.22; clear pages −0.06 ± 0.10,
+  faint near-threshold pages −0.23 ± 0.27; 21 scenes, M5 Pro). The decision adds
+  `FLOAT16_SCORE_OFFSET` (+0.14) to float16 scores, which removes the mean; the spread
+  remains, so float16 decisions within about ±0.7 of the threshold can still differ from
+  float32 (2 of the 8 near-threshold test scenes flipped, at margins 0.06 and 0.31). On
+  scanoficus-ml's validation sets 0.3 % of the frames lie within 0.05 of the threshold, 1.0 %
+  within 0.15, 2.2 % within 0.3 and 4.3 % within 0.66 (0–11 % by set).
 
 ### Options (`createNnDetector`, `createNnDetectorWorker`)
 
-| option                                               | default      | meaning                                                                                                                                                                                                                                                                            |
-| ---------------------------------------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bundle`                                             | `DOCQUADNET` | model bundle: a `BundleSource`, a `bundle.json` URL, or a loaded `NnBundle` (`createNnDetector` only). Its threshold is the default `threshold`.                                                                                                                                   |
-| `refiner`                                            | stills       | `{ live, still }` (defaults false / true), `true` for both, `false` for neither. Only with a bundle that has a refiner.                                                                                                                                                            |
-| `presence`                                           | threshold    | presence rule `(signals) => score` (`createNnDetector`); `presenceModule` (URL of a module exporting it) for `createNnDetectorWorker`.                                                                                                                                             |
-| `graphUrl`, `weightsUrl`                             | package      | the graph JSON and the weights. Default: the files in the package's `models/` (`DOCQUADNET_GRAPH_URL`, `DOCQUADNET_WEIGHTS_URL`). With only `graphUrl`, the weights file named in the graph is loaded from next to it. `createNnDetector` also accepts `model` (from `loadModel`). |
-| `threshold`                                          | bundle       | presence threshold, chosen on validation: round 1 0.85 (on 785 real photos without a document, 8.8 % pass at 0.85, 7.1 % at 0.9 and 4.6 % at 0.95); round 2 0.98 (at most 5 % of the COCO calibration half; 4.6 % on the report half).                                             |
-| `backend`                                            | `'auto'`     | `'auto'`: WebGL2, with the CPU when WebGL2 or float render targets are missing, when a run fails, and for frames during a context loss. `'webgl2'`: no fallback (errors reject). `'cpu'`: CPU only.                                                                                |
-| `precision`                                          | `'auto'`     | storage of WebGL2 activations: `'float32'` if renderable (`EXT_color_buffer_float`), else `'float16'`. Arithmetic is always float32.                                                                                                                                               |
-| `refine`                                             | `false`      | `true` or `RefineOptions`: network first, then classic edge refinement near the quad.                                                                                                                                                                                              |
-| `canvas`                                             | new canvas   | canvas for the WebGL2 context (`createNnDetector` only). Default: an `OffscreenCanvas`, or a `<canvas>` where `OffscreenCanvas` has no WebGL2 (Safari 16.4–16.x).                                                                                                                  |
-| `clipToFrame`                                        | `true`       | clamp the quad to the frame; `null` for non-convex or degenerate quads.                                                                                                                                                                                                            |
-| `workerUrl`, `worker`, `timeoutMs`, `transferPixels` | see the core | as in `createDetectorWorker` from `@scanoficus/core/worker`. The default worker URL is `new URL('./worker-entry.js', import.meta.url)`. `timeoutMs` defaults to 30 s, because the first request includes the model download.                                                       |
+| option                                               | default      | meaning                                                                                                                                                                                                                                                                                                                                   |
+| ---------------------------------------------------- | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bundle`                                             | `DOCQUADNET` | model bundle: a `BundleSource`, a `bundle.json` URL, or a loaded `NnBundle` (`createNnDetector` only). Its threshold is the default `threshold`.                                                                                                                                                                                          |
+| `refiner`                                            | stills       | `{ live, still }`, `true` for both, `false` for neither; only with a bundle that has a refiner. Defaults: `{ live: false, still: true }`; for a bundle with a decision (round 3) `{ live: true, still: true }`, which costs about 7 ms per live frame on an M5 Pro (more on phones), and turning it off without a `presence` rule throws. |
+| `presence`                                           | threshold    | presence rule `(signals) => score` (`createNnDetector`); `presenceModule` (URL of a module exporting it) for `createNnDetectorWorker`.                                                                                                                                                                                                    |
+| `graphUrl`, `weightsUrl`                             | package      | the graph JSON and the weights. Default: the files in the package's `models/` (`DOCQUADNET_GRAPH_URL`, `DOCQUADNET_WEIGHTS_URL`). With only `graphUrl`, the weights file named in the graph is loaded from next to it. `createNnDetector` also accepts `model` (from `loadModel`).                                                        |
+| `threshold`                                          | bundle       | presence threshold, chosen on validation: round 1 0.85 (on 785 real photos without a document, 8.8 % pass at 0.85, 7.1 % at 0.9 and 4.6 % at 0.95); round 2 0.98 (at most 5 % of the COCO calibration half; 4.6 % on the report half).                                                                                                    |
+| `backend`                                            | `'auto'`     | `'auto'`: WebGL2, with the CPU when WebGL2 or float render targets are missing, when a run fails, and for frames during a context loss. `'webgl2'`: no fallback (errors reject). `'cpu'`: CPU only.                                                                                                                                       |
+| `precision`                                          | `'auto'`     | storage of WebGL2 activations: `'float32'` if renderable (`EXT_color_buffer_float`), else `'float16'`. Arithmetic is always float32.                                                                                                                                                                                                      |
+| `refine`                                             | `false`      | `true` or `RefineOptions`: network first, then classic edge refinement near the quad.                                                                                                                                                                                                                                                     |
+| `canvas`                                             | new canvas   | canvas for the WebGL2 context (`createNnDetector` only). Default: an `OffscreenCanvas`, or a `<canvas>` where `OffscreenCanvas` has no WebGL2 (Safari 16.4–16.x).                                                                                                                                                                         |
+| `clipToFrame`                                        | `true`       | clamp the quad to the frame; `null` for non-convex or degenerate quads.                                                                                                                                                                                                                                                                   |
+| `workerUrl`, `worker`, `timeoutMs`, `transferPixels` | see the core | as in `createDetectorWorker` from `@scanoficus/core/worker`. The default worker URL is `new URL('./worker-entry.js', import.meta.url)`. `timeoutMs` defaults to 30 s, because the first request includes the model download.                                                                                                              |
 
 ### Hybrids
 
@@ -255,11 +269,11 @@ createDetector: () => createNnDetectorWorker({ bundle: DOCQUADNET3 }),
 
 By default the models come from the package, one folder per bundle:
 
-| folder                | files                                                                                                                                                    | raw / gzip      |
-| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
-| `models/docquadnet/`  | `docquadnet.json`, `docquadnet-9bc8c22c6a4c.bin`, `bundle.json`                                                                                          | 702 kB / 645 kB |
-| `models/docquadnet2/` | `docquadnet2.json`, `docquadnet2-6ea1c21d6f87.bin`, `docquadnet2-refiner.json`, `docquadnet2-refiner-ed145db94b95.bin`, `bundle.json`                    | 955 kB / 874 kB |
-| `models/docquadnet3/` | `docquadnet3-refiner.json`, `docquadnet3-refiner-216d024894ca.bin`, `decision.json`, `bundle.json`, `coco-credits.csv` (main network: `../docquadnet2/`) | 807 kB / 364 kB |
+| folder                | files                                                                                                                                                    | raw / gzip       |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
+| `models/docquadnet/`  | `docquadnet.json`, `docquadnet-9bc8c22c6a4c.bin`, `bundle.json`                                                                                          | 702 kB / 645 kB  |
+| `models/docquadnet2/` | `docquadnet2.json`, `docquadnet2-6ea1c21d6f87.bin`, `docquadnet2-refiner.json`, `docquadnet2-refiner-ed145db94b95.bin`, `bundle.json`                    | 955 kB / 874 kB  |
+| `models/docquadnet3/` | `docquadnet3-refiner.json`, `docquadnet3-refiner-216d024894ca.bin`, `decision.json`, `bundle.json`, `coco-credits.csv` (main network: `../docquadnet2/`) | 1245 kB / 548 kB |
 
 They are referenced as `new URL('../models/…', import.meta.url)`. Vite, webpack 5 and other
 bundlers that understand this pattern emit the files as content-hashed assets, so caches
@@ -268,7 +282,8 @@ bundlers that understand this pattern emit the files as content-hashed assets, s
 Keep `models/LICENSE.md` with them (for example, link it from your app's credits).
 
 To host the files yourself, copy a bundle folder and load its `bundle.json`
-(`bundle: 'https://…/docquadnet2/bundle.json'`), or pass `graphUrl` for a main network only (the
+(`bundle: 'https://…/docquadnet2/bundle.json'`; `docquadnet3/bundle.json` refers to the main
+network in `../docquadnet2/`, so copy both folders side by side), or pass `graphUrl` for a main network only (the
 weights are loaded from the file name in the graph, relative to it). The manifest and the
 graphs are fetched with `cache: 'no-cache'`; the weights' length and SHA-256 are checked against
 their graph (with `crypto.subtle`, which exists only in secure contexts; elsewhere only the
@@ -277,8 +292,9 @@ by about 7 % with gzip and 12 % with brotli; the graphs to 1.5 kB). They are fet
 detector: share one bundle from `loadBundle()` between `createNnDetector` instances. After
 retraining, regenerate `models/` with `scripts/package_model.py`.
 
-**Package size.** Shipping both bundles grows the tarball by 0.87 MB (gzip; 0.96 MB unpacked)
-compared with round 1 alone. When round 2 becomes the default, drop `models/docquadnet/` from
+**Package size.** Round 2 grows the tarball by 0.87 MB (gzip; 0.96 MB unpacked) compared with
+round 1 alone, round 3 by another 0.55 MB (gzip; 1.25 MB unpacked, of which the COCO
+image list is 0.32 / 0.99 MB). When round 2 becomes the default, drop `models/docquadnet/` from
 the package (`package_model.py` builds each bundle independently) and keep round 1 only where
 it is still needed, for example in the demo's `public/` folder, loaded with
 `bundle: '…/bundle.json'`.
@@ -482,10 +498,14 @@ with those files:
 > from Flickr under CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/) or "no known
 > copyright restrictions" (https://flickr.com/commons/usage/): 6,329 photos without documents;
 > 3,921 trained the round-3 refiner (corner crops), 1,637 fitted the presence decision and 771
-> were used for validation. Changes: cropped (corner crops), resized, rotated and augmented. The
-> list with each image's COCO id, role, license and Flickr source URL is
-> `docquadnet3/coco-credits.csv`. The Flickr photographers are the authors; COCO does not
-> record their names.
+> were used for validation. Changes: cropped (corner crops), resized, rotated and augmented.
+> `docquadnet3/coco-credits.csv` lists each image's COCO id, role, license, Flickr photo page
+> (https://flic.kr/p/…) and, for the 6,223 CC BY 2.0 photos, the author and title as Flickr
+> shows them today (oEmbed, fetched November 2026): 5,150 found, 1,073 no longer on Flickr
+> (author and title unknown; the COCO source URL is listed). 106 photos with "no known copyright
+> restrictions" need no author. Some owners have changed the license on Flickr since COCO
+> collected the photos (column `flickr_license_now`); the license under which COCO obtained
+> them (column `license`) applies to the copies used here.
 
 The other training inputs need no attribution: procedural pages, CC0 textures and HDRIs from
 Poly Haven, and OFL fonts that were only rendered into images. The data manifests are in the

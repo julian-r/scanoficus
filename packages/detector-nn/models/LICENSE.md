@@ -47,10 +47,14 @@ Round 3 (`docquadnet3/`: its refiner and decision) also used COCO photos. This n
 > from Flickr under CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/) or "no known
 > copyright restrictions" (https://flickr.com/commons/usage/): 6,329 photos without documents;
 > 3,921 trained the round-3 refiner (corner crops), 1,637 fitted the presence decision and 771
-> were used for validation. Changes: cropped (corner crops), resized, rotated and augmented. The
-> list with each image's COCO id, role, license and Flickr source URL is
-> `docquadnet3/coco-credits.csv`. The Flickr photographers are the authors; COCO does not
-> record their names.
+> were used for validation. Changes: cropped (corner crops), resized, rotated and augmented.
+> `docquadnet3/coco-credits.csv` lists each image's COCO id, role, license, Flickr photo page
+> (https://flic.kr/p/…) and, for the 6,223 CC BY 2.0 photos, the author and title as Flickr
+> shows them today (oEmbed, fetched November 2026): 5,150 found, 1,073 no longer on Flickr
+> (author and title unknown; the COCO source URL is listed). 106 photos with "no known copyright
+> restrictions" need no author. Some owners have changed the license on Flickr since COCO
+> collected the photos (column `flickr_license_now`); the license under which COCO obtained
+> them (column `license`) applies to the copies used here.
 
 The other training inputs need no attribution: procedural pages, CC0 textures and HDRIs from
 Poly Haven, and OFL fonts that were only rendered into images. Hashes of all training inputs
