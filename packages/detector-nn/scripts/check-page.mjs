@@ -512,7 +512,17 @@ export async function round3Parity({ precision }) {
   for (const c of meta.cases) {
     const image = await frame(c);
     const rgb = { width: c.width, height: c.height, data: rgbaToRgb(image) };
-    const r = { name: c.name, document: c.numpy.presence > 0.5, cropMismatched: 0, heads: 0 };
+    const r = {
+      name: c.name,
+      document: c.numpy.presence > 0.5,
+      cropMismatched: 0,
+      // GPU crops + GPU network vs NumPy, per output kind.
+      offsets: 0,
+      logit: 0,
+      // The GPU network on the (bit-exact) CPU crops vs NumPy: network precision alone.
+      netOffsets: 0,
+      netLogit: 0,
+    };
     runner.run(image);
     const [ww, wh] = c.work;
     c.numpy.passes.forEach((pass, k) => {
@@ -527,8 +537,28 @@ export async function round3Parity({ precision }) {
       gpu.passes[0].offsets.forEach(([dx, dy], n) => {
         const [ex, ey, el] = pass.heads[n];
         const l = gpu.passes[0].cornerLogits[n];
-        r.heads = Math.max(r.heads, Math.abs(dx - ex), Math.abs(dy - ey), Math.abs(l - el));
+        r.offsets = Math.max(r.offsets, Math.abs(dx - ex), Math.abs(dy - ey));
+        r.logit = Math.max(r.logit, Math.abs(l - el));
       });
+      const hwc = cpuCrops[0];
+      const input = new Float32Array(4 * 3 * 4096);
+      for (let n = 0; n < 4; n++) {
+        for (let ch = 0; ch < 3; ch++) {
+          for (let i = 0; i < 4096; i++) {
+            input[(n * 3 + ch) * 4096 + i] = hwc[(n * 4096 + i) * 3 + ch] / 255;
+          }
+        }
+      }
+      const net = runner.runRefinerTensor(input);
+      for (let n = 0; n < 4; n++) {
+        const [ex, ey, el] = pass.heads[n];
+        r.netOffsets = Math.max(
+          r.netOffsets,
+          Math.abs(net[3 * n] - ex),
+          Math.abs(net[3 * n + 1] - ey),
+        );
+        r.netLogit = Math.max(r.netLogit, Math.abs(net[3 * n + 2] - el));
+      }
     });
     captured = null;
     const detection = await detector.detect(image);
