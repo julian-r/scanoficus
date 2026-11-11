@@ -183,3 +183,55 @@ describe('CameraSession.captureStill', () => {
     expect(track.stopped).toBe(true);
   });
 });
+
+describe('camera startup and capture fencing', () => {
+  it('stops polling for the first frame after a startup timeout (no rVFC)', async () => {
+    const { video, track } = setup(async () => {});
+    (video as { requestVideoFrameCallback?: unknown }).requestVideoFrameCallback = undefined;
+    let scheduled = 0;
+    const cancelled: number[] = [];
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      scheduled++;
+      return setTimeout(() => cb(0), 1) as unknown as number;
+    });
+    vi.stubGlobal('cancelAnimationFrame', (handle: number) => {
+      cancelled.push(handle);
+      clearTimeout(handle);
+    });
+    const error = await openCamera(video, { startTimeoutMs: 30 }).catch((e) => e);
+    expect(error.code).toBe('start-timeout');
+    expect(track.stopped).toBe(true);
+    expect(cancelled).toHaveLength(1);
+    const after = scheduled;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(scheduled).toBe(after);
+  });
+
+  it('keeps torch changes waiting until a timed-out takePhoto() has settled', async () => {
+    const { video, track } = setup(async () => {});
+    const order: string[] = [];
+    vi.stubGlobal(
+      'ImageCapture',
+      class {
+        takePhoto(): Promise<Blob> {
+          return new Promise((resolve) =>
+            setTimeout(() => {
+              order.push('photo settled');
+              resolve(new Blob(['x']));
+            }, 60),
+          );
+        }
+      },
+    );
+    const session = await openCamera(video, { stillCapture: 'photo', photoTimeoutMs: 10 });
+    const still = await session.captureStill();
+    expect(still.method).toBe('video-frame');
+    order.push('still returned');
+    track.applyConstraints = async (c: unknown) => {
+      order.push('torch applied');
+      track.constraints.push(c);
+    };
+    await session.setTorch(true);
+    expect(order).toEqual(['still returned', 'photo settled', 'torch applied']);
+  });
+});

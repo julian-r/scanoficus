@@ -77,6 +77,12 @@ export interface CameraOptions {
   stillCapture?: 'frame' | 'photo';
   /** Deadline (ms) for `play()` and for the first frame, each. Default 4000. */
   startTimeoutMs?: number;
+  /**
+   * With `stillCapture: 'photo'`: how long to wait for `takePhoto()` before using the video
+   * frame instead. Default 5000. Camera reconfiguration (torch) stays blocked until the
+   * abandoned native photo request actually settles.
+   */
+  photoTimeoutMs?: number;
   /** Called when startup enters a new stage. */
   onStage?: (stage: CameraStartStage) => void;
   /** Cancels a pending start; the stream is released and `aborted` is thrown. */
@@ -126,8 +132,6 @@ interface ImageCaptureLike {
   takePhoto(): Promise<Blob>;
 }
 type ImageCaptureConstructor = new (track: MediaStreamTrack) => ImageCaptureLike;
-
-const PHOTO_TIMEOUT_MS = 5000;
 
 /** Video input devices. Labels and ids are only meaningful after camera permission is granted. */
 export async function listCameras(): Promise<MediaDeviceInfo[]> {
@@ -196,7 +200,8 @@ export async function openCamera(
     video.srcObject = stream;
     await guarded(video.play(), deadline, signal, 'The video preview did not start playing');
     onStage?.('waiting-for-frames');
-    await guarded(firstFrame(video), deadline, signal, 'The camera delivered no frames');
+    const frame = firstFrame(video);
+    await guarded(frame.promise, deadline, signal, 'The camera delivered no frames', frame.cancel);
   } catch (error) {
     release();
     throw error instanceof CameraError ? error : toCameraError(error);
@@ -213,12 +218,18 @@ export async function openCamera(
     photo: !!ImageCaptureCtor,
   };
   let torchOn = false;
+  const photoTimeoutMs = options.photoTimeoutMs ?? 5000;
   // Serializes takePhoto() and applyConstraints(): overlapping calls reconfigure the capture
-  // session concurrently, which older Safari versions handle badly.
+  // session concurrently, which older Safari versions handle badly. `fence` additionally holds
+  // the queue until an abandoned (timed-out) native takePhoto() has settled.
   let queue: Promise<unknown> = Promise.resolve();
+  let fence: Promise<unknown> = Promise.resolve();
   const serialized = <T>(task: () => Promise<T>): Promise<T> => {
     const run = queue.then(task, task);
-    queue = run.catch(() => undefined);
+    queue = run.then(
+      () => fence,
+      () => fence,
+    );
     return run;
   };
 
@@ -249,8 +260,9 @@ export async function openCamera(
     captureStill() {
       return serialized(async () => {
         if (imageCapture && track.readyState === 'live') {
+          const photo = imageCapture.takePhoto();
           try {
-            const blob = await withTimeout(imageCapture.takePhoto(), PHOTO_TIMEOUT_MS);
+            const blob = await withTimeout(photo, photoTimeoutMs);
             const image = await createImageBitmap(blob, { imageOrientation: 'from-image' });
             // Keep the photo only if it really is at least the stream resolution.
             if (image.width * image.height >= video.videoWidth * video.videoHeight) {
@@ -258,8 +270,13 @@ export async function openCamera(
             }
             image.close();
           } catch {
-            // takePhoto() failed on this camera; stop trying it for this session.
+            // takePhoto() failed or timed out on this camera; stop trying it for this session.
+            // A timed-out native request may still be reconfiguring the camera: fence it.
             imageCapture = null;
+            fence = photo.then(
+              () => undefined,
+              () => undefined,
+            );
           }
         }
         return frameStill();
@@ -297,32 +314,52 @@ async function captureVideoFrame(video: HTMLVideoElement): Promise<ImageBitmap> 
   }
 }
 
-/** Resolves when the video presents its first frame (rVFC, else first `currentTime` advance). */
-function firstFrame(video: HTMLVideoElement): Promise<void> {
-  return new Promise((resolve) => {
-    if (typeof video.requestVideoFrameCallback === 'function') {
-      video.requestVideoFrameCallback(() => resolve());
+/**
+ * Resolves when the video presents its first frame (rVFC, else polling readiness each
+ * animation frame). `cancel` stops the pending callback or polling loop.
+ */
+function firstFrame(video: HTMLVideoElement): { promise: Promise<void>; cancel: () => void } {
+  const rvfc = typeof video.requestVideoFrameCallback === 'function';
+  let handle = 0;
+  let cancelled = false;
+  const promise = new Promise<void>((resolve) => {
+    if (rvfc) {
+      handle = video.requestVideoFrameCallback(() => resolve());
       return;
     }
     const check = () => {
+      if (cancelled) return;
       if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0) resolve();
-      else requestAnimationFrame(check);
+      else handle = requestAnimationFrame(check);
     };
     check();
   });
+  return {
+    promise,
+    cancel() {
+      cancelled = true;
+      if (rvfc) video.cancelVideoFrameCallback?.(handle);
+      else cancelAnimationFrame(handle);
+    },
+  };
 }
 
-/** Races `promise` against a deadline and an abort signal, mapping both to CameraErrors. */
+/**
+ * Races `promise` against a deadline and an abort signal, mapping both to CameraErrors.
+ * `cancel` is called once the race is decided, whichever way.
+ */
 function guarded<T>(
   promise: Promise<T>,
   ms: number,
   signal: AbortSignal | undefined,
   timeoutMessage: string,
+  cancel?: () => void,
 ): Promise<T> {
   return new Promise((resolve, reject) => {
     const cleanup = () => {
       clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);
+      cancel?.();
     };
     const onAbort = () => {
       cleanup();
