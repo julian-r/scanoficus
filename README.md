@@ -27,12 +27,13 @@ deploys the demo to GitHub Pages (`.github/workflows/pages.yml`).
 
 ## Packages
 
-| Package                                     | What it is                                                                                        |
-| ------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| [`@scanoficus/core`](packages/core)         | Headless engine: camera, detector, tracker, renderer, filters, PDF, `ScannerController`           |
-| [`@scanoficus/elements`](packages/elements) | `<scan-document>`, `<scan-camera>`, `<scan-crop-editor>`, `<scan-review>`                         |
-| [`@scanoficus/react`](packages/react)       | `useDocumentScanner()` and `<DocumentScanner>` / `<ScanCamera>` / `<ScanReview>` / `<CropEditor>` |
-| [`apps/demo`](apps/demo)                    | Vite PWA demo (live scan, scan from photo, React, debug overlay)                                  |
+| Package                                           | What it is                                                                                        |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| [`@scanoficus/core`](packages/core)               | Headless engine: camera, detector, tracker, renderer, filters, PDF, `ScannerController`           |
+| [`@scanoficus/elements`](packages/elements)       | `<scan-document>`, `<scan-camera>`, `<scan-crop-editor>`, `<scan-review>`                         |
+| [`@scanoficus/react`](packages/react)             | `useDocumentScanner()` and `<DocumentScanner>` / `<ScanCamera>` / `<ScanReview>` / `<CropEditor>` |
+| [`@scanoficus/detector-nn`](packages/detector-nn) | Optional neural detector (DocQuadNet on a small WebGL2 runtime, CPU fallback, hybrids)            |
+| [`apps/demo`](apps/demo)                          | Vite PWA demo (live scan, scan from photo, React, debug overlay)                                  |
 
 ## Install
 
@@ -165,6 +166,7 @@ min+gzip, as measured by `pnpm size` (budget: 40 KB for core):
 | `@scanoficus/core/warp` · `/filters` · `/camera` · `/pdf`        | 3.0 · 2.2 · 2.6 · 1.7 KB |
 | `@scanoficus/elements/define` (including core)                   |                  30.5 KB |
 | `@scanoficus/react` (own code, without elements, core and React) |                   1.4 KB |
+| `@scanoficus/detector-nn` (optional; own code, without weights)  |                  10.5 KB |
 
 ## Detector quality (synthetic benchmark)
 
@@ -226,6 +228,41 @@ with several documents (RWMD) the score is much less reliable. See
 [docs/benchmarks.md](docs/benchmarks.md) for the protocol, the experiment log, licenses, the
 photo-set flags, the comparison with published methods and the failure analysis.
 
+## Optional neural detector
+
+[`@scanoficus/detector-nn`](packages/detector-nn) runs DocQuadNet, our own 349k-parameter
+document detector, in the browser. It uses a small WebGL2 runtime written for this graph, with
+a CPU fallback. It works on the main thread and in a worker, and it plugs into the scanner as
+a `DocumentDetector`:
+
+```ts
+import { createNnDetectorWorker } from '@scanoficus/detector-nn';
+
+const scanner = new ScannerController({
+  createDetector: () =>
+    createNnDetectorWorker({
+      graphUrl: '/models/docquadnet/docquadnet.json',
+      weightsUrl: '/models/docquadnet/docquadnet.bin',
+      refine: true, // network first, then classic edge refinement near the predicted quad
+    }),
+});
+```
+
+- **Quality.** Offline on held-out data it reaches a SmartDoc JI of 0.950 (0.973 with
+  refinement), against 0.786 for the classic detector. It also finds pages on cluttered
+  backgrounds and pages that leave the frame. On clean scenes the classic detector is still
+  more precise; `createHybridDetector` uses the network only when the classic score is below
+  `CONFIDENT_SCORE`.
+- **Size.** The package is 10.5 KB min+gzip. The fp16 weights (608 kB brotli) are fetched
+  from URLs that you host; they are not part of the bundle. The demo ships them in
+  `apps/demo/public/models/docquadnet/`.
+- **Speed.** A 1280×720 frame takes 5.6 ms (median) on an M5 Pro in headless Chrome, and the
+  cold start is about 40–60 ms. The CPU fallback takes about 160 ms per frame.
+- **Parity.** On the same input, the outputs match the NumPy reference within 2·10⁻⁶ (CPU)
+  and 5·10⁻⁶ (WebGL2). End to end with GPU preprocessing, they match within 2·10⁻⁴.
+- **License.** The weights are BSD-3. They require the SmartDoc CC BY 4.0 attribution; see the
+  package README.
+
 ## Roadmap
 
 - Real-device testing and tuning on iOS and Android, following the release gate in the
@@ -234,8 +271,8 @@ photo-set flags, the comparison with published methods and the failure analysis.
   leaving the frame; see [docs/benchmarks.md](docs/benchmarks.md).
 - OCR adapters, lazy-loaded: `@scanoficus/ocr-tesseract`, then PaddleOCR via
   `@scanoficus/ocr-onnx`, plus searchable PDFs with an invisible text layer.
-- An optional ML detector plugin (`@scanoficus/detector-ml`) behind the `DocumentDetector`
-  interface.
+- The neural detector (`@scanoficus/detector-nn`, available): phone measurements, a demo
+  toggle, and fusing depthwise and pointwise passes to cut the per-draw cost.
 - A camera picker (switching between rear lenses) and page persistence (IndexedDB).
 
 ## Development
@@ -253,6 +290,8 @@ pnpm eval        # synthetic detector benchmark; failure images go to packages/c
 pnpm bench:fetch # download SmartDoc 2015 / MIDV-500 / MIDV-2019 to ~/datasets/scanoficus
 pnpm bench       # real-data detector benchmark; then pnpm bench:report, pnpm bench:montage
 pnpm dev:demo    # demo dev server (use https or localhost for camera access)
+pnpm check:nn    # detector-nn WebGL2 parity and robustness in headless Chrome (after pnpm build)
+pnpm bench:nn    # detector-nn cold start and per-frame timings
 ```
 
 ## License
