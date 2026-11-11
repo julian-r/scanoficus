@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { CONFIDENT_SCORE } from '@scanoficus/core/detect';
 import type { Quad } from '@scanoficus/core/geometry';
 import { rgbaToGray } from '@scanoficus/core/image';
 import type { DocumentDetector } from '@scanoficus/core/worker';
@@ -94,12 +95,36 @@ describe('detectors', () => {
   };
 
   it('hybrid: confident classic detections skip the network', async () => {
+    for (const score of [CONFIDENT_SCORE, Math.min(1, CONFIDENT_SCORE + 0.05)]) {
+      const classic = fake(score);
+      const nn = fake(0.99);
+      const hybrid = createHybridDetector({ classic, nn });
+      const frame = renderScene(fixtures.cases[0]);
+      expect((await hybrid.detect(frame))?.score).toBe(score);
+      // The RGBA frame itself (not a gray copy) reaches the classic detector: colour edges.
+      expect(classic.detect).toHaveBeenCalledWith(frame, { minScore: 0 });
+      expect(nn.calls).toBe(0);
+      hybrid.dispose();
+      expect(classic.dispose).toHaveBeenCalled();
+      expect(nn.dispose).toHaveBeenCalled();
+    }
+  });
+
+  it('hybrid: a custom confidence score', async () => {
     const classic = fake(0.9);
+    const nn = fake(0.99);
+    const hybrid = createHybridDetector({ classic, nn, confidentScore: 0.95 });
+    expect((await hybrid.detect(renderScene(fixtures.cases[0])))?.score).toBe(0.99);
+    expect(classic.calls).toBe(1);
+    expect(nn.calls).toBe(1);
+  });
+
+  it('hybrid: the default confidence score is CONFIDENT_SCORE', async () => {
+    const classic = fake(CONFIDENT_SCORE);
     const nn = fake(0.99);
     const hybrid = createHybridDetector({ classic, nn });
     const frame = renderScene(fixtures.cases[0]);
-    expect((await hybrid.detect(frame))?.score).toBe(0.9);
-    expect(classic.detect).toHaveBeenCalledWith(frame, { minScore: 0 });
+    expect((await hybrid.detect(frame))?.score).toBe(CONFIDENT_SCORE);
     expect(nn.calls).toBe(0);
     hybrid.dispose();
     expect(classic.dispose).toHaveBeenCalled();
@@ -107,13 +132,13 @@ describe('detectors', () => {
   });
 
   it('hybrid: unsure or missing classic detections go to the network', async () => {
-    for (const score of [0.84, null]) {
+    for (const score of [CONFIDENT_SCORE - 0.01, 0, null]) {
       const nn = fake(0.99);
       const hybrid = createHybridDetector({ classic: fake(score), nn });
       expect((await hybrid.detect(renderScene(fixtures.cases[0])))?.score).toBe(0.99);
       expect(nn.calls).toBe(1);
     }
-    const veto = createHybridDetector({ classic: fake(0.8), nn: fake(null) });
+    const veto = createHybridDetector({ classic: fake(CONFIDENT_SCORE - 0.01), nn: fake(null) });
     expect(await veto.detect(renderScene(fixtures.cases[0]))).toBeNull();
   });
 });

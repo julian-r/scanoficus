@@ -91,9 +91,10 @@ be at least 192×192 pixels.
     });
   ```
 
-  Each frame first goes to the classic detector (`minScore: 0`). A quad with a score of at
-  least `CONFIDENT_SCORE` (0.85) is returned as is: 99.9 % of such quads are right on the
-  SmartDoc tuning split, and about 2 % of photos without a document reach this score. Frames
+  Each frame first goes to the classic detector (`minScore: 0`), RGBA frames unchanged so that
+  it uses its colour edges. A quad with a score of at least `CONFIDENT_SCORE` (0.80 in the core
+  v3: all such quads on the SmartDoc tuning split and 95 % on the MIDV-500 tuning half are
+  right, and about 3 % of photos without a document reach it) is returned as is. Frames
   with a lower score go to the network, which then decides alone. The `score` of the result is
   the classic edge score or the network's presence probability, depending on which detector
   answered.
@@ -182,9 +183,13 @@ SmartDoc Jaccard index. This package reproduces that pipeline's outputs (see abo
 
 | detector                | SmartDoc held-out | bg 5 (clutter) | MIDV-500 | MIDV-2019 | photos without a document with a quad |
 | ----------------------- | ----------------: | -------------: | -------: | --------: | ------------------------------------: |
-| classic (core, current) |             0.786 |          0.000 |    0.622 |     0.587 |                                 6.5 % |
+| classic (core v3)       |             0.849 |          0.000 |   0.710¹ |     0.655 |                                 6.9 % |
 | DocQuadNet              |             0.950 |          0.884 |    0.792 |     0.793 |                                 8.8 % |
 | DocQuadNet + refinement |             0.973 |          0.887 |    0.808 |     0.813 |                                 8.8 % |
+
+¹ The classic v3 MIDV-500 figure is on the held-out half (5 of the 10 document types); the
+DocQuadNet figures are on all 10 types, none of which it was trained on. The DocQuadNet rows
+were measured against classic v2, before v3 existed; they were not re-run.
 
 On clean, high-contrast scenes the classic detector is still more precise. The classic-first
 hybrid uses it there.

@@ -249,7 +249,7 @@ const scanner = new ScannerController({
 ```
 
 - **Quality.** Offline on held-out data it reaches a SmartDoc JI of 0.950 (0.973 with
-  refinement), against 0.786 for the classic detector. It also finds pages on cluttered
+  refinement), against 0.849 for the classic detector v3. It also finds pages on cluttered
   backgrounds and pages that leave the frame. On clean scenes the classic detector is still
   more precise; `createHybridDetector` uses the network only when the classic score is below
   `CONFIDENT_SCORE`.
