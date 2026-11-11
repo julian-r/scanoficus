@@ -21,54 +21,67 @@
     "./dist/worker-entry.js"
   ],
   "files": [
-    "dist"
+    "dist",
+    "src"
   ],
   "exports": {
     ".": {
+      "@scanoficus/source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
     "./image": {
+      "@scanoficus/source": "./src/image.ts",
       "types": "./dist/image.d.ts",
       "import": "./dist/image.js"
     },
     "./geometry": {
+      "@scanoficus/source": "./src/geometry/index.ts",
       "types": "./dist/geometry.d.ts",
       "import": "./dist/geometry.js"
     },
     "./detect": {
+      "@scanoficus/source": "./src/detect/index.ts",
       "types": "./dist/detect.d.ts",
       "import": "./dist/detect.js"
     },
     "./warp": {
+      "@scanoficus/source": "./src/warp/index.ts",
       "types": "./dist/warp.d.ts",
       "import": "./dist/warp.js"
     },
     "./filters": {
+      "@scanoficus/source": "./src/filters/index.ts",
       "types": "./dist/filters.d.ts",
       "import": "./dist/filters.js"
     },
     "./render": {
+      "@scanoficus/source": "./src/render/index.ts",
       "types": "./dist/render.d.ts",
       "import": "./dist/render.js"
     },
     "./pdf": {
+      "@scanoficus/source": "./src/pdf/index.ts",
       "types": "./dist/pdf.d.ts",
       "import": "./dist/pdf.js"
     },
     "./camera": {
+      "@scanoficus/source": "./src/camera/index.ts",
       "types": "./dist/camera.d.ts",
       "import": "./dist/camera.js"
     },
     "./controller": {
+      "@scanoficus/source": "./src/controller/index.ts",
       "types": "./dist/controller.d.ts",
       "import": "./dist/controller.js"
     },
     "./worker": {
+      "@scanoficus/source": "./src/worker/index.ts",
       "types": "./dist/worker.d.ts",
       "import": "./dist/worker.js"
     },
     "./worker-entry": {
+      "@scanoficus/source": "./src/worker/entry.ts",
       "types": "./dist/worker-entry.d.ts",
       "import": "./dist/worker-entry.js"
     },

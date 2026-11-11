@@ -85,6 +85,22 @@
       "path": "packages/core/dist/worker-entry.js",
       "gzip": true,
       "limit": "10 KB"
+    },
+    {
+      "name": "@scanoficus/elements (own code)",
+      "path": "packages/elements/dist/index.js",
+      "import": "*",
+      "ignore": [
+        "@scanoficus/core"
+      ],
+      "gzip": true,
+      "limit": "12 KB"
+    },
+    {
+      "name": "@scanoficus/elements/define (incl. core)",
+      "path": "packages/elements/dist/define.js",
+      "gzip": true,
+      "limit": "40 KB"
     }
   ]
 }
