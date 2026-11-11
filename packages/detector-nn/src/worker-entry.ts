@@ -8,7 +8,12 @@
  */
 import type { DetectorWorkerMessage, DetectRequest } from '@scanoficus/core/worker';
 import { createNnDetector, type NnDetector, type PresenceRule } from './detector.ts';
-import type { NnStillRequest, NnWorkerInit, NnWorkerStatus } from './worker-client.ts';
+import {
+  checkPresenceModule,
+  type NnStillRequest,
+  type NnWorkerInit,
+  type NnWorkerStatus,
+} from './worker-client.ts';
 
 interface NnWorkerScope {
   onmessage: ((event: MessageEvent<DetectRequest | NnWorkerInit | NnStillRequest>) => void) | null;
@@ -28,12 +33,19 @@ scope.onmessage = (event) => {
       (d) => d.dispose(),
       () => {},
     );
-    const { presenceModule, ...options } = data.init;
+    const { presenceModule, allowCrossOriginPresenceModule, ...options } = data.init;
     const started = performance.now();
     const current = (async () => {
       // A custom presence rule cannot be posted (functions do not clone): load its module.
-      const presence = presenceModule
-        ? ((await import(/* @vite-ignore */ presenceModule)).default as PresenceRule)
+      const url =
+        presenceModule &&
+        checkPresenceModule(
+          presenceModule,
+          (globalThis as unknown as { location: Location }).location.origin,
+          allowCrossOriginPresenceModule,
+        );
+      const presence = url
+        ? ((await import(/* @vite-ignore */ url)).default as PresenceRule)
         : undefined;
       return createNnDetector({ ...options, presence });
     })();

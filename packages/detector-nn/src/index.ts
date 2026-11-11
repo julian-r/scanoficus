@@ -74,6 +74,7 @@ export {
 export { bytesToInput, preprocessRgb, preprocessRgba, rgbaToRgb } from './preprocess.ts';
 export { type RefineOptions, refineQuad } from './refine.ts';
 export {
+  checkPresenceModule,
   createNnDetectorWorker,
   type NnDetectorWorkerOptions,
   type NnStillRequest,

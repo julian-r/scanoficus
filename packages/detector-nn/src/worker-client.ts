@@ -18,10 +18,31 @@ export type NnWorkerDetectorOptions = Omit<
   bundle?: BundleSource | string | URL;
   /**
    * URL of an ES module whose default export is the {@link PresenceRule} (functions cannot be
-   * posted to a worker). Bundlers: `new URL('./my-rule.js', import.meta.url)`.
+   * posted to a worker). **The worker imports and executes this code.** It must be a
+   * self-contained JavaScript module (no bare imports; Vite copies a `new URL('./rule.js',
+   * import.meta.url)` file as a raw asset without bundling it). By default only http(s) URLs of
+   * the worker's own origin are accepted.
    */
   presenceModule?: string | URL;
+  /** Accept a `presenceModule` from another origin (or a `blob:` / `data:` URL). Default false. */
+  allowCrossOriginPresenceModule?: boolean;
 };
+
+/**
+ * Checks a presence-rule module URL before the worker imports it: http(s) on `origin` only,
+ * unless `allowCrossOrigin`. Returns the URL; throws otherwise.
+ */
+export function checkPresenceModule(url: string, origin: string, allowCrossOrigin = false): string {
+  const parsed = new URL(url);
+  if (allowCrossOrigin) return parsed.href;
+  if (!/^https?:$/.test(parsed.protocol) || parsed.origin !== origin) {
+    throw new Error(
+      `Refusing presenceModule ${parsed.href}: not on the worker's origin ${origin} ` +
+        '(pass allowCrossOriginPresenceModule: true to allow it)',
+    );
+  }
+  return parsed.href;
+}
 
 /** Configuration message sent to the worker entry before any request. */
 export interface NnWorkerInit {
@@ -158,7 +179,23 @@ export function createNnDetectorWorker(options: NnDetectorWorkerOptions = {}): N
     { resolve: (d: Detection | null) => void; reject: (e: Error) => void; timer: number }
   >();
   let nextStill = 1;
-  let disposed = false;
+  /** Terminal failure (worker error, stuck worker, dispose): every still rejects with it. */
+  let failure: Error | null = null;
+  const fail = (error: Error) => {
+    if (failure) return;
+    failure = error;
+    for (const p of stills.values()) {
+      clearTimeout(p.timer);
+      p.reject(error);
+    }
+    stills.clear();
+  };
+  worker.addEventListener('error', (event) => {
+    fail(new Error(`Neural detector worker failed: ${event.message || 'no details'}`));
+  });
+  worker.addEventListener('messageerror', () => {
+    fail(new Error('Neural detector worker could not deserialize a message'));
+  });
   worker.addEventListener('message', (event: MessageEvent<NnWorkerStatus | object>) => {
     if (!('nnStillResult' in event.data)) return;
     const { id, detection, error } = event.data.nnStillResult;
@@ -169,30 +206,47 @@ export function createNnDetectorWorker(options: NnDetectorWorkerOptions = {}): N
     if (error !== undefined) pending.reject(new Error(error));
     else pending.resolve(detection ?? null);
   });
+  /** The core client's terminal failures (it terminates the worker for these). */
+  const TERMINAL = /^Detector (worker (crashed|failed to load|did not answer|could not)|disposed)/;
   return {
-    detect: detector.detect,
+    detect(frame, options) {
+      return detector.detect(frame, options).catch((error: unknown) => {
+        if (error instanceof Error && TERMINAL.test(error.message)) fail(error);
+        throw error;
+      });
+    },
     ready: () => ready,
     detectStill(frame) {
-      if (disposed) return Promise.reject(new Error('Detector disposed'));
+      if (failure) {
+        if ('close' in frame) frame.close();
+        return Promise.reject(failure);
+      }
       const id = nextStill++;
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
-          stills.delete(id);
-          reject(new Error(`Neural detector worker did not answer a still within ${timeout} ms`));
+          // A worker that does not answer is stuck: fail it (and its detections) for good.
+          const error = new Error(
+            `Neural detector worker did not answer a still within ${timeout} ms`,
+          );
+          fail(error);
+          detector.dispose();
         }, timeout) as unknown as number;
         stills.set(id, { resolve, reject, timer });
         const request: NnStillRequest = { nnStill: { id, frame } };
-        // Bitmaps are transferred (consumed); RGBA stills are copied (the caller keeps them).
-        worker.postMessage(request, 'close' in frame ? [frame] : []);
+        try {
+          // Bitmaps are transferred (consumed); RGBA stills are copied (the caller keeps them).
+          worker.postMessage(request, 'close' in frame ? [frame] : []);
+        } catch (error) {
+          // E.g. DataCloneError: nothing was sent; clean up and consume the bitmap.
+          clearTimeout(timer);
+          stills.delete(id);
+          if ('close' in frame) frame.close();
+          reject(error instanceof Error ? error : new Error(String(error)));
+        }
       });
     },
     dispose() {
-      disposed = true;
-      for (const p of stills.values()) {
-        clearTimeout(p.timer);
-        p.reject(new Error('Detector disposed'));
-      }
-      stills.clear();
+      fail(new Error('Detector disposed'));
       detector.dispose();
     },
   };
