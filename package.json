@@ -1,0 +1,45 @@
+{
+  "name": "scanoficus-monorepo",
+  "private": true,
+  "type": "module",
+  "license": "BSD-3-Clause",
+  "packageManager": "pnpm@12.15.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "pnpm -r --filter \"./packages/**\" build",
+    "test": "pnpm -r --filter \"./packages/**\" test",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "typecheck": "pnpm -r --filter \"./packages/**\" typecheck",
+    "size": "size-limit",
+    "eval": "pnpm --filter @scanoficus/core eval",
+    "dev:demo": "pnpm --filter @scanoficus/demo dev"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.6",
+    "@size-limit/preset-small-lib": "14.3.0",
+    "size-limit": "14.3.0",
+    "typescript": "7.0.2"
+  },
+  "size-limit": [
+    {
+      "name": "@scanoficus/core (everything)",
+      "path": "packages/core/dist/index.js",
+      "import": "*",
+      "limit": "40 KB"
+    },
+    {
+      "name": "@scanoficus/core/detect",
+      "path": "packages/core/dist/detect.js",
+      "import": "*",
+      "limit": "15 KB"
+    },
+    {
+      "name": "@scanoficus/core/worker-entry",
+      "path": "packages/core/dist/worker-entry.js",
+      "limit": "20 KB"
+    }
+  ]
+}

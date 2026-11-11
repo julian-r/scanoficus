@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    "isolatedDeclarations": false
+  },
+  "include": ["src", "test", "eval", "tsdown.config.ts", "vitest.config.ts"]
+}
