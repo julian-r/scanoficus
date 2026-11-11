@@ -25,21 +25,38 @@
   },
   "size-limit": [
     {
-      "name": "@scanoficus/core (everything)",
+      "name": "@scanoficus/core (all exports)",
       "path": "packages/core/dist/index.js",
       "import": "*",
+      "gzip": true,
       "limit": "40 KB"
     },
     {
       "name": "@scanoficus/core/detect",
       "path": "packages/core/dist/detect.js",
       "import": "*",
-      "limit": "15 KB"
+      "gzip": true,
+      "limit": "10 KB"
+    },
+    {
+      "name": "@scanoficus/core/warp",
+      "path": "packages/core/dist/warp.js",
+      "import": "*",
+      "gzip": true,
+      "limit": "5 KB"
+    },
+    {
+      "name": "@scanoficus/core/filters",
+      "path": "packages/core/dist/filters.js",
+      "import": "*",
+      "gzip": true,
+      "limit": "5 KB"
     },
     {
       "name": "@scanoficus/core/worker-entry",
       "path": "packages/core/dist/worker-entry.js",
-      "limit": "20 KB"
+      "gzip": true,
+      "limit": "10 KB"
     }
   ]
 }
