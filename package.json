@@ -135,7 +135,7 @@
         "@scanoficus/core"
       ],
       "gzip": true,
-      "limit": "17 KB"
+      "limit": "18 KB"
     },
     {
       "name": "@scanoficus/detector-nn/worker-entry (own code)",
@@ -144,7 +144,7 @@
         "@scanoficus/core"
       ],
       "gzip": true,
-      "limit": "17 KB"
+      "limit": "18 KB"
     }
   ]
 }

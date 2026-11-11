@@ -47,8 +47,12 @@ const credits = document.createElement('footer');
 credits.className = 'credits';
 credits.innerHTML = `Neural detector: DocQuadNet weights (BSD-3-Clause), trained with SmartDoc 2015
 frames (CC BY 4.0, © Chazalon et al.); round 2 also with "A New Image Dataset for Document Corner
-Localization" by Shima Dizaj, Mendeley Data v3, DOI 10.17632/x3nm4cxr83.3, licensed under CC BY
-4.0. <a href="${modelLicenseUrl}">Model license and attribution</a>.`;
+Localization" by Shima Dizaj, Mendeley Data v3,
+<a href="https://doi.org/10.17632/x3nm4cxr83.3">https://doi.org/10.17632/x3nm4cxr83.3</a>, licensed
+under <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>. Changes: photos resized,
+cropped, rotated and augmented for training; labels converted. Content shown in the photos can
+belong to third parties (Mendeley Data). <a href="${modelLicenseUrl}">Model license and
+attribution</a>.`;
 document.body.append(credits);
 
 let unmount: (() => void) | null = null;

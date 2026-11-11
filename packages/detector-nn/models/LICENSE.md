@@ -28,8 +28,12 @@ Round 2 (`docquadnet2/`) was also trained on the training part of the Dizaj phot
 This notice must be kept with those weights:
 
 > "A New Image Dataset for Document Corner Localization" by Shima Dizaj, Mendeley Data v3,
-> DOI 10.17632/x3nm4cxr83.3, licensed under CC BY 4.0
-> (https://creativecommons.org/licenses/by/4.0/). Used: the training part (524 photos).
+> https://doi.org/10.17632/x3nm4cxr83.3, licensed under CC BY 4.0
+> (https://creativecommons.org/licenses/by/4.0/). Changes: photos resized, cropped, rotated and
+> augmented for training; labels converted. Used: the training part (524 photos).
+>
+> Note (Mendeley Data): the dataset's license does not cover content shown in the photos, which
+> can belong to third parties.
 
 The other training inputs need no attribution: procedural pages, CC0 textures and HDRIs from
 Poly Haven, and OFL fonts that were only rendered into images. Hashes of all training inputs

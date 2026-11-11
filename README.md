@@ -166,7 +166,7 @@ min+gzip, as measured by `pnpm size` (budget: 40 KB for core):
 | `@scanoficus/core/warp` · `/filters` · `/camera` · `/pdf`        | 3.0 · 2.2 · 2.6 · 1.7 KB |
 | `@scanoficus/elements/define` (including core)                   |                  30.5 KB |
 | `@scanoficus/react` (own code, without elements, core and React) |                   1.4 KB |
-| `@scanoficus/detector-nn` (optional; own code, without weights)  |                  16.5 KB |
+| `@scanoficus/detector-nn` (optional; own code, without weights)  |                  17.3 KB |
 
 ## Detector quality (synthetic benchmark)
 
@@ -256,7 +256,7 @@ const scanner = new ScannerController({
   (2 passes). The controller gives detectors the full still through the new optional
   `DocumentDetector.detectStill`. Offline: SmartDoc held-out 0.978, Dizaj test 0.788 at
   threshold 0.98. The presence decision is pluggable (`presence` option).
-- **Size.** The package is 16.5 KB min+gzip. The fp16 weights (round 1 688 kB; round 2
+- **Size.** The package is 17.3 KB min+gzip. The fp16 weights (round 1 688 kB; round 2
   688 kB + refiner 244 kB) ship in its `models/<bundle>/` folders with their license and
   attribution and are fetched at runtime; each graph names its weights' SHA-256, so mismatched
   files are rejected.

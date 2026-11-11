@@ -12,7 +12,7 @@ this graph, with a plain TypeScript CPU fallback. It plugs into the scanner as a
   **round 2 with a corner refiner** (`DOCQUADNET2` from `@scanoficus/detector-nn/docquadnet2`):
   a second, 124k-parameter network that moves each corner onto the true corner from 64×64
   crops of the full-resolution still (see "Round 2 and the corner refiner").
-- The JavaScript is 16.5 KB min+gzip without the weights. The weights (fp16; round 1 688 kB,
+- The JavaScript is 17.3 KB min+gzip without the weights. The weights (fp16; round 1 688 kB,
   round 2 688 kB + refiner 244 kB) ship in the package (`models/<bundle>/`) and are fetched at
   runtime; bundlers emit them as content-hashed assets. Each graph names its weights file,
   length and SHA-256, so a graph and weights from different versions never run together.
@@ -74,9 +74,12 @@ quad; `infer()` always does). Like every `DocumentDetector`, the detector consum
 `ImageBitmap` frames and leaves RGBA frames unchanged. Frames of any size work: a side shorter
 than 192 px (a 384×173 frame from a 20:9 stream) is upscaled as `cv2.resize(INTER_AREA)` does.
 
-The package needs `@scanoficus/core` with the classic detector v3 (colour edges from RGBA input,
-`CONFIDENT_SCORE` 0.80); the peer dependency range is open (`>=0.0.0`) while all packages are
-0.0.x.
+The package needs a `@scanoficus/core` that has the classic detector v3 (`CONFIDENT_SCORE`
+0.80 and `DEFAULT_MIN_SCORE` 0.74, colour edges from RGBA input) and the optional
+`DocumentDetector.detectStill` hook (used by the controller for stills), i.e. the core of this
+repository from the same commit on. Core is 0.0.x and unpublished, so no semver range can
+express that yet: the peer dependency is `>=0.0.0`. Publish both together; the first published
+core version with these features should become the lower bound (e.g. `^0.1.0`).
 
 ## Round 2 and the corner refiner
 
@@ -112,6 +115,8 @@ hybrid) stays the default until round 2 does at least as well on real phone phot
   for the pyramid (built once per frame), one crop draw per corner into the refiner's input,
   then the refiner network with the 4 crops side by side in each texture (batch layout
   `N·W × H·⌈C/4⌉`), and one read-back of 8 values per pass.
+- **Self-tests.** The refiner's self-test runs the 4 crops of a batch with different constants
+  (0, 0.3, 0.7, 1), so mixed-up batch items are caught.
 - **Crops match OpenCV.** OpenCV 5's `warpAffine(INTER_LINEAR, BORDER_REPLICATE)` works in
   float32 with fused multiply-adds and rounds half to even. The CPU path reproduces it
   bit-exactly (SHA-256 of all crops of the 12 test frames, both passes). The GPU shader has no
@@ -125,7 +130,19 @@ hybrid) stays the default until round 2 does at least as well on real phone phot
   threshold; the score becomes `Detection.score`. With the default rule, frames below the
   threshold skip the refiner; with a custom rule the refiner runs first. In a worker, pass
   `presenceModule: new URL('./my-rule.js', import.meta.url)` (an ES module whose default export
-  is the rule), because functions cannot be posted.
+  is the rule), because functions cannot be posted. **The worker imports and executes that
+  module.** It must be self-contained JavaScript (no bare imports, no TypeScript): Vite copies a
+  `new URL('./rule.js', import.meta.url)` file as a raw asset without bundling it. By default
+  only http(s) URLs of the worker's own origin are accepted; `allowCrossOriginPresenceModule:
+  true` allows others (and `blob:` / `data:` URLs).
+- **Concurrency.** A detector processes one frame at a time, in call order (the GPU holds one
+  uploaded frame for the refiner); `GlRunner.runFrame()` returns a frame token and
+  `refine(quad, settings, token)` refuses another frame (`FrameChangedError`).
+- **Large stills.** Pixels are read once per frame. A bitmap above the GPU's texture limit (on
+  the CPU path: above 2 × `workSide` = 3200 px) is drawn by the browser at a long side of
+  3200 px first, so a 50 MP still is never read at full size; this path is not bit-exact with
+  the Python pipeline (the browser's filter instead of one area resize). RGBA stills are used
+  as they are.
 - **Bundles.** `loadBundle(source)` loads a main network and an optional refiner and checks
   every weights file. `source` is a `BundleSource` (`DOCQUADNET`, `DOCQUADNET2`, or your own
   URLs and refiner settings) or the URL of a self-hosted `bundle.json` (in each
@@ -382,8 +399,12 @@ Round 2 (`models/docquadnet2/`, main network and refiner) was also trained on th
 part of the Dizaj photos, which are CC BY 4.0 as well; keep this notice with those weights:
 
 > "A New Image Dataset for Document Corner Localization" by Shima Dizaj, Mendeley Data v3,
-> DOI 10.17632/x3nm4cxr83.3, licensed under CC BY 4.0
-> (https://creativecommons.org/licenses/by/4.0/). Used: the training part (524 photos).
+> https://doi.org/10.17632/x3nm4cxr83.3, licensed under CC BY 4.0
+> (https://creativecommons.org/licenses/by/4.0/). Changes: photos resized, cropped, rotated and
+> augmented for training; labels converted. Used: the training part (524 photos).
+>
+> Note (Mendeley Data): the dataset's license does not cover content shown in the photos, which
+> can belong to third parties.
 
 The other training inputs need no attribution: procedural pages, CC0 textures and HDRIs from
 Poly Haven, and OFL fonts that were only rendered into images. The data manifests are in the
