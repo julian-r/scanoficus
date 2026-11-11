@@ -143,7 +143,7 @@ export function generateScene(kind: SceneClass, seed: number, width = 384, heigh
   const rnd = new Random(seed * 7919 + SCENE_CLASSES.indexOf(kind) * 104729 + 1);
   const p = PARAMS[kind];
 
-  const background = makeBackground(rnd, p, kind === 'none');
+  const background = makeBackground(rnd, p);
   const bgLuma = background.meanLuma;
   let quad: Quad | null = null;
   let toDoc: Matrix3 | null = null;
@@ -222,7 +222,7 @@ interface Background extends Texture {
   meanLuma: number;
 }
 
-function makeBackground(rnd: Random, p: ClassParams, noDocument: boolean): Background {
+function makeBackground(rnd: Random, p: ClassParams): Background {
   const tint = (luma: number): [number, number, number] => [
     luma * rnd.range(0.85, 1.15),
     luma * rnd.range(0.9, 1.1),
@@ -251,7 +251,7 @@ function makeBackground(rnd: Random, p: ClassParams, noDocument: boolean): Backg
   };
   if (p.background !== 'textured') return plain;
 
-  const style = rnd.pick(noDocument ? ['wood', 'fabric'] : ['wood', 'fabric', 'clutter']);
+  const style = rnd.pick(['wood', 'fabric', 'clutter']);
   if (style === 'wood') {
     const angle = rnd.range(0, Math.PI);
     const period = rnd.range(6, 22);
@@ -286,7 +286,9 @@ function makeBackground(rnd: Random, p: ClassParams, noDocument: boolean): Backg
       },
     };
   }
-  // Clutter: random rotated rectangles (other objects on the desk) with strong straight edges.
+  // Clutter: random rotated rectangles (books, boxes, phones on the desk) with strong straight
+  // edges. Also used for the document-free class: uniform rectangles are the hardest negatives
+  // for an edge-based detector.
   const objects = Array.from({ length: rnd.int(6, 14) }, () => {
     const cx = rnd.range(-40, 420);
     const cy = rnd.range(-40, 330);
