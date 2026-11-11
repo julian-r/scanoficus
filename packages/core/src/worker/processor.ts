@@ -27,6 +27,15 @@ export interface DocumentDetector {
    * or `null` if none was found.
    */
   detect(frame: DetectorFrame, options?: DetectOptions): Promise<Detection | null>;
+  /**
+   * Optional: detection on a full-resolution still (a captured photo or an image given to
+   * `addImage`). When present, the `ScannerController` calls it for the still re-detection
+   * instead of `detect()` on a frame downscaled to `maxSide`, so a detector can use the full
+   * resolution (e.g. for corner refinement). The frame is a copy owned by the detector
+   * (`ImageBitmap`, consumed) or the caller's RGBA pixels (not modified). If it rejects, the
+   * controller falls back to `detect()` on the downscaled frame.
+   */
+  detectStill?(still: DetectorFrame, options?: DetectOptions): Promise<Detection | null>;
   /** Releases resources (terminates workers). Pending detections reject. */
   dispose(): void;
 }

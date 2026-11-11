@@ -674,6 +674,20 @@ export class ScannerController {
     width: number,
     height: number,
   ): Promise<Quad | null> {
+    // A detector with `detectStill` gets the full-resolution still (a bitmap copy it owns).
+    try {
+      if (!this.detector) {
+        this.detector = (this.options.createDetector ?? createDefaultDetector)();
+      }
+      const detector = this.detector;
+      if (detector.detectStill) {
+        const still = 'data' in source ? source : await createImageBitmap(source);
+        const detection = await detector.detectStill(still, this.options.detection);
+        return detection && scaleQuad(detection.quad, width / still.width, height / still.height);
+      }
+    } catch {
+      // Fall back to detect() on the downscaled frame (with its own fallback handling).
+    }
     const maxSide = this.options.detection?.maxSide ?? 384;
     const frame = 'data' in source ? source : this.grabber.grab(source as ImageBitmap, maxSide);
     if (!frame) return null;

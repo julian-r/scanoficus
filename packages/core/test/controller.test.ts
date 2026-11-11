@@ -116,6 +116,30 @@ describe('ScannerController', () => {
     expect(whole.quad[2]).toEqual({ x: 320, y: 240 });
   });
 
+  it('gives detectors with detectStill the full-resolution still', async () => {
+    const scene = generateScene('perspective', 4, 640, 480);
+    const inner = createMainThreadDetector();
+    const stills: { width: number; height: number }[] = [];
+    const detector = {
+      detect: vi.fn(inner.detect),
+      detectStill: vi.fn(async (still: { width: number; height: number }) => {
+        stills.push({ width: still.width, height: still.height });
+        return { quad: scene.quad!, score: 0.9 };
+      }),
+      dispose: () => inner.dispose(),
+    };
+    const { controller } = setup({ detector });
+    const page = await controller.addImage(scene.image);
+    expect(stills).toEqual([{ width: 640, height: 480 }]);
+    expect(detector.detect).not.toHaveBeenCalled();
+    expect(convexIoU(page.quad, scene.quad!)).toBeGreaterThan(0.999);
+    // A failing detectStill falls back to detect() on the downscaled frame.
+    detector.detectStill.mockRejectedValueOnce(new Error('no GPU'));
+    const fallback = await controller.addImage(scene.image);
+    expect(detector.detect).toHaveBeenCalledTimes(1);
+    expect(convexIoU(fallback.quad, scene.quad!)).toBeGreaterThan(0.95);
+  });
+
   it('toggles torch and auto-capture', async () => {
     const { controller, camera } = setup();
     await controller.start(video);
