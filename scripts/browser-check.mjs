@@ -7,17 +7,24 @@
  * 2. Demo under Vite dev and 3. under a Vite production build: the library's default worker URL
  *    (`new Worker(new URL('./worker-entry.js', import.meta.url))`, resolved from the package
  *    source) loads; opening and closing the live scanner twice terminates every detector worker
- *    it created; no main-thread fallback happens.
+ *    it created; no main-thread fallback happens. With each detector choice of the demo
+ *    (Classic, Neural network, Neural + refine, Hybrid), the live scanner and the photo import
+ *    find the synthetic document; the networks run in their worker on WebGL2, without fallback.
+ *    The production build is also checked under the GitHub Pages base path `/scanoficus/`.
  *
  * Uses the installed Google Chrome (`channel: 'chrome'`, override with CHROME_PATH) with a fake
- * camera. Run after `pnpm build`: `pnpm check:browser`.
+ * camera that plays a synthetic page (the `page-640x480` scene of the detector-nn fixtures).
+ * Run after `pnpm build`: `pnpm check:browser`.
  */
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { createServer as createHttpServer } from 'node:http';
 import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
+import { renderScene } from '../packages/detector-nn/test/scene.ts';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const demo = join(root, 'apps/demo');
@@ -30,12 +37,86 @@ const check = (name, ok, details = '') => {
   if (!ok) failures.push(name);
 };
 
+// The synthetic document: a page with text lines on a noisy desk (640×480).
+const SCENE = JSON.parse(
+  await readFile(join(root, 'packages/detector-nn/test/fixtures/cases.json'), 'utf8'),
+).cases.find((c) => c.name === 'page-640x480');
+const sceneRgba = renderScene(SCENE);
+const tmp = mkdtempSync(join(tmpdir(), 'scanoficus-browser-check-'));
+const videoFile = join(tmp, 'page.y4m');
+writeFileSync(videoFile, toY4m(sceneRgba, 2));
+const photoBmp = toBmp(sceneRgba);
+
+/** Y4M (4:2:0, full-range BT.601) video of `frames` copies of an RGBA image. */
+function toY4m({ width, height, data }, frames) {
+  const y = Buffer.alloc(width * height);
+  const u = Buffer.alloc((width / 2) * (height / 2));
+  const v = Buffer.alloc(u.length);
+  for (let i = 0; i < width * height; i++) {
+    y[i] = Math.round(0.299 * data[4 * i] + 0.587 * data[4 * i + 1] + 0.114 * data[4 * i + 2]);
+  }
+  for (let j = 0; j < height / 2; j++) {
+    for (let i = 0; i < width / 2; i++) {
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      for (const [dx, dy] of [
+        [0, 0],
+        [1, 0],
+        [0, 1],
+        [1, 1],
+      ]) {
+        const p = 4 * ((2 * j + dy) * width + 2 * i + dx);
+        r += data[p] / 4;
+        g += data[p + 1] / 4;
+        b += data[p + 2] / 4;
+      }
+      u[j * (width / 2) + i] = Math.round(128 - 0.168736 * r - 0.331264 * g + 0.5 * b);
+      v[j * (width / 2) + i] = Math.round(128 + 0.5 * r - 0.418688 * g - 0.081312 * b);
+    }
+  }
+  const frame = Buffer.concat([Buffer.from('FRAME\n'), y, u, v]);
+  return Buffer.concat([
+    Buffer.from(`YUV4MPEG2 W${width} H${height} F30:1 Ip A1:1 C420jpeg\n`),
+    ...Array(frames).fill(frame),
+  ]);
+}
+
+/** Uncompressed 24-bit BMP of an RGBA image (rows are 4-byte aligned for widths ÷ 4). */
+function toBmp({ width, height, data }) {
+  const row = width * 3;
+  const out = Buffer.alloc(54 + row * height);
+  out.write('BM', 0);
+  out.writeUInt32LE(out.length, 2);
+  out.writeUInt32LE(54, 10);
+  out.writeUInt32LE(40, 14);
+  out.writeInt32LE(width, 18);
+  out.writeInt32LE(height, 22);
+  out.writeUInt16LE(1, 26);
+  out.writeUInt16LE(24, 28);
+  out.writeUInt32LE(row * height, 34);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const p = 4 * ((height - 1 - y) * width + x);
+      const o = 54 + y * row + 3 * x;
+      out[o] = data[p + 2];
+      out[o + 1] = data[p + 1];
+      out[o + 2] = data[p];
+    }
+  }
+  return out;
+}
+
 const browser = await chromium.launch({
   ...(process.env.CHROME_PATH
     ? { executablePath: process.env.CHROME_PATH }
     : { channel: 'chrome' }),
   headless: true,
-  args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'],
+  args: [
+    '--use-fake-ui-for-media-stream',
+    '--use-fake-device-for-media-stream',
+    `--use-file-for-fake-video-capture=${videoFile}`,
+  ],
 });
 
 /**
@@ -137,6 +218,8 @@ const DETECT_IN_PAGE = async (moduleUrl) => {
 async function runDemo(url, { rounds = 2, silent = false } = {}) {
   const page = await browser.newPage();
   await page.addInitScript(WORKER_PROBE, silent);
+  // These checks are about the core's detector worker: use the Classic detector choice.
+  await page.addInitScript(() => localStorage.setItem('scanoficus-detector', 'classic'));
   await page.goto(`${url}#/live`);
   for (let round = 0; round < rounds; round++) {
     await page.getByText('Start scanning').click();
@@ -190,6 +273,107 @@ async function checkDemo(label, url) {
   );
 }
 
+const CHOICES = ['classic', 'nn', 'nn-refine', 'hybrid'];
+
+/** Live scanner and photo import with every detector choice find the synthetic page. */
+async function checkDetectorChoices(label, url) {
+  for (const choice of CHOICES) {
+    const page = await browser.newPage();
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(String(e)));
+    await page.addInitScript((c) => {
+      localStorage.setItem('scanoficus-detector', c);
+      localStorage.setItem('scanoficus-debug', '1');
+    }, choice);
+    await page.goto(`${url}#/live`);
+    await page.getByText('Start scanning').click();
+    const live = await page
+      .waitForFunction(
+        (page) => {
+          const d = document.querySelector('scan-document')?.controller?.getSnapshot().detection;
+          if (!d?.quad) return null;
+          // Largest corner distance to the page (640×480 scene) as a fraction of the diagonal.
+          const scale = d.frameWidth / 640;
+          const error =
+            Math.max(
+              ...d.quad.map((p) =>
+                Math.min(...page.map(([x, y]) => Math.hypot(p.x / scale - x, p.y / scale - y))),
+              ),
+            ) / 800;
+          if (error > 0.02) return null;
+          const panel = document.querySelector('.debug-panel pre')?.textContent ?? '';
+          return { error, status: window.scanoficusDetector, panel };
+        },
+        SCENE.page,
+        { timeout: 40000, polling: 100 },
+      )
+      .then((h) => h.jsonValue())
+      .catch(async (e) => ({
+        failed: String(e).split('\n')[0],
+        status: await page.evaluate(() => window.scanoficusDetector),
+      }));
+    const status = live.status ?? {};
+    const network = choice !== 'classic';
+    const runsAsChosen =
+      !status.error &&
+      (!network ||
+        (/· worker ·/.test(status.running) && /WebGL2 float(32|16)/.test(status.running)));
+    check(
+      `${label}: live scan with "${choice}" finds the page`,
+      !live.failed && runsAsChosen,
+      live.failed
+        ? `${live.failed}; ${JSON.stringify(status)}`
+        : `corner error ${(live.error * 100).toFixed(2)} % of the diagonal; ${status.running}` +
+            (network ? `, cold start ${Math.round(status.coldStartMs)} ms` : ''),
+    );
+    if (!live.failed) {
+      check(
+        `${label}: debug overlay shows the detector ("${choice}")`,
+        live.panel.includes(status.running) &&
+          /cold start/.test(live.panel) &&
+          /detect p50/.test(live.panel),
+        live.panel
+          .split('\n')
+          .filter((l) => /detector|cold|p50|fallback/.test(l))
+          .join(' | '),
+      );
+    }
+
+    // Photo import: the detected quad is shown in the crop editor.
+    await page.goto(`${url}#/photo`);
+    await page.setInputFiles('input[type=file]', {
+      name: 'page.bmp',
+      mimeType: 'image/bmp',
+      buffer: photoBmp,
+    });
+    const photo = await page
+      .waitForFunction(
+        (page) => {
+          const editor = document.querySelector('scan-crop-editor');
+          if (!editor?.quad) return null;
+          const error =
+            Math.max(
+              ...editor.quad.map((p) =>
+                Math.min(...page.map(([x, y]) => Math.hypot(p.x - x, p.y - y))),
+              ),
+            ) / 800;
+          return { error };
+        },
+        SCENE.page,
+        { timeout: 40000 },
+      )
+      .then((h) => h.jsonValue())
+      .catch((e) => ({ failed: String(e).split('\n')[0] }));
+    check(
+      `${label}: photo import with "${choice}" finds the page`,
+      !photo.failed && photo.error < 0.02,
+      photo.failed ?? `corner error ${(photo.error * 100).toFixed(2)} % of the diagonal`,
+    );
+    if (errors.length) check(`${label}: no page errors ("${choice}")`, false, errors.join(' | '));
+    await page.close();
+  }
+}
+
 // ---- 2. demo under Vite dev ------------------------------------------------------------------
 {
   const server = await vite.createServer({
@@ -211,6 +395,7 @@ async function checkDemo(label, url) {
   );
   await page.close();
   await checkDemo('vite dev', url);
+  await checkDetectorChoices('vite dev', url);
   await server.close();
 }
 
@@ -234,7 +419,48 @@ async function checkDemo(label, url) {
   await new Promise((resolve) => server.httpServer.close(resolve));
 }
 
+// ---- 4. demo production build under the GitHub Pages base path --------------------------------
+{
+  const outDir = join(root, 'node_modules/.cache/browser-check-demo-pages');
+  const options = {
+    root: demo,
+    configFile: join(demo, 'vite.config.ts'),
+    logLevel: 'error',
+    base: '/scanoficus/',
+  };
+  await vite.build({ ...options, build: { outDir, emptyOutDir: true } });
+  const server = await vite.preview({ ...options, build: { outDir }, preview: { port: 0 } });
+  const url = server.resolvedUrls.local[0];
+  await checkDetectorChoices('vite build /scanoficus/', url);
+  // Fallback: without the weights, the network choice falls back to Classic and says why.
+  {
+    const page = await browser.newPage();
+    await page.route('**/docquadnet.bin', (route) => route.fulfill({ status: 404, body: '' }));
+    await page.addInitScript(() => localStorage.setItem('scanoficus-detector', 'nn-refine'));
+    await page.goto(`${url}#/live`);
+    await page.getByText('Start scanning').click();
+    const status = await page
+      .waitForFunction(
+        () =>
+          document.querySelector('scan-document')?.controller?.getSnapshot().detection?.quad &&
+          window.scanoficusDetector,
+        null,
+        { timeout: 40000 },
+      )
+      .then((h) => h.jsonValue())
+      .catch((e) => ({ failed: String(e).split('\n')[0] }));
+    check(
+      'vite build /scanoficus/: missing weights fall back to Classic with the reason',
+      /Classic/.test(status.running ?? '') && /404/.test(status.error ?? ''),
+      status.failed ?? `${status.running}: ${status.error}`,
+    );
+    await page.close();
+  }
+  await new Promise((resolve) => server.httpServer.close(resolve));
+}
+
 await browser.close();
+rmSync(tmp, { recursive: true, force: true });
 if (failures.length) {
   console.error(`\n${failures.length} browser check(s) failed`);
   process.exit(1);

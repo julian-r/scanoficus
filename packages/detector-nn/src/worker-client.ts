@@ -3,11 +3,34 @@ import {
   type DetectorWorkerLike,
   type DocumentDetector,
 } from '@scanoficus/core/worker';
-import type { NnDetectorOptions } from './detector.ts';
+import type { NnBackend, NnDetectorOptions } from './detector.ts';
+import type { GlPrecision } from './gl.ts';
 
 /** Configuration message sent to the worker entry before any request. */
 export interface NnWorkerInit {
   init: Omit<NnDetectorOptions, 'model' | 'canvas'>;
+}
+
+/** What the worker reports once its detector is initialized. */
+export interface NnWorkerInfo {
+  backend: NnBackend;
+  /** WebGL2 activation precision, or `null` on the CPU. */
+  precision: GlPrecision | null;
+  /** Model download and backend initialization inside the worker (the cold start), in ms. */
+  ms: number;
+}
+
+/** Status message posted by the worker entry after `init` (ignored by the core client). */
+export type NnWorkerStatus = { nnReady: NnWorkerInfo } | { nnError: string };
+
+/** The worker detector, with the outcome of the worker's initialization. */
+export interface NnWorkerDetector extends DocumentDetector {
+  /**
+   * Resolves once the worker loaded the model and initialized its backend; rejects if that
+   * failed (e.g. no WebGL2 on `OffscreenCanvas` with `backend: 'webgl2'`), if the worker
+   * failed to load, or after `timeoutMs`.
+   */
+  ready(): Promise<NnWorkerInfo>;
 }
 
 /** Options for {@link createNnDetectorWorker}. */
@@ -34,7 +57,7 @@ export interface NnDetectorWorkerOptions extends Omit<NnDetectorOptions, 'model'
  * load, crashes or stops answering rejects every pending and later request, so callers (such as
  * the `ScannerController`) can fall back.
  */
-export function createNnDetectorWorker(options: NnDetectorWorkerOptions): DocumentDetector {
+export function createNnDetectorWorker(options: NnDetectorWorkerOptions): NnWorkerDetector {
   const {
     worker: given,
     workerUrl,
@@ -56,10 +79,31 @@ export function createNnDetectorWorker(options: NnDetectorWorkerOptions): Docume
   const init: NnWorkerInit = {
     init: { ...rest, graphUrl: absolute(graphUrl), weightsUrl: absolute(weightsUrl) },
   };
+  const timeout = timeoutMs ?? 30_000;
+  const ready = new Promise<NnWorkerInfo>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`Neural detector worker not ready within ${timeout} ms`)),
+      timeout,
+    );
+    const done = () => clearTimeout(timer);
+    worker.addEventListener('message', (event: MessageEvent<NnWorkerStatus | object>) => {
+      const data = event.data;
+      if ('nnReady' in data) resolve(data.nnReady);
+      else if ('nnError' in data) reject(new Error(data.nnError));
+      else return;
+      done();
+    });
+    worker.addEventListener('error', (event) => {
+      done();
+      reject(new Error(`Neural detector worker failed: ${event.message || 'no details'}`));
+    });
+  });
+  ready.catch(() => {}); // observed through ready() or the detection requests
   worker.postMessage(init);
-  return createDetectorWorker({
+  const detector = createDetectorWorker({
     worker: worker as DetectorWorkerLike,
     transferPixels,
-    timeoutMs: timeoutMs ?? 30_000,
+    timeoutMs: timeout,
   });
+  return { detect: detector.detect, dispose: detector.dispose, ready: () => ready };
 }

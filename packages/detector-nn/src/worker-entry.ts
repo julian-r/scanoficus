@@ -7,11 +7,11 @@
  */
 import type { DetectorWorkerMessage, DetectRequest } from '@scanoficus/core/worker';
 import { createNnDetector, type NnDetector } from './detector.ts';
-import type { NnWorkerInit } from './worker-client.ts';
+import type { NnWorkerInit, NnWorkerStatus } from './worker-client.ts';
 
 interface NnWorkerScope {
   onmessage: ((event: MessageEvent<DetectRequest | NnWorkerInit>) => void) | null;
-  postMessage(message: DetectorWorkerMessage): void;
+  postMessage(message: DetectorWorkerMessage | NnWorkerStatus): void;
 }
 
 const scope = globalThis as unknown as NnWorkerScope;
@@ -22,9 +22,19 @@ scope.onmessage = (event) => {
   const message = event.data;
   if ('init' in message) {
     detector?.dispose();
-    detector = createNnDetector(message.init);
-    // Start loading the model and compiling the shaders before the first frame arrives.
-    detector.ready().catch(() => {});
+    const current = createNnDetector(message.init);
+    detector = current;
+    // Load the model and compile the shaders before the first frame arrives, and report the
+    // outcome (the core client ignores these messages; `createNnDetectorWorker` reads them).
+    const started = performance.now();
+    current.ready().then(
+      (backend) =>
+        scope.postMessage({
+          nnReady: { backend, precision: current.precision, ms: performance.now() - started },
+        }),
+      (error) =>
+        scope.postMessage({ nnError: error instanceof Error ? error.message : String(error) }),
+    );
     return;
   }
   const { id, frame, options } = message;

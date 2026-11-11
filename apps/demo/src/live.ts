@@ -1,9 +1,14 @@
 import type { ScanDocumentElement } from '@scanoficus/elements';
 import { attachDebugOverlay } from './debug.ts';
+import { createDemoDetector, type DetectorChoice } from './detector.ts';
 import { button, renderResults } from './results.ts';
 
 /** Live scanning with the full `<scan-document>` flow in a full-screen overlay. */
-export function mountLive(main: HTMLElement, debug: () => boolean): () => void {
+export function mountLive(
+  main: HTMLElement,
+  debug: () => boolean,
+  choice: () => DetectorChoice,
+): () => void {
   const intro = document.createElement('section');
   intro.innerHTML = `<h1>Live scan</h1>
 <p>Point the camera at a document. It is captured automatically when the outline is steady
@@ -18,9 +23,14 @@ change filters, crop, rotate and save a PDF.</p>`;
     overlay.className = 'scanner-overlay';
     const scanner = document.createElement('scan-document') as ScanDocumentElement;
     scanner.setAttribute('page-size', 'a4');
-    // The controller creates (and disposes) its detector worker through the library's
-    // default worker URL, which Vite bundles from `new Worker(new URL(…))`.
-    scanner.options = { camera: { resolution: highRes.checked ? 'max' : 'hd' } };
+    // The controller creates (and disposes) the chosen detector; it is used for live frames
+    // and for the re-detection on the captured still. Its workers come from the libraries'
+    // default worker URLs, which Vite bundles from `new Worker(new URL(…))`.
+    const detector = choice();
+    scanner.options = {
+      camera: { resolution: highRes.checked ? 'max' : 'hd' },
+      createDetector: () => createDemoDetector(detector),
+    };
     overlay.append(scanner);
     document.body.append(overlay);
     document.body.classList.add('scanning');

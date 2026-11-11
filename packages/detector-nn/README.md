@@ -34,6 +34,12 @@ const scanner = new ScannerController({
 });
 ```
 
+`createNnDetectorWorker` returns a detector with `ready()`. It resolves with `{ backend,
+precision, ms }` once the worker has loaded the model and initialized its backend. It rejects
+if that failed, for example with `backend: 'webgl2'` when WebGL2 does not work on an
+`OffscreenCanvas` in the worker. The demo uses this to choose between the worker, the main
+thread and the classic fallback (`apps/demo/src/detector.ts`).
+
 With the custom elements, set the same option on the element:
 `document.querySelector('scan-document').options = { createDetector: … }`.
 
@@ -46,6 +52,8 @@ const detector = createNnDetector({ graphUrl, weightsUrl });
 await detector.ready(); // optional: load and compile ahead of the first frame (the cold start)
 const detection = await detector.detect(imageDataOrBitmap); // { quad, score } or null
 const raw = await detector.infer(frame); // { quad, presence, heads }, no threshold, no refinement
+detector.backend;
+detector.precision; // 'webgl2' | 'cpu', 'float32' | 'float16' | null
 detector.dispose();
 ```
 

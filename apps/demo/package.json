@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@scanoficus/core": "workspace:*",
+    "@scanoficus/detector-nn": "workspace:*",
     "@scanoficus/elements": "workspace:*",
     "@scanoficus/react": "workspace:*",
     "react": "19.3.1",

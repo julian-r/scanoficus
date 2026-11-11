@@ -48,6 +48,8 @@ export interface NnDetectorOptions {
 export interface NnDetector extends DocumentDetector {
   /** The backend in use (`null` until initialized); can switch to `'cpu'` after failures. */
   readonly backend: NnBackend | null;
+  /** WebGL2 activation precision in use, or `null` (CPU, or not initialized yet). */
+  readonly precision: GlPrecision | null;
   /**
    * Loads the model and initializes the backend (shader compilation, weight upload): the cold
    * start. Called implicitly by the first detection.
@@ -183,6 +185,9 @@ export function createNnDetector(options: NnDetectorOptions): NnDetector {
   return {
     get backend() {
       return gl ? 'webgl2' : model ? 'cpu' : null;
+    },
+    get precision() {
+      return (gl as GlRunner | null)?.precision ?? null;
     },
     ready,
     async infer(frame) {

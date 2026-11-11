@@ -44,5 +44,8 @@ export { type RefineOptions, refineQuad } from './refine.ts';
 export {
   createNnDetectorWorker,
   type NnDetectorWorkerOptions,
+  type NnWorkerDetector,
+  type NnWorkerInfo,
   type NnWorkerInit,
+  type NnWorkerStatus,
 } from './worker-client.ts';

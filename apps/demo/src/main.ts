@@ -1,4 +1,11 @@
 import { defineScanElements } from '@scanoficus/elements';
+import {
+  DETECTOR_LABELS,
+  type DetectorChoice,
+  loadChoice,
+  onDetectorStatus,
+  saveChoice,
+} from './detector.ts';
 import { mountLive } from './live.ts';
 import { mountPhoto } from './photo.ts';
 import './style.css';
@@ -18,6 +25,21 @@ debugToggle.addEventListener('change', () => {
   localStorage.setItem('scanoficus-debug', debugToggle.checked ? '1' : '0');
 });
 
+// Detector choice: applies to the live scanner and the photo import (the page is remounted).
+const detectorSelect = document.getElementById('detector') as HTMLSelectElement;
+for (const [value, label] of Object.entries(DETECTOR_LABELS)) {
+  detectorSelect.append(new Option(label, value));
+}
+detectorSelect.value = loadChoice();
+detectorSelect.addEventListener('change', () => {
+  saveChoice(detectorSelect.value as DetectorChoice);
+  void route();
+});
+// Exposed for the headless browser check.
+onDetectorStatus((status) => {
+  (window as unknown as { scanoficusDetector: unknown }).scanoficusDetector = status;
+});
+
 let unmount: (() => void) | null = null;
 
 async function route(): Promise<void> {
@@ -31,12 +53,12 @@ async function route(): Promise<void> {
   const container = document.createElement('div');
   main.replaceChildren(container);
   if (page === 'photo') {
-    unmount = mountPhoto(container);
+    unmount = mountPhoto(container, loadChoice());
   } else if (page === 'react') {
     const { mountReact } = await import('./react-demo.tsx');
     unmount = mountReact(container);
   } else {
-    unmount = mountLive(container, () => debugToggle.checked);
+    unmount = mountLive(container, () => debugToggle.checked, loadChoice);
   }
 }
 

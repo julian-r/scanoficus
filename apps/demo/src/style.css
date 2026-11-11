@@ -39,8 +39,15 @@ nav a[aria-current] {
   color: var(--accent);
   font-weight: 600;
 }
-.debug-toggle {
+.detector-choice {
   margin-left: auto;
+  font-size: 14px;
+}
+.detector-choice select {
+  font: inherit;
+  margin-left: 4px;
+}
+.debug-toggle {
   font-size: 14px;
 }
 main {
@@ -123,6 +130,8 @@ button.primary {
 .debug-panel pre {
   margin: 4px 0 0;
   font-size: 11px;
+  white-space: pre-wrap;
+  max-width: min(320px, calc(100vw - 32px));
 }
 .hook-preview {
   position: relative;

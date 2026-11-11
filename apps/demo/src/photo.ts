@@ -1,5 +1,6 @@
 import { ScannerController } from '@scanoficus/core/controller';
 import type { ScanCropEditorElement, ScanReviewElement } from '@scanoficus/elements';
+import { createDemoDetector, type DetectorChoice } from './detector.ts';
 import { button, renderResults } from './results.ts';
 
 /**
@@ -7,9 +8,9 @@ import { button, renderResults } from './results.ts';
  * on phones, often with better photographic processing than a video stream), detect the
  * document, adjust the corners, then review and export. No live camera access needed.
  */
-export function mountPhoto(main: HTMLElement): () => void {
-  // Owns its default detector worker; disposed (with the worker) when leaving the route.
-  const controller = new ScannerController();
+export function mountPhoto(main: HTMLElement, choice: DetectorChoice): () => void {
+  // Owns the chosen detector (created on first use); disposed when leaving the route.
+  const controller = new ScannerController({ createDetector: () => createDemoDetector(choice) });
   let clearResults = () => {};
   const intro = document.createElement('section');
   intro.innerHTML = `<h1>Scan from a photo</h1>
