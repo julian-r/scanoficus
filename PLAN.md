@@ -47,6 +47,9 @@ License: BSD-3-Clause. Repo: github.com/julian-r/scanoficus (public).
 
 ## Platform risks to verify
 
-Still-capture resolution (no `ImageCapture` on Safari), getUserMedia in installed iOS
-PWAs, torch/focus/zoom constraints, canvas memory limits on iOS, OffscreenCanvas/WebGL
-in workers, Shape Detection API (`TextDetector`) status. See `docs/platform-notes.md`.
+Still-capture resolution (Safari has `ImageCapture` since 18.4, but on iPhone `takePhoto()`
+returned only preview-sized images and failed with maximum photo settings, so stills come from
+the video track by default), getUserMedia in installed iOS PWAs (startup can stall after
+permission; staged startup with deadlines and a retry), torch/focus/zoom constraints, canvas
+memory limits on iOS, OffscreenCanvas/WebGL in workers, Shape Detection API (`TextDetector`)
+status. See `docs/platform-notes.md`, including the iPhone lab measurements.

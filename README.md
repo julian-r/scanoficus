@@ -9,8 +9,8 @@ scanner, UI included, is about 27 KB min+gzip.
 - **Quad tracking**: an animated outline that is smoothed over time and reports when it is
   stable.
 - **Auto-capture** once the document is stable and sharp. A manual shutter is also available.
-- **Sharp stills**: Image Capture `takePhoto()` where available, with a fallback to the video
-  frame. The document is re-detected on the still.
+- **Sharp stills** taken from the video track at full stream resolution, with an optional
+  high-resolution preset. The document is re-detected on the still.
 - **Perspective correction** on the GPU (WebGL2) with a CPU fallback. The output aspect ratio
   is recovered from the perspective.
 - **Filters** mirroring VisionKit: Color (shadow removal, white balance, auto levels),
@@ -131,16 +131,22 @@ The strategy and its evidence are documented in
 - **Frames:** `requestVideoFrameCallback` (Safari 15.4+, Chrome 83+) with a
   `requestAnimationFrame` fallback. Detection runs in a module Web Worker, falling back to the
   main thread.
-- **Stills:** Image Capture `takePhoto()` (Safari 18.4+, Chrome Android) is tried first,
-  serialized and with a timeout. The fallback is the current video frame. Resolution depends
-  on the device; nothing is promised.
+- **Stills:** by default, the current video frame at stream resolution. On iPhone,
+  `takePhoto()` returned only preview-sized images and failed with maximum photo settings.
+  Choose `camera: { resolution: 'max' }` (3024×4032 at 30 fps was measured on iPhone) for
+  sharper pages. `takePhoto()` is opt-in (`stillCapture: 'photo'`) and is validated against
+  the stream size. Photo import (`capture="environment"`) is always available.
+- **Startup:** staged (acquiring → playing → first frame) with 4 s deadlines. On iOS,
+  `play()` can stall after permission was granted; the controller retries once, then offers
+  `retry()`.
 - **Rendering:** WebGL2. Sources larger than `MAX_TEXTURE_SIZE` are downscaled, and output is
   capped at 4000 px (about 12 MP or less). A CPU fallback is used if WebGL2 is missing or the
   context is lost.
 - **Torch:** shown only when `getCapabilities().torch` is advertised.
-- **Not yet verified on physical iPhones or Android phones.** Before publishing support
-  claims, the release gate in the platform notes (camera selection, capture resolution, focus,
-  permission persistence, memory) must be run on real devices.
+- **Device status:** camera behavior was measured on iPhones with a lab app (summarized in
+  the platform notes), and those results shaped the defaults above. The library itself has
+  not yet been verified end-to-end on physical iPhones or Android phones; run the release gate
+  from the platform notes before publishing support claims.
 
 ## Size
 

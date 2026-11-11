@@ -159,3 +159,40 @@ Sizes are identified files or **labelled author claims**, not measured cold-star
 **Missing evidence / next steps:** physical per-phone 4K/12 MP and focus matrix; first shipped zoom/expanded-canvas/bitmap-transfer versions; present aggregate canvas/process-memory budgets; measured iPhone WebGL texture limits; current full commercial runtime transfers; complete MIDV rights. Prioritize device capture/lifecycle/memory tests for release and license review before bundling data. No browser execution or performance benchmark was performed.
 
 **Validation limitation:** `source_check` ran for key version, camera/canvas and licensing claims. It returned passages but automated semantic assessment was unavailable; important claims were manually inspected against fetched originals. Chromium issue pages were not extractable, so historical bug information is attributed to Chrome documentation, not a verified current tracker state.
+
+## Device measurements: iPhone lab, round 1 (2026-11-10)
+
+Measured with the scanoficus lab app on iPhones running Safari 26.6.1 and 27.0.1, as browser
+tabs and one installed PWA. These are single-device observations, not a compatibility matrix.
+The resulting library behavior is noted after each item.
+
+1. **Startup can stall after permission.** In the installed PWA, `getUserMedia` succeeded
+   (1131 ms), but `video.play()` / the first frame never completed and rejected about 10 s
+   later with `AbortError`. A plain retry then worked (gUM 6 ms, first frame 456 ms via rVFC).
+   → `openCamera` runs in stages (acquiring → playing → waiting-for-frames) with a 4 s deadline
+   on `play()` and on the first frame. It releases everything on failure and maps `AbortError`
+   to a recoverable `aborted` error (not a permission denial). `ScannerController` retries once
+   automatically while the page is visible, then enters `error` with `retry()`. A start
+   generation token makes `stop()` or a page hide cancel a pending start.
+2. **Preview.** `facingMode: 'environment'` with ideal 1920×1080 delivered **1080×1920
+   portrait at ~30 fps**, using the logical "Triple camera" (zoom 1, range 0.5–10). Ideal
+   4096×4096 delivered **3024×4032 at ~30 fps**. → All geometry uses the actual
+   `videoWidth`/`videoHeight`. There is a `resolution: 'max'` preset for higher-resolution
+   stills. Lens selection and tap-to-focus are not promised: `focusMode` and
+   `pointsOfInterest` were not advertised. Torch on/off via `applyConstraints` was confirmed.
+3. **Stills.** `takePhoto()` returned only **1080×1920** (the preview size) in about 1.5 s.
+   With the advertised maximum photo settings (4032×3024) it failed with `UnknownError:
+   Internal error` and briefly muted the track. `grabFrame` took 164 ms; canvas and
+   `createImageBitmap(video)` took 8–60 ms, all at 1080×1920. → Stills come from the video
+   track by default. `takePhoto()` is opt-in (`stillCapture: 'photo'`) and is kept only if it
+   is at least the stream resolution, otherwise the frame is used. Photo import with
+   `<input type="file" capture="environment">` remains the fallback.
+4. **Detection.** The worker at 384 px long side took 5.4 ms mean and 6 ms p95 per frame,
+   with a ~6 ms round trip at a steady 30 fps. → The design is confirmed; one task stays in
+   flight. Whole-frame Laplacian sharpness ranged from 100 to 4000 for the same scene. →
+   Auto-capture uses sharpness of the document's bounding box relative to its recent
+   maximum, not an absolute threshold.
+5. **Platform.** WebGL2 `MAX_TEXTURE_SIZE` 16384. OffscreenCanvas 2D and WebGL2 work in
+   workers, and ImageBitmap transfer works. `MediaStreamTrackProcessor` exists only in
+   workers. WebGPU device creation works. There is no WebNN, TextDetector or
+   BarcodeDetector, and `crossOriginIsolated` is false.
