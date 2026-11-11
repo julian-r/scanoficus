@@ -117,7 +117,12 @@ export function onDetectorStatus(listener: (status: DetectorStatus) => void): ()
 export function createDemoDetector(choice: DetectorChoice): DocumentDetector {
   const status: DetectorStatus = {
     choice,
-    running: choice === 'classic' ? 'Classic · worker' : `${DETECTOR_LABELS[choice]} · loading…`,
+    running:
+      choice === 'classic'
+        ? 'Classic · worker'
+        : choice === 'hybrid'
+          ? 'Hybrid · classic until the network is ready…'
+          : `${DETECTOR_LABELS[choice]} · loading…`,
     coldStartMs: null,
     p50Ms: null,
     stillMs: null,
@@ -136,12 +141,19 @@ export function createDemoDetector(choice: DetectorChoice): DocumentDetector {
   let detector: (DocumentDetector & { detectStill?: DocumentDetector['detectStill'] }) | null =
     null;
 
+  /**
+   * Hybrid: the classic worker answers (at its calibrated 384 px) while the network loads, and
+   * becomes the hybrid's classic stage once it is ready.
+   */
+  const interim = choice === 'hybrid' ? createDetectorWorker() : null;
+  let interimInHybrid = false;
+
   const fallback = (reason: string): DocumentDetector => {
     status.error = reason;
     status.running = 'Classic · worker (fallback)';
     status.coldStartMs = null;
     publish();
-    return createDetectorWorker();
+    return interim && !interimInHybrid ? interim : createDetectorWorker();
   };
 
   const build = async (): Promise<DocumentDetector> => {
@@ -195,9 +207,10 @@ export function createDemoDetector(choice: DetectorChoice): DocumentDetector {
     if (choice === 'hybrid') {
       // Thresholds of the offline benchmark (classic ≥ CONFIDENT_SCORE, network presence > 0.85),
       // kept in HYBRID_DEFAULTS / the detector options for the presence tuning.
+      interimInHybrid = true;
       network = nn.createHybridDetector({
         nn: network,
-        classic: createDetectorWorker(),
+        classic: interim ?? createDetectorWorker(),
         confidentScore: nn.HYBRID_DEFAULTS.confidentScore,
         classicOptions: { maxSide: 384 },
         // The hybrid answers such frames with the classic result; just report it.
@@ -217,6 +230,7 @@ export function createDemoDetector(choice: DetectorChoice): DocumentDetector {
 
   const building = build().then((d) => {
     detector = d;
+    times.length = 0;
     if (disposed) d.dispose();
     return d;
   });
@@ -244,6 +258,9 @@ export function createDemoDetector(choice: DetectorChoice): DocumentDetector {
   return {
     ...(choice === 'nn2-refiner' ? { detectStill } : {}),
     async detect(frame: DetectorFrame, options?: DetectOptions) {
+      if (!detector && interim && !disposed) {
+        return interim.detect(frame, { ...options, maxSide: 384 });
+      }
       const d = detector ?? (await building);
       if (disposed) throw new Error('Detector disposed');
       const t = performance.now();
@@ -278,6 +295,7 @@ export function createDemoDetector(choice: DetectorChoice): DocumentDetector {
     dispose() {
       disposed = true;
       detector?.dispose();
+      if (interim && !interimInHybrid && detector !== interim) interim.dispose();
     },
   };
 }

@@ -283,7 +283,19 @@ const CHOICES = ['classic', 'nn', 'nn-refine', 'hybrid', 'nn2-refiner'];
  */
 async function checkDefaultChoice(label, url) {
   const page = await browser.newPage();
-  await page.addInitScript(() => localStorage.setItem('scanoficus-debug', '1'));
+  await page.addInitScript(() => {
+    localStorage.setItem('scanoficus-debug', '1');
+    // Record every status the demo publishes.
+    let value;
+    window.__statusLog = [];
+    Object.defineProperty(window, 'scanoficusDetector', {
+      get: () => value,
+      set: (v) => {
+        value = v;
+        window.__statusLog.push(v.running);
+      },
+    });
+  });
   await page.goto(`${url}#/live`);
   const selected = await page.evaluate(() => document.getElementById('detector').value);
   await page.getByText('Start scanning').click();
@@ -301,6 +313,7 @@ async function checkDefaultChoice(label, url) {
   const maxSide = await page.evaluate(
     () => document.querySelector('scan-document')?.options?.detection?.maxSide,
   );
+  const log = await page.evaluate(() => window.__statusLog);
   await page.close();
   check(
     `${label}: the default detector is Hybrid (round 1 + refine, 768-px frames)`,
@@ -308,8 +321,10 @@ async function checkDefaultChoice(label, url) {
       status.choice === 'hybrid' &&
       /round 1 \+ refine/.test(status.running) &&
       maxSide === 768 &&
+      log.some((r) => /classic until the network is ready/.test(r)) &&
       !status.error,
-    `${selected}; ${status.failed ?? status.running}; detection maxSide ${maxSide}`,
+    `${selected}; ${status.failed ?? status.running}; detection maxSide ${maxSide}; ` +
+      `classic answered first: ${log.some((r) => /classic until/.test(r))}`,
   );
   // A stored choice wins over the default.
   const stored = await browser.newPage();
