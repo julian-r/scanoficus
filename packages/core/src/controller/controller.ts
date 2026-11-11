@@ -18,7 +18,7 @@ import { normalizeRotation, type Rotation } from '../render/cpu.ts';
 import { createPageRenderer, type PageRenderer, type PageSource } from '../render/renderer.ts';
 import { createDetectorWorker, createMainThreadDetector } from '../worker/client.ts';
 import type { DocumentDetector } from '../worker/processor.ts';
-import { openScannerCamera, type ScannerCamera } from './camera-source.ts';
+import { openScannerCamera, type ScannerCamera, type ScannerStill } from './camera-source.ts';
 import { Emitter } from './emitter.ts';
 
 /**
@@ -188,6 +188,9 @@ export class ScannerController {
   private replaceIndex: number | null = null;
   /** Incremented by stop() and dispose(): pending captures of an older epoch are discarded. */
   private captureEpoch = 0;
+  private captureSequence = 0;
+  /** Token of the capture that owns the live session (0: none). Cleared by releaseCamera(). */
+  private activeCapture = 0;
   private nextPageId = 1;
   private detectTimes: number[] = [];
   private snapshot: ScannerSnapshot;
@@ -355,39 +358,49 @@ export class ScannerController {
     const previewQuad = this.snapshot.detection?.quad ?? null;
     const previewWidth = camera.width;
     const previewHeight = camera.height;
+    // `epoch` decides whether the result is still wanted (stop/dispose discard it); `token`
+    // decides whether this capture still owns the live session (hide, finish or a newer
+    // session take that away): only the owner may change state or the duplicate guard.
     const epoch = this.captureEpoch;
+    const token = ++this.captureSequence;
+    this.activeCapture = token;
+    const valid = () => epoch === this.captureEpoch && !this.disposed;
+    const owns = () => this.activeCapture === token;
     this.setState('capturing');
+    let still: ScannerStill | null = null;
     try {
-      const still = await camera.captureStill();
-      if (epoch !== this.captureEpoch || this.disposed) {
-        closeSource(still.image);
-        return null;
-      }
+      still = await camera.captureStill();
       // Preview corners map to the still only when both show the same framing (video frames);
       // a photo may be cropped differently, so it relies on its own detection.
       const preview =
         still.matchesPreview && previewQuad
           ? scaleQuad(previewQuad, still.width / previewWidth, still.height / previewHeight)
           : null;
-      const page = await this.createPage(still.image, still.width, still.height, preview);
-      if (epoch !== this.captureEpoch || this.disposed) {
-        discardPage(page);
-        return null;
+      if (!valid()) throw new PageCancelled();
+      const page = await this.createPage(still.image, still.width, still.height, preview, valid);
+      if (!valid()) {
+        URL.revokeObjectURL(page.url);
+        throw new PageCancelled();
       }
-      this.capturedQuad = previewQuad;
-      this.stableSince = null;
       const replacing = this.replaceIndex;
       this.insertPage(page);
       this.emitter.emit('capture', { page });
-      // The state may have changed while awaiting (stop, finish, page hidden).
-      if (this.isCapturing()) {
+      if (owns()) {
+        this.activeCapture = 0;
+        this.capturedQuad = previewQuad;
+        this.stableSince = null;
         if (this.options.reviewAfterCapture || replacing !== null) this.finish();
         else this.setState('scanning');
       }
       return page;
     } catch (error) {
-      this.emitter.emit('error', { error: asError(error) });
-      if (this.isCapturing()) this.setState('scanning');
+      // The still is ours until a page is committed.
+      if (still) closeSource(still.image);
+      if (!(error instanceof PageCancelled)) this.emitter.emit('error', { error: asError(error) });
+      if (owns()) {
+        this.activeCapture = 0;
+        if (this.isCapturing()) this.setState('scanning');
+      }
       return null;
     }
   }
@@ -399,24 +412,30 @@ export class ScannerController {
    */
   async addImage(image: Blob | PageSource): Promise<ScanPage> {
     this.assertAlive();
-    const source =
-      image instanceof Blob
-        ? await createImageBitmap(image, { imageOrientation: 'from-image' })
-        : image;
+    const decoded = image instanceof Blob;
+    const source = decoded
+      ? await createImageBitmap(image, { imageOrientation: 'from-image' })
+      : image;
     const width = 'naturalWidth' in source ? source.naturalWidth : source.width;
     const height = 'naturalHeight' in source ? source.naturalHeight : source.height;
-    if (this.disposed) {
-      if (image instanceof Blob) closeSource(source);
-      throw new Error('The scanner controller was disposed while adding an image');
+    const valid = () => !this.disposed;
+    try {
+      if (!valid()) throw new PageCancelled();
+      const page = await this.createPage(source, width, height, null, valid);
+      if (!valid()) {
+        URL.revokeObjectURL(page.url);
+        throw new PageCancelled();
+      }
+      this.insertPage(page);
+      return page;
+    } catch (error) {
+      // A bitmap decoded here is ours until the page is committed; caller sources are not.
+      if (decoded) closeSource(source);
+      if (error instanceof PageCancelled) {
+        throw new Error('The scanner controller was disposed while adding an image');
+      }
+      throw error;
     }
-    const page = await this.createPage(source, width, height, null);
-    if (this.disposed) {
-      URL.revokeObjectURL(page.url);
-      if (image instanceof Blob) closeSource(source);
-      throw new Error('The scanner controller was disposed while adding an image');
-    }
-    this.insertPage(page);
-    return page;
   }
 
   /** Re-renders a page after editing its quad, filter or rotation. */
@@ -534,22 +553,27 @@ export class ScannerController {
   }
 
   private async detectWithFallback(frame: RgbaImage): Promise<Detection | null> {
-    this.detector ??= (this.options.createDetector ?? createDefaultDetector)();
-    const detector = this.detector;
+    let detector = this.detector;
     try {
+      // Creating the detector is inside the fallback boundary: a factory can throw (e.g.
+      // `new Worker()` rejected by a content security policy).
+      if (!detector) {
+        detector = (this.options.createDetector ?? createDefaultDetector)();
+        this.detector = detector;
+      }
       return await detector.detect(frame, this.options.detection);
     } catch (error) {
-      // A worker that cannot load (CSP, bundling, 404) or crashed is replaced by the
-      // main-thread detector; the reason is reported once as a (non-fatal) error event.
+      // A worker that cannot be created or loaded (CSP, bundling, 404) or crashed is replaced
+      // by the main-thread detector; the reason is reported once as a (non-fatal) error event.
       if (!this.ownsDetector || this.disposed) throw error;
       if (this.detector === detector) {
-        detector.dispose();
+        detector?.dispose();
         this.detector = createMainThreadDetector();
         this.emitter.emit('error', {
           error: new Error(`Falling back to main-thread detection: ${asError(error).message}`),
         });
       }
-      return this.detector.detect(frame, this.options.detection);
+      return (this.detector as DocumentDetector).detect(frame, this.options.detection);
     }
   }
 
@@ -604,13 +628,20 @@ export class ScannerController {
 
   // ---- pages -----------------------------------------------------------------------------
 
+  /**
+   * Detects, sizes and renders a page. `isValid` is checked after detection (before any
+   * rendering); a cancelled operation rejects with {@link PageCancelled}. The caller owns
+   * `source` until the returned page is committed.
+   */
   private async createPage(
     source: PageSource,
     width: number,
     height: number,
     fallbackQuad: Quad | null,
+    isValid: () => boolean,
   ): Promise<ScanPage> {
     const detected = await this.detectStill(source, width, height);
+    if (!isValid()) throw new PageCancelled();
     const usable =
       detected && (!fallbackQuad || convexIoU(detected, fallbackQuad) > 0.5) ? detected : null;
     const quad: Quad = usable ??
@@ -666,6 +697,8 @@ export class ScannerController {
     source: PageSource,
     options: { quad: Quad; filter: ScanFilter; rotation: Rotation; width: number; height: number },
   ): Promise<Blob> {
+    // Never create (and leak) an owned renderer after dispose().
+    if (this.disposed) return Promise.reject(new PageCancelled());
     this.renderer ??= createPageRenderer();
     return this.renderer.render(source, options, {
       type: 'image/jpeg',
@@ -734,8 +767,9 @@ export class ScannerController {
   }
 
   private releaseCamera(): void {
-    // Invalidate (and abort) any pending start.
+    // Invalidate (and abort) any pending start; a pending capture no longer owns the session.
     this.startGeneration++;
+    this.activeCapture = 0;
     this.cancelStart?.();
     this.cancelStart = null;
     this.stopFrames?.();
@@ -805,10 +839,11 @@ function boundingBox(quad: Quad): { x: number; y: number; width: number; height:
   return { x, y, width: Math.max(...xs) - x, height: Math.max(...ys) - y };
 }
 
-/** Releases a page that was rendered but never added (cancelled capture). */
-function discardPage(page: ScanPage): void {
-  URL.revokeObjectURL(page.url);
-  closeSource(page.source);
+/** Internal signal: a page operation was cancelled (stop/dispose) and must not commit. */
+class PageCancelled extends Error {
+  constructor() {
+    super('Page operation cancelled');
+  }
 }
 
 function closeSource(source: PageSource): void {

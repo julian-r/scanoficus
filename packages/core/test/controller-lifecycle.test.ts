@@ -47,3 +47,50 @@ describe('ScannerController page lifecycle', () => {
     controller.dispose();
   });
 });
+
+describe('ScannerController capture ownership', () => {
+  for (const outcome of ['resolves', 'rejects'] as const) {
+    it(`an older capture that ${outcome} after hide/show does not touch the newer session`, async () => {
+      const cameras: FakeCamera[] = [];
+      const { controller, frames } = setup({
+        autoCapture: false,
+        openCamera: async () => {
+          const camera = new FakeCamera();
+          cameras.push(camera);
+          return camera;
+        },
+      });
+      await controller.start(document.createElement('video'));
+      await frames(2);
+      let settleA: (still: ScannerStill) => void = () => {};
+      let failA: (error: Error) => void = () => {};
+      cameras[0].nextStill = () =>
+        new Promise((resolve, reject) => {
+          settleA = resolve;
+          failA = reject;
+        });
+      const captureA = controller.capture();
+
+      setVisibility('hidden');
+      setVisibility('visible');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(controller.state).toBe('scanning'); // session B
+      cameras[1].nextStill = () => new Promise(() => {}); // capture B stays in progress
+      const captureB = controller.capture();
+      expect(controller.state).toBe('capturing');
+
+      if (outcome === 'resolves') {
+        settleA({ image: cameras[0].still.image, width: 768, height: 576, matchesPreview: true });
+        expect(await captureA).not.toBeNull(); // A's page is kept…
+        expect(controller.pages).toHaveLength(1);
+      } else {
+        failA(new Error('capture A failed'));
+        expect(await captureA).toBeNull();
+      }
+      expect(controller.state).toBe('capturing'); // …but B's state is untouched
+      expect(cameras[1].stopped).toBe(false);
+      void captureB;
+      controller.dispose();
+    });
+  }
+});

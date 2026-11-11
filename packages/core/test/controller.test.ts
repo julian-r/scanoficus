@@ -1,5 +1,5 @@
 import { PDFDocument } from 'pdf-lib';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { CameraError, type CameraOptions } from '../src/camera/index.ts';
 import {
   type ScannerCamera,
@@ -340,7 +340,11 @@ describe('ScannerController', () => {
     await controller.start(video);
     await frames(3); // preview quad tracked for scene 2
     // The photo shows a different crop (here: a different scene) than the preview.
-    const photo = generateScene('easy', 9, 1024, 768);
+    const photo = generateScene('easy', 15, 1024, 768);
+    // Precondition: the preview quad, naively scaled to the photo, disagrees with the photo's
+    // document (IoU ≤ 0.5), so the old overlap rule would have rejected the photo detection.
+    const naive = scaleQuad(controller.getSnapshot().detection!.quad!, 1024 / 768, 768 / 576);
+    expect(convexIoU(naive, photo.quad!)).toBeLessThanOrEqual(0.5);
     camera.nextStill = async () => ({
       image: photo.image,
       width: 1024,
@@ -361,5 +365,91 @@ describe('ScannerController', () => {
     expect(page.width * page.height).toBeLessThanOrEqual(12_000_000);
     expect(page.width).toBe(page.height);
     expect(calls.at(-1)).toMatchObject({ width: page.width, height: page.height });
+  });
+
+  it('stops page creation when disposed during still detection (no renderer created)', async () => {
+    let finishDetection: () => void = () => {};
+    const deferred: DocumentDetector = {
+      detect: () => new Promise((resolve) => (finishDetection = () => resolve(null))),
+      dispose() {},
+    };
+    // No renderer option: creating the default renderer would throw in Node.
+    const { controller, camera } = setup({
+      detector: deferred,
+      renderer: undefined,
+      autoCapture: false,
+    });
+    const errors: string[] = [];
+    controller.on('error', ({ error }) => errors.push(error.message));
+    await controller.start(video);
+    let closed = false;
+    const image = { ...camera.still.image, close: () => (closed = true) };
+    camera.nextStill = async () => ({ image, width: 768, height: 576, matchesPreview: true });
+    const pending = controller.capture();
+    await flush();
+    controller.dispose();
+    finishDetection();
+    expect(await pending).toBeNull();
+    expect(closed).toBe(true);
+    expect(errors).toEqual([]);
+
+    const importing = setup({ detector: deferred, renderer: undefined });
+    const added = importing.controller.addImage(generateScene('easy', 5, 320, 240).image);
+    await flush();
+    importing.controller.dispose();
+    finishDetection();
+    await expect(added).rejects.toThrow('disposed while adding an image');
+  });
+
+  it('closes an uncommitted still or decoded bitmap when rendering fails', async () => {
+    const failing = {
+      backend: 'cpu' as const,
+      render: () => Promise.reject(new Error('render failed')),
+      dispose() {},
+    };
+    const { controller, camera } = setup({ renderer: failing, autoCapture: false });
+    const errors: string[] = [];
+    controller.on('error', ({ error }) => errors.push(error.message));
+    await controller.start(video);
+    let stillClosed = false;
+    const image = { ...camera.still.image, close: () => (stillClosed = true) };
+    camera.nextStill = async () => ({ image, width: 768, height: 576, matchesPreview: true });
+    expect(await controller.capture()).toBeNull();
+    expect(stillClosed).toBe(true);
+    expect(errors).toEqual(['render failed']);
+    expect(controller.state).toBe('scanning');
+
+    // A Blob is decoded by the controller: the bitmap is closed when the page fails.
+    let bitmapClosed = false;
+    const scene = generateScene('easy', 6, 320, 240).image;
+    vi.stubGlobal('createImageBitmap', async () => ({
+      ...scene,
+      close: () => (bitmapClosed = true),
+    }));
+    try {
+      await expect(controller.addImage(new Blob(['jpeg']))).rejects.toThrow('render failed');
+      expect(bitmapClosed).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('falls back once when the detector factory throws synchronously', async () => {
+    let calls = 0;
+    const { controller, camera, frames } = setup({
+      detector: undefined,
+      createDetector: () => {
+        calls++;
+        throw new DOMException('Worker creation blocked', 'SecurityError');
+      },
+      autoCapture: false,
+    });
+    const errors: string[] = [];
+    controller.on('error', ({ error }) => errors.push(error.message));
+    await controller.start(video);
+    await frames(4);
+    expect(calls).toBe(1);
+    expect(errors).toEqual(['Falling back to main-thread detection: Worker creation blocked']);
+    expect(convexIoU(controller.getSnapshot().detection!.quad!, camera.quad)).toBeGreaterThan(0.95);
   });
 });
