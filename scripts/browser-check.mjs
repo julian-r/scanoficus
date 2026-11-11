@@ -277,6 +277,49 @@ async function checkDemo(label, url) {
 
 const CHOICES = ['classic', 'nn', 'nn-refine', 'hybrid', 'nn2-refiner'];
 
+/**
+ * Without a stored choice, the demo defaults to Hybrid (WebGL2 works in headless Chrome) whose
+ * network stage is round 1 with refinement on 768-px frames; a stored choice is kept.
+ */
+async function checkDefaultChoice(label, url) {
+  const page = await browser.newPage();
+  await page.addInitScript(() => localStorage.setItem('scanoficus-debug', '1'));
+  await page.goto(`${url}#/live`);
+  const selected = await page.evaluate(() => document.getElementById('detector').value);
+  await page.getByText('Start scanning').click();
+  const status = await page
+    .waitForFunction(
+      () =>
+        document.querySelector('scan-document')?.controller?.getSnapshot().detection?.quad &&
+        /worker ·/.test(window.scanoficusDetector?.running ?? '') &&
+        window.scanoficusDetector,
+      null,
+      { timeout: 40000 },
+    )
+    .then((h) => h.jsonValue())
+    .catch((e) => ({ failed: String(e).split('\n')[0] }));
+  const maxSide = await page.evaluate(
+    () => document.querySelector('scan-document')?.options?.detection?.maxSide,
+  );
+  await page.close();
+  check(
+    `${label}: the default detector is Hybrid (round 1 + refine, 768-px frames)`,
+    selected === 'hybrid' &&
+      status.choice === 'hybrid' &&
+      /round 1 \+ refine/.test(status.running) &&
+      maxSide === 768 &&
+      !status.error,
+    `${selected}; ${status.failed ?? status.running}; detection maxSide ${maxSide}`,
+  );
+  // A stored choice wins over the default.
+  const stored = await browser.newPage();
+  await stored.addInitScript(() => localStorage.setItem('scanoficus-detector', 'nn'));
+  await stored.goto(`${url}#/live`);
+  const kept = await stored.evaluate(() => document.getElementById('detector').value);
+  await stored.close();
+  check(`${label}: a stored detector choice is kept`, kept === 'nn', kept);
+}
+
 /** Live scanner and photo import with every detector choice find the synthetic page. */
 async function checkDetectorChoices(label, url) {
   for (const choice of CHOICES) {
@@ -435,6 +478,7 @@ async function checkDetectorChoices(label, url) {
   );
   await page.close();
   await checkDemo('vite dev', url);
+  await checkDefaultChoice('vite dev', url);
   await checkDetectorChoices('vite dev', url);
   await server.close();
 }

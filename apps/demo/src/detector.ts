@@ -59,15 +59,21 @@ export function hasWebGl2(): boolean {
 export function loadChoice(): DetectorChoice {
   const stored = localStorage.getItem(STORAGE_KEY);
   if (stored && Object.hasOwn(DETECTOR_LABELS, stored)) return stored as DetectorChoice;
-  return hasWebGl2() ? 'nn-refine' : 'classic';
+  // Default: the hybrid (classic v3 when confident, else round 1 + refinement), which had the
+  // best JI on every set with documents offline (scanoficus-datasets results/hybrid.md).
+  return hasWebGl2() ? 'hybrid' : 'classic';
 }
+
+/** Choices whose network stage is round 1 with classic edge refinement. */
+const REFINED = new Set<DetectorChoice>(['nn-refine', 'hybrid']);
 
 /**
  * Detection size for a choice: refinement was tuned on frames with a long side of 1024 px, so
- * "Neural + refine" gets 768-px frames (live and stills); the others keep the default 384.
+ * "Neural + refine" and "Hybrid" get 768-px frames (live and stills; the hybrid's classic stage
+ * still works at its calibrated 384 px); the others keep the default 384.
  */
 export function detectionMaxSide(choice: DetectorChoice): number | undefined {
-  return choice === 'nn-refine' ? 768 : undefined;
+  return REFINED.has(choice) ? 768 : undefined;
 }
 
 export function saveChoice(choice: DetectorChoice): void {
@@ -156,9 +162,10 @@ export function createDemoDetector(choice: DetectorChoice): DocumentDetector {
         ? (await import('@scanoficus/detector-nn/docquadnet2')).DOCQUADNET2
         : undefined;
     const options = {
-      refine: choice === 'nn-refine',
+      refine: REFINED.has(choice),
       backend: 'webgl2' as const, // never the slow CPU path in a live loop
       ...(v2 ? { bundle: v2, refiner: { live: false, still: true } } : {}),
+      ...(choice === 'hybrid' ? { threshold: nn.HYBRID_DEFAULTS.networkThreshold } : {}),
     };
     let network: DocumentDetector | null = null;
     let workerError = '';
@@ -186,16 +193,23 @@ export function createDemoDetector(choice: DetectorChoice): DocumentDetector {
     }
     status.coldStartMs = performance.now() - started;
     if (choice === 'hybrid') {
+      // Thresholds of the offline benchmark (classic ≥ CONFIDENT_SCORE, network presence > 0.85),
+      // kept in HYBRID_DEFAULTS / the detector options for the presence tuning.
       network = nn.createHybridDetector({
         nn: network,
         classic: createDetectorWorker(),
+        confidentScore: nn.HYBRID_DEFAULTS.confidentScore,
+        classicOptions: { maxSide: 384 },
         // The hybrid answers such frames with the classic result; just report it.
         onError: (error) => {
           status.notice = `network error (classic answered): ${message(error)}`;
           publish();
         },
       });
-      status.running = status.running.replace('Hybrid', 'Hybrid (classic first)');
+      status.running = status.running.replace(
+        'Hybrid',
+        'Hybrid (classic first, then round 1 + refine)',
+      );
     }
     publish();
     return network;
