@@ -14,8 +14,16 @@ import {
   refineCornersCpu,
   rgbaToRgb,
 } from '@scanoficus/detector-nn';
-import { DOCQUADNET2 } from '@scanoficus/detector-nn/docquadnet2';
-import { DOCQUADNET3 } from '@scanoficus/detector-nn/docquadnet3';
+import { DOCQUADNET4 } from '@scanoficus/detector-nn/docquadnet4';
+
+// Rounds 2 and 3 are not in the npm package (the demo keeps them): load them through their
+// self-hosted bundle.json, which also exercises that path.
+const DOCQUADNET2 = '/apps/demo/models/docquadnet2/bundle.json';
+const DOCQUADNET3 = '/apps/demo/models/docquadnet3/bundle.json';
+const DECISION_BUNDLES = {
+  3: { bundle: DOCQUADNET3, fixtures: '/fixtures/round3.json' },
+  4: { bundle: DOCQUADNET4, fixtures: '/fixtures/round4.json' },
+};
 
 // The weights are resolved from the graph's `weights.file` (and checked against it). The
 // detector checks below use the package's default URLs instead.
@@ -492,9 +500,9 @@ export async function batchSelfTest() {
  * the 3 outputs vs NumPy), then the whole detector with the built-in decision (live frames: the
  * refiner runs for the decision) against the NumPy and ONNX references.
  */
-export async function round3Parity({ precision }) {
-  const meta = await (await fetch('/fixtures/round3.json')).json();
-  const bundle = await loadBundle(DOCQUADNET3);
+export async function decisionParity({ precision, round }) {
+  const meta = await (await fetch(DECISION_BUNDLES[round].fixtures)).json();
+  const bundle = await loadBundle(DECISION_BUNDLES[round].bundle);
   const runner = new GlRunner(bundle.main, { precision, refiner: bundle.refiner.model });
   const cpu = new CpuRunner(bundle.refiner.model);
   let captured = null;
@@ -564,7 +572,7 @@ export async function round3Parity({ precision }) {
     const detection = await detector.detect(image);
     r.value = captured?.score ?? null;
     r.margin = c.numpy.margin;
-    r.faint = Math.abs(c.numpy.margin) < 4;
+    r.faint = Math.abs(c.numpy.margin) < 4 || c.style === 'white' || c.numpy.presence < 0.5;
     r.score = captured ? Math.abs(captured.score - c.numpy.score) : null;
     r.scoreOnnx = captured ? Math.abs(captured.score - c.onnx.score) : null;
     r.accept = !!detection;
@@ -603,7 +611,7 @@ export async function bench({
   runs,
   warmup,
   v2,
-  v3,
+  v4,
   refinerLive,
   still,
 }) {
@@ -626,9 +634,9 @@ export async function bench({
   }
   const next = async () =>
     big ? createImageBitmap(big) : input === 'bitmap' ? createImageBitmap(image) : image;
-  const versioned = v3 ? DOCQUADNET3 : v2 ? DOCQUADNET2 : null;
-  const extra = v3
-    ? { bundle: DOCQUADNET3 } // the decision runs the refiner on live frames by default
+  const versioned = v4 ? DOCQUADNET4 : v2 ? DOCQUADNET2 : null;
+  const extra = v4
+    ? { bundle: DOCQUADNET4 } // the decision runs the refiner on live frames by default
     : v2
       ? { bundle: DOCQUADNET2, refiner: { live: !!refinerLive, still: true } }
       : {};

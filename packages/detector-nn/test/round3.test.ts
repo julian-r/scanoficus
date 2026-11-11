@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { Point } from '@scanoficus/core/geometry';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { DOCQUADNET3 } from '../src/bundle-docquadnet3.ts';
+import { DOCQUADNET3 } from '../../../apps/demo/src/bundles/docquadnet3.ts';
 import {
   buildPyramid,
   CpuRunner,
@@ -84,7 +84,10 @@ describe('round-3 bundle', () => {
     expect(DOCQUADNET3.threshold).toBeUndefined();
     // The packaged decision.json (self-hosting) has the same runtime fields as the module.
     const packaged = JSON.parse(
-      readFileSync(new URL('../models/docquadnet3/decision.json', import.meta.url), 'utf8'),
+      readFileSync(
+        new URL('../../../apps/demo/models/docquadnet3/decision.json', import.meta.url),
+        'utf8',
+      ),
     );
     for (const [k, v] of Object.entries(spec)) expect(packaged[k]).toEqual(v);
     expect(spec.mainSha256).toBe(bundle.main.graph.weights?.sha256);
@@ -174,8 +177,9 @@ describe('round-3 parity (CPU vs scanoficus-ml)', () => {
         },
       });
       const detection = await detector.detect(frame); // live: the refiner runs for the decision
-      // Frames without a clear page: faint near-threshold blends, white on white, empty, noise.
-      const faint = Math.abs(c.numpy.margin) < 4;
+      // Frames without a clear page: faint near-threshold blends, white on white (low contrast),
+      // empty and noise frames.
+      const faint = Math.abs(c.numpy.margin) < 4 || c.style === 'white' || c.numpy.presence < 0.5;
       const result = captured as unknown as { score: number; features: Record<string, number> };
       expect(result).not.toBeNull();
       for (const [name, value] of Object.entries(c.numpy.features)) {

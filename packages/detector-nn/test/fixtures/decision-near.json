@@ -1,5 +1,5 @@
 {
- "generator": "packages/detector-nn/scripts/make_round3_fixtures.py",
+ "generator": "packages/detector-nn/scripts/make_decision_fixtures.py --variant docquadnet3",
  "source": "scanoficus-ml cache/verify/*-rf3.json",
  "vectors": [
   {

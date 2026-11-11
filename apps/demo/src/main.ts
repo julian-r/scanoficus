@@ -1,6 +1,7 @@
-import cocoCreditsUrl from '@scanoficus/detector-nn/models/docquadnet3/coco-credits.csv?url&no-inline';
+import cocoCreditsUrl from '@scanoficus/detector-nn/models/docquadnet4/coco-credits.csv?url&no-inline';
 import modelLicenseUrl from '@scanoficus/detector-nn/models/LICENSE.md?url&no-inline';
 import { defineScanElements } from '@scanoficus/elements';
+import demoModelLicenseUrl from '../models/LICENSE.md?url&no-inline';
 import {
   DETECTOR_LABELS,
   type DetectorChoice,
@@ -42,20 +43,22 @@ onDetectorStatus((status) => {
   (window as unknown as { scanoficusDetector: unknown }).scanoficusDetector = status;
 });
 
-// Attribution that must travel with the neural detector's weights (SmartDoc; rounds 2 and 3 also
-// Dizaj, CC BY 4.0; round 3 also COCO / Flickr, CC BY 2.0, with the image list).
+// Attribution that must travel with the neural detector's weights (SmartDoc; rounds 2–4 also
+// Dizaj, CC BY 4.0; rounds 3–4 also COCO / Flickr, CC BY 2.0, with the image list).
 const credits = document.createElement('footer');
 credits.className = 'credits';
 credits.innerHTML = `Neural detector: DocQuadNet weights (BSD-3-Clause), trained with SmartDoc 2015
-frames (CC BY 4.0, © Chazalon et al.); rounds 2 and 3 also with "A New Image Dataset for Document Corner
+frames (CC BY 4.0, © Chazalon et al.); rounds 2–4 also with "A New Image Dataset for Document Corner
 Localization" by Shima Dizaj, Mendeley Data v3,
 <a href="https://doi.org/10.17632/x3nm4cxr83.3">https://doi.org/10.17632/x3nm4cxr83.3</a>, licensed
 under <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>. Changes: photos resized,
 cropped, rotated and augmented for training; labels converted. Content shown in the photos can
-belong to third parties (Mendeley Data). Round 3 also with 6,329 COCO train2017 photos (Flickr, CC
-BY 2.0 or no known copyright restrictions; cropped, resized and augmented),
-<a href="${cocoCreditsUrl}">list of images with authors, titles and sources</a>. <a href="${modelLicenseUrl}">Model
-license and attribution</a>.`;
+belong to third parties (Mendeley Data). Rounds 3–4 also with 6,329 COCO train2017 photos (Flickr,
+CC BY 2.0 or no known copyright restrictions; cropped, resized and augmented),
+<a href="${cocoCreditsUrl}">list of images with authors, titles and sources</a> (the same images
+for both rounds). Model license and attribution:
+<a href="${modelLicenseUrl}">rounds 1 and 4</a>, <a href="${demoModelLicenseUrl}">rounds 2 and
+3</a>.`;
 document.body.append(credits);
 
 let unmount: (() => void) | null = null;

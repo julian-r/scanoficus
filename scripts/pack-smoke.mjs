@@ -69,8 +69,7 @@ try {
   const shipped = ['LICENSE.md'];
   for (const [bundle, graphs, extra] of [
     ['docquadnet', ['docquadnet'], []],
-    ['docquadnet2', ['docquadnet2', 'docquadnet2-refiner'], []],
-    ['docquadnet3', ['docquadnet3-refiner'], ['decision.json', 'coco-credits.csv']],
+    ['docquadnet4', ['docquadnet4', 'docquadnet4-refiner'], ['decision.json', 'coco-credits.csv']],
   ]) {
     for (const name of graphs) {
       const graph = JSON.parse(readFileSync(join(nnDir, `models/${bundle}/${name}.json`), 'utf8'));
@@ -81,6 +80,12 @@ try {
   for (const file of shipped) {
     if (!existsSync(join(nnDir, 'models', file))) {
       throw new Error(`detector-nn: models/${file} missing`);
+    }
+  }
+  // Rounds 2 and 3 stay in the demo (apps/demo/models), not in the package.
+  for (const gone of ['docquadnet2', 'docquadnet3']) {
+    if (existsSync(join(nnDir, 'models', gone))) {
+      throw new Error(`detector-nn: models/${gone} must not be shipped`);
     }
   }
   console.log(`LICENSE in every package; detector-nn ships models/{${shipped.join(', ')}}`);
@@ -96,8 +101,7 @@ try {
     '@scanoficus/elements/define',
     '@scanoficus/react',
     '@scanoficus/detector-nn',
-    '@scanoficus/detector-nn/docquadnet2',
-    '@scanoficus/detector-nn/docquadnet3',
+    '@scanoficus/detector-nn/docquadnet4',
   ];
   // Runtime: every entry imports in Node (SSR safety) and exposes exports.
   writeFileSync(
@@ -181,26 +185,23 @@ detector.detect(ctx.getImageData(0, 0, 384, 288)).then(
 );
 // The neural detector with its default model URLs (the files shipped in the package).
 import { createNnDetector } from '@scanoficus/detector-nn';
-// Round 2 + refiner from its subpath (its own model files); the rule accepts any frame.
-import { DOCQUADNET2 } from '@scanoficus/detector-nn/docquadnet2';
-import { DOCQUADNET3 } from '@scanoficus/detector-nn/docquadnet3';
+// Round 4 from its subpath (main network, refiner and decision.json); still detection with
+// the refiner (the page is clear enough for the decision).
+import { DOCQUADNET4 } from '@scanoficus/detector-nn/docquadnet4';
 const nn = createNnDetector({ backend: 'webgl2' });
-const nn2 = createNnDetector({ backend: 'webgl2', bundle: DOCQUADNET2, presence: () => 1 });
-// Round 3 with its decision.json (the shared round-2 main network and its own refiner).
-const nn3 = createNnDetector({ backend: 'webgl2', bundle: DOCQUADNET3 });
+const nn4 = createNnDetector({ backend: 'webgl2', bundle: DOCQUADNET4 });
 Promise.all([
   nn.infer(ctx.getImageData(0, 0, 384, 288)),
-  nn2.detectStill(ctx.getImageData(0, 0, 384, 288)),
-  nn3.ready().then(() => nn3.detect(ctx.getImageData(0, 0, 384, 288))),
+  nn4.detectStill(ctx.getImageData(0, 0, 384, 288)),
+  nn4.ready().then(() => nn4.detect(ctx.getImageData(0, 0, 384, 288))),
 ]).then(
   ([out, still]) => {
     window.nnResult = {
       presence: out.presence,
       backend: nn.backend,
       refined: !!still,
-      backend2: nn2.backend,
-      backend3: nn3.backend,
-      decision3: nn3.bundle?.decision?.spec.features.join('+'),
+      backend4: nn4.backend,
+      decision4: nn4.bundle?.decision?.spec.features.join('+'),
     };
   },
   (error) => { window.nnResult = { error: String(error) }; },
@@ -225,9 +226,8 @@ Promise.all([
     console.log(`vite ${label} (installed package): default worker detects a document`);
     if (
       nn.backend !== 'webgl2' ||
-      nn.backend2 !== 'webgl2' ||
-      nn.backend3 !== 'webgl2' ||
-      nn.decision3 !== 'z+cl_min+cl_mean+cl1_min' ||
+      nn.backend4 !== 'webgl2' ||
+      nn.decision4 !== 'z+cl_min+cl_mean+cl1_min' ||
       !nn.refined ||
       !(nn.presence >= 0 && nn.presence <= 1)
     ) {
@@ -235,7 +235,7 @@ Promise.all([
     }
     console.log(
       `vite ${label} (installed package): neural detectors load their packaged models ` +
-        '(round 1; round 2 + refiner on a still; round 3 with its pinned decision) ' +
+        '(round 1; round 4 with refiner and its pinned decision, live and still) ' +
         `(presence ${nn.presence.toFixed(3)})`,
     );
   };

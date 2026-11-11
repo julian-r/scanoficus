@@ -1,5 +1,7 @@
-"""Parity fixtures of round 3 (DocQuadNet 2 main network + the 3-output refiner + the presence
-decision of export/docquadnet3/decision.json) for the test scenes of make_refiner_fixtures.py.
+"""Parity fixtures of a decision bundle (round 3: DocQuadNet 2 main network + the 3-output
+refiner + export/docquadnet3/decision.json; round 4: DocQuadNet 4 + its refiner +
+export/docquadnet4/decision.json) for the test scenes of make_refiner_fixtures.py.
+`--variant docquadnet3|docquadnet4` (default round 4).
 
 Scenes: the round-2 fixture scenes, 8 blends of the page scene into its empty background whose
 NumPy scores lie near the threshold (margins about ±0.05, ±0.15, ±0.3, ±0.5, found by scanning
@@ -18,7 +20,8 @@ Also writes `test/fixtures/decision-near.json`: feature vectors of scanoficus-ml
 caches whose scores lie closest to the threshold, plus some with |z| > 12, with their Python
 scores (decision-only test).
 
-Writes `test/fixtures/round3.json`. Usage: see make_fixtures.py (same virtualenv).
+Writes `test/fixtures/round<N>.json` (and `decision-near.json` for round 3,
+`decision-near-round4.json` for round 4). Usage: see make_fixtures.py (same virtualenv).
 """
 
 from __future__ import annotations
@@ -36,13 +39,17 @@ sys.path.insert(0, str(HERE))
 from make_fixtures import CASES, scene  # noqa: E402
 from make_refiner_fixtures import LARGE  # noqa: E402
 
-MODELS = HERE.parent / "models"
+ROOT = HERE.parent.parent.parent
+#: Decision bundles: models folder, fixture names and the decision fit's feature-cache tag.
+VARIANTS = {
+    "docquadnet3": {"models": ROOT / "apps" / "demo" / "models", "round": 3, "tag": "rf3"},
+    "docquadnet4": {"models": HERE.parent / "models", "round": 4, "tag": "r4b"},
+}
 # Target NumPy margins of the near-threshold blends (both sides of the threshold).
 NEAR_MARGINS = [-0.5, -0.3, -0.15, -0.05, 0.05, 0.15, 0.3, 0.5]
 # A thin white page on a light table (low contrast).
 WHITE = ("white-640x480", 640, 480, [(130, 80), (510, 100), (495, 410), (110, 395)], [(170, 130), (460, 145), (450, 350), (160, 340)], 13)
-OUT = HERE.parent / "test" / "fixtures" / "round3.json"
-DECISION_OUT = HERE.parent / "test" / "fixtures" / "decision-near.json"
+FIXTURES = HERE.parent / "test" / "fixtures"
 
 
 def sha(a: np.ndarray) -> str:
@@ -52,6 +59,7 @@ def sha(a: np.ndarray) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ml", default=str(Path.home() / "src" / "scanoficus-ml"))
+    parser.add_argument("--variant", choices=sorted(VARIANTS), default="docquadnet4")
     args = parser.parse_args()
     sys.path.insert(0, args.ml)
     import cv2
@@ -61,14 +69,21 @@ def main() -> None:
     from scanoficus_ml.detectors import OwnPipeline3, order_quad
     from scanoficus_ml.rawgraph import run_graph
 
-    def load(bundle: str, name: str):
-        graph = json.loads((MODELS / bundle / f"{name}.json").read_text())
-        weights = np.frombuffer((MODELS / bundle / graph["weights"]["file"]).read_bytes(), "<f2").astype(np.float32)
+    variant = VARIANTS[args.variant]
+    folder = variant["models"] / args.variant
+    manifest = json.loads((folder / "bundle.json").read_text())
+    out_file = FIXTURES / f"round{variant['round']}.json"
+    decision_out = FIXTURES / ("decision-near.json" if variant["round"] == 3 else f"decision-near-round{variant['round']}.json")
+
+    def load(graph_file: str):
+        path = folder / graph_file
+        graph = json.loads(path.read_text())
+        weights = np.frombuffer((path.parent / graph["weights"]["file"]).read_bytes(), "<f2").astype(np.float32)
         return graph, weights
 
-    cfg = json.loads((MODELS / "docquadnet3" / "decision.json").read_text())
-    main_graph, main_w = load("docquadnet2", "docquadnet2")
-    ref_graph, ref_w = load("docquadnet3", "docquadnet3-refiner")
+    cfg = json.loads((folder / manifest["decision"]).read_text())
+    main_graph, main_w = load(manifest["main"]["graph"])
+    ref_graph, ref_w = load(manifest["refiner"]["graph"])
     log: list[dict] = []
 
     class NumpyMain:
@@ -86,7 +101,7 @@ def main() -> None:
             return [out]
 
     real_session, real_load = verify._session, verify._load
-    onnx = OwnPipeline3("docquadnet3")
+    onnx = OwnPipeline3(args.variant)
 
     def numpy_pipeline(rgb: np.ndarray):
         bgr = np.ascontiguousarray(rgb[..., ::-1])
@@ -145,9 +160,14 @@ def main() -> None:
     # once), so scan a pool of noise seeds × blends and keep the candidates closest to each
     # target margin.
     name0, w0, h0, page0, text0, _ = CASES[0]
+    # Where does the score cross the threshold (coarse scan, one seed)? Round 3: blend ≈ 115,
+    # round 4 lower (it accepts fainter pages).
+    coarse = [(a, numpy_pipeline(scene(w0, h0, page0, text0, 101, blend=a))[-1] - cfg["threshold"])
+              for a in range(0, 257, 8)]
+    cross = next(a for a, m in coarse if m > 0)
     pool = []
     for seed in range(101, 121):
-        for a in range(100, 130, 2):
+        for a in range(max(0, cross - 16), cross + 16, 2):
             *_, score = numpy_pipeline(scene(w0, h0, page0, text0, seed, blend=a))
             pool.append((seed, a, score - cfg["threshold"]))
     chosen: list[tuple[int, int]] = []
@@ -160,9 +180,10 @@ def main() -> None:
     cases.append(case(*WHITE, style="white"))
 
     # Decision-only vectors near the threshold from scanoficus-ml's validation feature caches
-    # (cache/verify/*-rf3.json), plus vectors with |z| > 12 (the clip).
+    # (cache/verify/*-<tag>.json, the features the decision was fitted on), plus vectors with
+    # |z| > 12 (the clip).
     vectors = []
-    for f in sorted((Path(args.ml) / "cache" / "verify").glob("*-rf3.json")):
+    for f in sorted((Path(args.ml) / "cache" / "verify").glob(f"*-{variant['tag']}.json")):
         for e in json.loads(f.read_text()):
             feats = {n: float(e["f"][n]) for n in cfg["features"]}
             score = cfg["bias"] + sum(
@@ -173,16 +194,16 @@ def main() -> None:
                             "accept": bool(score > cfg["threshold"])})
     near = sorted(vectors, key=lambda v: abs(v["score"] - cfg["threshold"]))[:16]
     clipped = [v for v in vectors if v["features"]["z"] > 12][:2] + [v for v in vectors if v["features"]["z"] < -12][:2]
-    DECISION_OUT.write_text(json.dumps({
-        "generator": "packages/detector-nn/scripts/make_round3_fixtures.py",
-        "source": "scanoficus-ml cache/verify/*-rf3.json",
+    decision_out.write_text(json.dumps({
+        "generator": f"packages/detector-nn/scripts/make_decision_fixtures.py --variant {args.variant}",
+        "source": f"scanoficus-ml cache/verify/*-{variant['tag']}.json",
         "vectors": near + clipped,
     }, indent=1) + "\n")
     print(f"decision vectors: {len(near)} near the threshold, {len(clipped)} with |z| > 12")
 
-    OUT.write_text(json.dumps({
-        "generator": "packages/detector-nn/scripts/make_round3_fixtures.py",
-        "decision": "models/docquadnet3/decision.json",
+    out_file.write_text(json.dumps({
+        "generator": f"packages/detector-nn/scripts/make_decision_fixtures.py --variant {args.variant}",
+        "decision": str((folder / manifest["decision"]).relative_to(ROOT)),
         "threshold": cfg["threshold"],
         "cases": cases,
     }, indent=1) + "\n")

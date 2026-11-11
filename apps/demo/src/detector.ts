@@ -171,16 +171,13 @@ export function createDemoDetector(choice: DetectorChoice): DocumentDetector {
     // assets, so the service worker's cache-first strategy can never serve a stale pair.
     // Round 2 (with the corner refiner on stills; threshold 0.98 from the bundle) is a
     // separate entry, so its files are only fetched when this choice is used.
+    // Rounds 2 and 3 come with the demo (apps/demo/models/), not with the npm package.
     const v2 =
-      choice === 'nn2-refiner'
-        ? (await import('@scanoficus/detector-nn/docquadnet2')).DOCQUADNET2
-        : undefined;
+      choice === 'nn2-refiner' ? (await import('./bundles/docquadnet2.ts')).DOCQUADNET2 : undefined;
     // Round 3: its decision.json is the presence rule; the refiner runs on live frames and
     // stills (the bundle's default).
     const v3 =
-      choice === 'nn3'
-        ? (await import('@scanoficus/detector-nn/docquadnet3')).DOCQUADNET3
-        : undefined;
+      choice === 'nn3' ? (await import('./bundles/docquadnet3.ts')).DOCQUADNET3 : undefined;
     const options = {
       refine: REFINED.has(choice),
       backend: 'webgl2' as const, // never the slow CPU path in a live loop

@@ -543,11 +543,18 @@ async function checkDetectorChoices(label, url) {
   const assets = readdirSync(join(outDir, 'assets'));
   const hashed = (re) => assets.filter((f) => re.test(f));
   check(
-    'vite build /scanoficus/: model graph, weights and license are content-hashed assets',
-    hashed(/^docquadnet-[\w-]+\.json$/).length >= 1 &&
-      hashed(/^docquadnet-[\w-]+\.bin$/).length >= 1 &&
-      hashed(/^LICENSE-[\w-]+\.md$/).length === 1,
-    [...hashed(/^docquadnet/), ...hashed(/^LICENSE/)].join(', '),
+    'vite build /scanoficus/: model graphs, weights, licenses and credits are content-hashed assets',
+    // Round 1 from the package, rounds 2 and 3 from apps/demo/models; two LICENSE.md
+    // (package and demo); the coco-credits.csv of rounds 3 and 4 are equal (one asset).
+    ['docquadnet', 'docquadnet2'].every(
+      (m) =>
+        hashed(new RegExp(`^${m}-[\\w-]+\\.json$`)).length >= 1 &&
+        hashed(new RegExp(`^${m}-[0-9a-f]{12}-[\\w-]+\\.bin$`)).length >= 1,
+    ) &&
+      hashed(/^docquadnet3-refiner-[0-9a-f]{12}-[\w-]+\.bin$/).length === 1 &&
+      hashed(/^LICENSE-[\w-]+\.md$/).length === 2 &&
+      hashed(/^coco-credits-[\w-]+\.csv$/).length === 1,
+    [...hashed(/^docquadnet/), ...hashed(/^LICENSE/), ...hashed(/^coco-credits/)].join(', '),
   );
   await checkDetectorChoices('vite build /scanoficus/', url);
   // Fallback: without the weights, the network choice falls back to Classic and says why.

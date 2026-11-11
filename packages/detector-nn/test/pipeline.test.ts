@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { Point } from '@scanoficus/core/geometry';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { DOCQUADNET2 } from '../src/bundle-docquadnet2.ts';
+import { DOCQUADNET2 } from '../../../apps/demo/src/bundles/docquadnet2.ts';
 import {
   createNnDetector,
   loadBundle,
@@ -134,7 +134,7 @@ describe('round-2 pipeline (CPU backend)', () => {
 
 describe('loadBundle', () => {
   afterEach(() => vi.unstubAllGlobals());
-  const dir = new URL('../models/docquadnet2/', import.meta.url);
+  const dir = new URL('../../../apps/demo/models/docquadnet2/', import.meta.url);
   const serve = (override: Record<string, Uint8Array> = {}) => {
     vi.stubGlobal('fetch', async (url: URL | string) => {
       const name = String(url).replace('https://cdn.test/m/', '');

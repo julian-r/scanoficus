@@ -12,6 +12,7 @@
       "!**/coverage",
       "!**/eval-out",
       "!packages/detector-nn/models",
+      "!apps/demo/models",
       "!packages/detector-nn/test/fixtures"
     ]
   },

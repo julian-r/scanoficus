@@ -23,9 +23,17 @@ const benchMode = args.includes('--bench');
 const jsonOut = args.includes('--json') ? args[args.indexOf('--json') + 1] : null;
 const fixtures = JSON.parse(await readFile(join(pkg, 'test/fixtures/cases.json'), 'utf8'));
 const refinerFixtures = JSON.parse(await readFile(join(pkg, 'test/fixtures/refiner.json'), 'utf8'));
-const round3Fixtures = JSON.parse(await readFile(join(pkg, 'test/fixtures/round3.json'), 'utf8'));
-// round3.json adds near-threshold blends and a white-on-white page to the refiner scenes.
-const scenes = [...fixtures.cases, ...refinerFixtures.cases, ...round3Fixtures.cases];
+// round3.json / round4.json add near-threshold blends and a white-on-white page.
+const decisionFixtures = await Promise.all(
+  [3, 4].map(async (n) =>
+    JSON.parse(await readFile(join(pkg, `test/fixtures/round${n}.json`), 'utf8')),
+  ),
+);
+const scenes = [
+  ...fixtures.cases,
+  ...refinerFixtures.cases,
+  ...decisionFixtures.flatMap((f) => f.cases),
+];
 
 const failures = [];
 const check = (name, ok, details = '') => {
@@ -228,81 +236,87 @@ for (const precision of ['float32', 'float16']) {
  * - `net*`: the GPU network on the CPU's crops, which are bit-exact with Python, i.e. the
  *   network's own float32 arithmetic (measured: 1e-5 on Apple M5 / Metal and SwiftShader);
  * - end to end with the GPU's own crops: GLSL ES 3.00 has no fma, so a GPU can round some crop
- *   pixels differently from OpenCV (0 of 2 M values on Apple M5 / Metal, 24 on SwiftShader as on
- *   CI), and the corner logit reacts to single pixels: SwiftShader measured offsets 7e-6 and
- *   corner logit 1.1e-3 (Metal 2e-7 / 6e-6). The tolerances keep about 3.5× margin over
- *   SwiftShader for the logit (a change of 4e-3 moves the decision score by < 3e-3) and allow
- *   offsets of 1e-3 half-crop units (0.03 px of a 64-px crop) for crops that differ more.
- * float16 activations: corner logit up to 0.046 (Metal); 0.1 keeps a margin across GPUs.
+ *   pixels differently from OpenCV (0 of 2 M values on Apple M5 / Metal, 22–24 on SwiftShader
+ *   as on CI), and the corner logit reacts to single pixels. SwiftShader measured offsets
+ *   7e-6 / 6e-5 and corner logit 1.1e-3 / 5.9e-3 (round 3 / round 4, whose refiner is more
+ *   sensitive); Metal at most 2e-7 and 1.3e-5. The logit tolerance 1.5e-2 keeps 2.5× margin
+ *   over round 4 on SwiftShader; the |weights| of the logit features sum to 1.33 / 0.95 in the
+ *   round-3 / round-4 decision, so the score moves by < 2e-2, below its own tolerance of 0.05.
+ *   Offsets may differ by 1e-3 half-crop units (0.03 px of a 64-px crop).
+ * float16 activations: corner logit up to 0.057 (Metal, round 4); 0.1 keeps a margin across GPUs.
  */
 const REFINER_TOLERANCE = {
-  float32: { netOffsets: 1e-4, netLogit: 1e-4, offsets: 1e-3, logit: 4e-3 },
+  float32: { netOffsets: 1e-4, netLogit: 1e-4, offsets: 1e-3, logit: 1.5e-2 },
   float16: { netOffsets: 0.05, netLogit: 0.1, offsets: 0.05, logit: 0.1 },
 };
 // Scenes: the 12 round-2 scenes, 8 faint blends with NumPy margins of ±0.05 … ±0.5 around the
 // threshold, and a white page on a light table.
-const round3 = {};
-for (const precision of ['float32', 'float16']) {
-  const results = await inPage('round3Parity', { precision });
-  round3[precision] = results;
-  report[`round3 ${precision}`] = results;
-  const docs = results.filter((r) => r.document && !r.faint);
-  const max = (key, list = results) => Math.max(...list.map((r) => r[key] ?? 0));
-  const mismatched = results.reduce((n, r) => n + r.cropMismatched, 0);
-  const total = results.reduce((n, r) => n + r.crops, 0);
-  // Score tolerance vs NumPy: float32 0.05; float16 0.3 on clear pages and 0.7 on faint
-  // near-threshold pages (measured up to 0.66 before the float16 offset).
-  // Score tolerance vs NumPy, clear pages / faint near-threshold pages. float32: 0.05 / 0.1
-  // (faint pages: the CPU path itself differs by up to 0.04, SwiftShader measured 0.061 with its
-  // GPU-rounded crops, Metal 0.042). float16: 0.3 / 0.7 (faint: up to 0.66 on Metal).
-  const t =
-    precision === 'float32'
-      ? { score: 0.05, faint: 0.1, ...REFINER_TOLERANCE.float32 }
-      : { score: 0.3, faint: 0.7, ...REFINER_TOLERANCE.float16 };
-  const tolerance = (r) => (r.faint ? t.faint : t.score);
-  // Decisions must agree with NumPy wherever the NumPy margin exceeds the score tolerance.
-  const decided = results.filter((r) => Math.abs(r.margin) > tolerance(r));
-  const wrong = decided.filter((r) => r.accept !== r.expected);
-  const flips = results
-    .filter((r) => r.accept !== r.expected)
-    .map((r) => `${r.name} (${r.margin.toFixed(3)})`);
-  check(
-    `${precision}: round-3 refiner network on the CPU's (bit-exact) crops vs NumPy`,
-    max('netOffsets', docs) < t.netOffsets && max('netLogit', docs) < t.netLogit,
-    `offsets ${max('netOffsets', docs).toExponential(2)} (< ${t.netOffsets}), corner logit ` +
-      `${max('netLogit', docs).toExponential(2)} (< ${t.netLogit}) (clear pages)`,
-  );
-  check(
-    `${precision}: round-3 refiner end to end (GPU crops) from Python's pass inputs vs NumPy`,
-    max('offsets', docs) < t.offsets && max('logit', docs) < t.logit && mismatched < 0.001 * total,
-    `offsets ${max('offsets', docs).toExponential(2)} (< ${t.offsets}), corner logit ` +
-      `${max('logit', docs).toExponential(2)} (< ${t.logit}) (clear pages); crops: ${mismatched} ` +
-      `of ${total} values differ by one level from the CPU crops`,
-  );
-  check(
-    `${precision}: round-3 decision score within ${t.score} (faint pages ${t.faint}) of NumPy; decisions equal beyond it`,
-    wrong.length === 0 && results.every((r) => r.score < tolerance(r)),
-    `score vs NumPy ${max('score').toFixed(4)} (clear pages ${max('score', docs).toFixed(4)}, faint ` +
-      `${max(
-        'score',
-        results.filter((r) => r.faint),
-      ).toFixed(4)}), vs ONNX ` +
-      `${max('scoreOnnx', docs).toFixed(4)} (clear pages); quad vs NumPy ${max('quad', docs).toFixed(4)} px ` +
-      `(clear pages); ${decided.length - wrong.length}/${decided.length} decisions equal where ` +
-      `|margin| exceeds the tolerance; flips within it: ${flips.join(', ') || 'none'}`,
-  );
-}
-{
-  // Reported, not checked: the float16 − float32 shift of the decision score depends on the GPU
-  // (Apple M5 / Metal: mean −0.14; SwiftShader: about −0.02), so no constant correction fits.
-  const diffs = round3.float16.map((r, i) => r.value - round3.float32[i].value);
-  const mean = diffs.reduce((a, b) => a + b, 0) / diffs.length;
-  const sd = Math.sqrt(diffs.reduce((a, b) => a + (b - mean) ** 2, 0) / diffs.length);
-  report.float16Bias = { renderer: report.renderer, mean, sd, diffs };
-  console.log(
-    `info float16 − float32 decision score on ${report.renderer}: mean ${mean.toFixed(4)}, sd ` +
-      `${sd.toFixed(4)}, max |diff| ${Math.max(...diffs.map(Math.abs)).toFixed(4)} over ${diffs.length} scenes`,
-  );
+for (const round of [3, 4]) {
+  const byPrecision = {};
+  for (const precision of ['float32', 'float16']) {
+    const results = await inPage('decisionParity', { precision, round });
+    byPrecision[precision] = results;
+    report[`round${round} ${precision}`] = results;
+    const docs = results.filter((r) => r.document && !r.faint);
+    const max = (key, list = results) => Math.max(...list.map((r) => r[key] ?? 0));
+    const mismatched = results.reduce((n, r) => n + r.cropMismatched, 0);
+    const total = results.reduce((n, r) => n + r.crops, 0);
+    // Score tolerance vs NumPy: float32 0.05; float16 0.3 on clear pages and 0.7 on faint
+    // near-threshold pages (measured up to 0.66 before the float16 offset).
+    // Score tolerance vs NumPy, clear pages / faint near-threshold pages. float32: 0.05 / 0.1
+    // (faint pages: the CPU path itself differs by up to 0.04, SwiftShader measured 0.061 with its
+    // GPU-rounded crops, Metal 0.042). float16: 0.3 / 0.7 (faint: up to 0.66 on Metal).
+    const t =
+      precision === 'float32'
+        ? { score: 0.05, faint: 0.1, ...REFINER_TOLERANCE.float32 }
+        : { score: 0.3, faint: 0.7, ...REFINER_TOLERANCE.float16 };
+    const tolerance = (r) => (r.faint ? t.faint : t.score);
+    // Decisions must agree with NumPy wherever the NumPy margin exceeds the score tolerance.
+    const decided = results.filter((r) => Math.abs(r.margin) > tolerance(r));
+    const wrong = decided.filter((r) => r.accept !== r.expected);
+    const flips = results
+      .filter((r) => r.accept !== r.expected)
+      .map((r) => `${r.name} (${r.margin.toFixed(3)})`);
+    check(
+      `${precision}: round-${round} refiner network on the CPU's (bit-exact) crops vs NumPy`,
+      max('netOffsets', docs) < t.netOffsets && max('netLogit', docs) < t.netLogit,
+      `offsets ${max('netOffsets', docs).toExponential(2)} (< ${t.netOffsets}), corner logit ` +
+        `${max('netLogit', docs).toExponential(2)} (< ${t.netLogit}) (clear pages)`,
+    );
+    check(
+      `${precision}: round-${round} refiner end to end (GPU crops) from Python's pass inputs vs NumPy`,
+      max('offsets', docs) < t.offsets &&
+        max('logit', docs) < t.logit &&
+        mismatched < 0.001 * total,
+      `offsets ${max('offsets', docs).toExponential(2)} (< ${t.offsets}), corner logit ` +
+        `${max('logit', docs).toExponential(2)} (< ${t.logit}) (clear pages); crops: ${mismatched} ` +
+        `of ${total} values differ by one level from the CPU crops`,
+    );
+    check(
+      `${precision}: round-${round} decision score within ${t.score} (faint pages ${t.faint}) of NumPy; decisions equal beyond it`,
+      wrong.length === 0 && results.every((r) => r.score < tolerance(r)),
+      `score vs NumPy ${max('score').toFixed(4)} (clear pages ${max('score', docs).toFixed(4)}, faint ` +
+        `${max(
+          'score',
+          results.filter((r) => r.faint),
+        ).toFixed(4)}), vs ONNX ` +
+        `${max('scoreOnnx', docs).toFixed(4)} (clear pages); quad vs NumPy ${max('quad', docs).toFixed(4)} px ` +
+        `(clear pages); ${decided.length - wrong.length}/${decided.length} decisions equal where ` +
+        `|margin| exceeds the tolerance; flips within it: ${flips.join(', ') || 'none'}`,
+    );
+  }
+  {
+    // Reported, not checked: the float16 − float32 shift of the decision score depends on the GPU
+    // (Apple M5 / Metal: mean −0.14; SwiftShader: about −0.02), so no constant correction fits.
+    const diffs = byPrecision.float16.map((r, i) => r.value - byPrecision.float32[i].value);
+    const mean = diffs.reduce((a, b) => a + b, 0) / diffs.length;
+    const sd = Math.sqrt(diffs.reduce((a, b) => a + (b - mean) ** 2, 0) / diffs.length);
+    report[`float16Bias round${round}`] = { renderer: report.renderer, mean, sd, diffs };
+    console.log(
+      `info round ${round}: float16 − float32 decision score on ${report.renderer}: mean ${mean.toFixed(4)}, sd ` +
+        `${sd.toFixed(4)}, max |diff| ${Math.max(...diffs.map(Math.abs)).toFixed(4)} over ${diffs.length} scenes`,
+    );
+  }
 }
 
 for (const [label, arg] of [
@@ -469,7 +483,7 @@ if (benchMode) {
       label: 'still',
     },
   );
-  // Round 3: the decision needs the refiner on every live frame.
+  // Round 4 (the demo default): the decision needs the refiner on every live frame.
   for (const thread of ['main', 'worker']) {
     for (const input of ['rgba384', 'rgba768', 'rgba']) {
       configs.push({
@@ -477,8 +491,8 @@ if (benchMode) {
         backend: 'webgl2',
         precision: 'float32',
         input,
-        v3: true,
-        label: 'v3',
+        v4: true,
+        label: 'v4',
       });
     }
   }

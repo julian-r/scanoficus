@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { Point, Quad } from '@scanoficus/core/geometry';
 import { describe, expect, it } from 'vitest';
-import { DOCQUADNET2 } from '../src/bundle-docquadnet2.ts';
+import { DOCQUADNET2 } from '../../../apps/demo/src/bundles/docquadnet2.ts';
 import {
   buildPyramid,
   CpuRunner,

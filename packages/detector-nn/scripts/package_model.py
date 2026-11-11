@@ -1,6 +1,7 @@
-"""Packages the DocQuadNet exports of scanoficus-ml into model bundles of @scanoficus/detector-nn.
+"""Packages the DocQuadNet exports of scanoficus-ml into model bundles.
 
-A bundle is a main network plus an optional corner refiner, in its own folder `models/<bundle>/`:
+A bundle is a main network plus an optional corner refiner (and, from round 3, a presence
+decision), in its own folder `<models>/<bundle>/`:
 
 - `<model>-<sha256[:12]>.bin`: the fp16 weights of each network, unchanged, under a
   content-hashed name (caches can keep them forever);
@@ -12,19 +13,22 @@ A bundle is a main network plus an optional corner refiner, in its own folder `m
     0.3, …), which the WebGL2 runtime reproduces after initialization;
 - `bundle.json`: the manifest for self-hosting (`loadBundle`): graph file names, presence
   threshold and, with a refiner, its crop scales, crop size and work-image side;
-- `src/bundle-<bundle>.ts`: the same bundle as `new URL('../models/…', import.meta.url)`
-  references (bundlers emit them as hashed assets; the path is also right from `dist/`) and
-  inline settings.
+- with a decision: `decision.json` from export/<round>/ plus `mainSha256` and `refinerSha256`
+  (the weights it was fitted with; `loadBundle` rejects other weights), and `coco-credits.csv`
+  (the COCO images behind the refiner and the decision, with Flickr author and title from
+  `fetch_flickr_credits.py`'s cache);
+- a TypeScript module with the same bundle as `new URL('…/models/…', import.meta.url)`
+  references (bundlers emit them as hashed assets) and inline settings (the decision's runtime
+  fields inline, no file fetch).
 
-Bundles: `docquadnet` (round 1, main network, threshold 0.85), `docquadnet2` (round 2 main
-network, threshold 0.98, and the corner refiner `docquadnet2-refiner`) and `docquadnet3` (the
-round-2 main network, shared with `docquadnet2/`, the refiner `docquadnet3-refiner` with a
-corner-confidence output, `decision.json` from export/docquadnet3/ plus `mainSha256` and
-`refinerSha256` (the weights it was fitted with; `loadBundle` rejects other weights), and
-`coco-credits.csv`, the COCO images behind round 3 with Flickr author and title from
-`fetch_flickr_credits.py`'s cache). The bundle module carries the decision's runtime fields
-inline (no file fetch); `bundle.json` points to `decision.json` for self-hosting.
-The attribution notice `models/LICENSE.md` is maintained by hand.
+Where bundles go:
+- the npm package (`packages/detector-nn/models/`, `src/bundle-<bundle>.ts`): `docquadnet`
+  (round 1, the default of `createNnDetector`) and `docquadnet4` (round 4: main network,
+  refiner, decision);
+- the demo only (`apps/demo/models/`, `apps/demo/src/bundles/<bundle>.ts`): `docquadnet2`
+  (round 2 + refiner) and `docquadnet3` (round 3; main network shared with `docquadnet2/`),
+  for the demo's "Neural v2 + refiner" and "Neural v3" options.
+The attribution notices (`LICENSE.md` next to each models folder) are maintained by hand.
 
 Usage (from the repository root, with the scanoficus-ml checkout and its virtualenv):
 
@@ -45,14 +49,24 @@ from pathlib import Path
 import numpy as np
 
 PKG = Path(__file__).resolve().parent.parent
-MODELS = PKG / "models"
+ROOT = PKG.parent.parent
+#: Destinations: models folder, TypeScript folder, the module's import of `BundleSource`, and
+#: the path from the TypeScript module (and, for the package, from `dist/`) to the models folder.
+TARGETS = {
+    "package": {"models": PKG / "models", "ts": PKG / "src", "tsName": "bundle-{bundle}.ts",
+                "import": "./bundle.ts", "prefix": "../models"},
+    "demo": {"models": ROOT / "apps" / "demo" / "models", "ts": ROOT / "apps" / "demo" / "src" / "bundles",
+             "tsName": "{bundle}.ts", "import": "@scanoficus/detector-nn", "prefix": "../../models"},
+}
 BUNDLES = {
-    "docquadnet": {"main": "docquadnet", "refiner": None, "const": "DOCQUADNET", "doc": "Round 1 (default)"},
+    "docquadnet": {"main": "docquadnet", "refiner": None, "const": "DOCQUADNET", "doc": "Round 1 (default)",
+                   "target": "package"},
     "docquadnet2": {
         "main": "docquadnet2",
         "refiner": "docquadnet2-refiner",
         "const": "DOCQUADNET2",
-        "doc": "Round 2 with the corner refiner",
+        "doc": "Round 2 with the corner refiner (demo only)",
+        "target": "demo",
     },
     # Round 3: the round-2 main network (files shared with `docquadnet2/`), the refiner with a
     # corner-confidence output and the presence decision of export/docquadnet3/decision.json.
@@ -62,7 +76,17 @@ BUNDLES = {
         "refiner": "docquadnet3-refiner",
         "decision": "docquadnet3",
         "const": "DOCQUADNET3",
-        "doc": "Round 3: round-2 main network, refiner with corner scores and the verified presence decision",
+        "doc": "Round 3: round-2 main network, refiner with corner scores and the verified presence decision (demo only)",
+        "target": "demo",
+    },
+    # Round 4: new main network and refiner, decision of the same form with new coefficients.
+    "docquadnet4": {
+        "main": "docquadnet4",
+        "refiner": "docquadnet4-refiner",
+        "decision": "docquadnet4",
+        "const": "DOCQUADNET4",
+        "doc": "Round 4: main network, refiner with corner scores and the verified presence decision",
+        "target": "package",
     },
 }
 
@@ -167,7 +191,8 @@ def main() -> None:
 
     packaged: dict[str, dict] = {}
     for bundle, spec in BUNDLES.items():
-        folder = MODELS / bundle
+        target = TARGETS[spec["target"]]
+        folder = target["models"] / bundle
         credits = folder / "coco-credits.csv"
         kept = credits.read_bytes() if args.keep_credits and credits.exists() else None
         shutil.rmtree(folder, ignore_errors=True)
@@ -196,18 +221,21 @@ def main() -> None:
         if spec["refiner"]:
             refiner = package_graph(ml, spec["refiner"], folder, run_graph)
             meta = json.loads((ml / "export" / spec["refiner"] / "refiner.json").read_text())
-            pipeline = json.loads((main_export / "pipeline.json").read_text())
             if decision:
-                # Round 3 (scanoficus_ml/verify.py): scales from the decision, the work side of
-                # verify.WORK_SIDE, the network's normalized corners times the work-image size.
+                # Rounds 3–4 (scanoficus_ml/verify.py, OwnPipeline3): scales from the decision, the
+                # work side of verify.WORK_SIDE, the network's normalized corners times the
+                # work-image size.
                 from scanoficus_ml.verify import WORK_SIDE
 
-                assert decision["scales"] == meta["scales"] and WORK_SIDE == int(pipeline["workSide"])
+                assert decision["scales"] == meta["scales"]
+                work_side = WORK_SIDE
                 coordinates = "normalized"
             else:
+                pipeline = json.loads((main_export / "pipeline.json").read_text())
                 assert pipeline["refine"] == f"net:{spec['refiner']}@" + "/".join(str(s) for s in meta["scales"]), pipeline
+                work_side = int(pipeline["workSide"])
                 coordinates = "frame"
-            refiner.update({"scales": meta["scales"], "crop": meta["crop"], "workSide": int(pipeline["workSide"]),
+            refiner.update({"scales": meta["scales"], "crop": meta["crop"], "workSide": work_side,
                             "coordinates": coordinates})
             manifest["refiner"] = {"graph": refiner["graph"], "scales": meta["scales"], "crop": meta["crop"],
                                    "workSide": refiner["workSide"], "coordinates": coordinates}
@@ -222,12 +250,14 @@ def main() -> None:
         (folder / "bundle.json").write_text(json.dumps(manifest, indent=1) + "\n")
         packaged[bundle] = {"main": main}
 
-        url = lambda f: f"new URL('../models/{posixpath.normpath(f'{bundle}/{f}')}', import.meta.url)"  # noqa: E731
+        prefix = target["prefix"]
+        url = lambda f: f"new URL('{prefix}/{posixpath.normpath(f'{bundle}/{f}')}', import.meta.url)"  # noqa: E731
+        where = "the package's" if spec["target"] == "package" else "the demo's"
         lines = [
-            "// Generated by scripts/package_model.py; do not edit.",
-            "import type { BundleSource } from './bundle.ts';",
+            "// Generated by packages/detector-nn/scripts/package_model.py; do not edit.",
+            f"import type {{ BundleSource }} from '{target['import']}';",
             "",
-            f"/** {spec['doc']}: the model files shipped in `models/{bundle}/`. */",
+            f"/** {spec['doc']}: the model files in {where} `models/{bundle}/`. */",
             f"export const {spec['const']}: BundleSource = {{",
             f"  name: '{bundle}',",
             *([f"  threshold: {threshold},"] if threshold is not None else []),
@@ -250,7 +280,8 @@ def main() -> None:
                     "mainSha256", "refinerSha256"]
             lines += ["  decision: {", *(f"    {k}: {json.dumps(decision[k])}," for k in keys), "  },"]
         lines += ["};", ""]
-        (PKG / "src" / f"bundle-{bundle}.ts").write_text("\n".join(lines))
+        target["ts"].mkdir(parents=True, exist_ok=True)
+        (target["ts"] / target["tsName"].format(bundle=bundle)).write_text("\n".join(lines))
 
 
 if __name__ == "__main__":

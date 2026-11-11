@@ -1,0 +1,19 @@
+{
+ "format": "scanoficus-nn-bundle/1",
+ "name": "docquadnet4",
+ "threshold": null,
+ "main": {
+  "graph": "docquadnet4.json"
+ },
+ "refiner": {
+  "graph": "docquadnet4-refiner.json",
+  "scales": [
+   0.4,
+   0.2
+  ],
+  "crop": 64,
+  "workSide": 1600,
+  "coordinates": "normalized"
+ },
+ "decision": "decision.json"
+}

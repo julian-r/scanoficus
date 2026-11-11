@@ -1,6 +1,6 @@
 {
- "generator": "packages/detector-nn/scripts/make_round3_fixtures.py",
- "decision": "models/docquadnet3/decision.json",
+ "generator": "packages/detector-nn/scripts/make_decision_fixtures.py --variant docquadnet3",
+ "decision": "apps/demo/models/docquadnet3/decision.json",
  "threshold": -1.2528567820767722,
  "cases": [
   {

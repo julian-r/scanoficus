@@ -3,8 +3,7 @@ import { defineConfig } from 'tsdown';
 export default defineConfig({
   entry: {
     index: 'src/index.ts',
-    docquadnet2: 'src/bundle-docquadnet2.ts',
-    docquadnet3: 'src/bundle-docquadnet3.ts',
+    docquadnet4: 'src/bundle-docquadnet4.ts',
     'worker-entry': 'src/worker-entry.ts',
   },
   format: 'esm',
