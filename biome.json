@@ -6,7 +6,14 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["**", "!**/dist", "!**/coverage", "!**/eval-out"]
+    "includes": [
+      "**",
+      "!**/dist",
+      "!**/coverage",
+      "!**/eval-out",
+      "!apps/demo/public/models",
+      "!packages/detector-nn/test/fixtures"
+    ]
   },
   "formatter": {
     "enabled": true,

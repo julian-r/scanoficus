@@ -1,0 +1,137 @@
+{
+ "threshold": 0.85,
+ "rule": "argmax over thresholds of mean(SmartDoc-val JI, synthetic-val JI) - synthetic-negative FP (misses below threshold score 0)",
+ "valFrames": {
+  "synthPos": 2048,
+  "synthNeg": 1024,
+  "smartdocVal": 506
+ },
+ "table": [
+  {
+   "threshold": 0.05,
+   "sdJi": 0.9461854975131723,
+   "sdRecall": 1.0,
+   "synthJi": 0.8448844183526818,
+   "synthRecall": 0.9970703125,
+   "synthFp": 0.2724609375,
+   "score": 0.623074020432927
+  },
+  {
+   "threshold": 0.1,
+   "sdJi": 0.9461854975131723,
+   "sdRecall": 1.0,
+   "synthJi": 0.8430658986927982,
+   "synthRecall": 0.99365234375,
+   "synthFp": 0.1884765625,
+   "score": 0.7061491356029852
+  },
+  {
+   "threshold": 0.2,
+   "sdJi": 0.9461854975131723,
+   "sdRecall": 1.0,
+   "synthJi": 0.8398969187764767,
+   "synthRecall": 0.98681640625,
+   "synthFp": 0.1240234375,
+   "score": 0.7690177706448245
+  },
+  {
+   "threshold": 0.3,
+   "sdJi": 0.9461854975131723,
+   "sdRecall": 1.0,
+   "synthJi": 0.8366992150056981,
+   "synthRecall": 0.98095703125,
+   "synthFp": 0.095703125,
+   "score": 0.7957392312594351
+  },
+  {
+   "threshold": 0.4,
+   "sdJi": 0.9461854975131723,
+   "sdRecall": 1.0,
+   "synthJi": 0.8305703083038132,
+   "synthRecall": 0.9697265625,
+   "synthFp": 0.0810546875,
+   "score": 0.8073232154084927
+  },
+  {
+   "threshold": 0.5,
+   "sdJi": 0.9461854975131723,
+   "sdRecall": 1.0,
+   "synthJi": 0.8259875898789049,
+   "synthRecall": 0.9619140625,
+   "synthFp": 0.060546875,
+   "score": 0.8255396686960386
+  },
+  {
+   "threshold": 0.6,
+   "sdJi": 0.9461854975131723,
+   "sdRecall": 1.0,
+   "synthJi": 0.8199594180287029,
+   "synthRecall": 0.95263671875,
+   "synthFp": 0.05078125,
+   "score": 0.8322912077709376
+  },
+  {
+   "threshold": 0.7,
+   "sdJi": 0.9461854975131723,
+   "sdRecall": 1.0,
+   "synthJi": 0.8145782351823536,
+   "synthRecall": 0.94384765625,
+   "synthFp": 0.0380859375,
+   "score": 0.8422959288477629
+  },
+  {
+   "threshold": 0.8,
+   "sdJi": 0.9461854975131723,
+   "sdRecall": 1.0,
+   "synthJi": 0.8039221715926224,
+   "synthRecall": 0.9296875,
+   "synthFp": 0.0302734375,
+   "score": 0.8447803970528973
+  },
+  {
+   "threshold": 0.85,
+   "sdJi": 0.9461854975131723,
+   "sdRecall": 1.0,
+   "synthJi": 0.7964301125485851,
+   "synthRecall": 0.91943359375,
+   "synthFp": 0.0234375,
+   "score": 0.8478703050308787
+  },
+  {
+   "threshold": 0.9,
+   "sdJi": 0.9461854975131723,
+   "sdRecall": 1.0,
+   "synthJi": 0.7826595024167455,
+   "synthRecall": 0.9013671875,
+   "synthFp": 0.0185546875,
+   "score": 0.8458678124649589
+  },
+  {
+   "threshold": 0.95,
+   "sdJi": 0.9461854975131723,
+   "sdRecall": 1.0,
+   "synthJi": 0.7537964358854992,
+   "synthRecall": 0.86474609375,
+   "synthFp": 0.0068359375,
+   "score": 0.8431550291993357
+  },
+  {
+   "threshold": 0.97,
+   "sdJi": 0.9461854975131723,
+   "sdRecall": 1.0,
+   "synthJi": 0.7283236574734876,
+   "synthRecall": 0.83251953125,
+   "synthFp": 0.0068359375,
+   "score": 0.83041863999333
+  },
+  {
+   "threshold": 0.99,
+   "sdJi": 0.9336231453961681,
+   "sdRecall": 0.9861660079051383,
+   "synthJi": 0.656868288224882,
+   "synthRecall": 0.74462890625,
+   "synthFp": 0.001953125,
+   "score": 0.793292591810525
+  }
+ ]
+}

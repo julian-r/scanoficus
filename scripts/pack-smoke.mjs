@@ -26,7 +26,7 @@ const run = (cmd, args, cwd) => {
 
 try {
   const tarballs = {};
-  for (const name of ['core', 'elements', 'react']) {
+  for (const name of ['core', 'elements', 'react', 'detector-nn']) {
     run('pnpm', ['pack', '--pack-destination', tmp], join(root, 'packages', name));
     const file = readdirSync(tmp).find(
       (f) => f.startsWith(`scanoficus-${name}-`) && f.endsWith('.tgz'),
@@ -70,6 +70,7 @@ try {
     '@scanoficus/elements',
     '@scanoficus/elements/define',
     '@scanoficus/react',
+    '@scanoficus/detector-nn',
   ];
   // Runtime: every entry imports in Node (SSR safety) and exposes exports.
   writeFileSync(

@@ -1,0 +1,50 @@
+import { CONFIDENT_SCORE } from '@scanoficus/core/detect';
+import { createMainThreadDetector, type DocumentDetector } from '@scanoficus/core/worker';
+import { isBitmap } from './detector.ts';
+
+/** Options for {@link createHybridDetector}. */
+export interface HybridDetectorOptions {
+  /** The network detector (e.g. `createNnDetector` or `createNnDetectorWorker`). */
+  nn: DocumentDetector;
+  /** The classic detector. Default: `createMainThreadDetector()` from `@scanoficus/core/worker`. */
+  classic?: DocumentDetector;
+  /** Classic detections scoring at least this are returned as is. Default `CONFIDENT_SCORE` (0.85). */
+  confidentScore?: number;
+}
+
+/**
+ * Classic first, network on doubt: every frame goes to the classic detector (with
+ * `minScore: 0`); a quad scoring at least `confidentScore` is returned directly (it is right
+ * 99.9 % of the time on the SmartDoc tuning split and costs only the classic detector). Other
+ * frames go to the network, which then decides alone (its presence threshold vetoes unsure
+ * classic quads). The `score` of the result is therefore either the classic edge score or the
+ * network's presence probability. Both detectors are disposed with the hybrid.
+ *
+ * `ImageBitmap` frames are cloned for the classic detector, so both can consume their copy.
+ */
+export function createHybridDetector(options: HybridDetectorOptions): DocumentDetector {
+  const { nn } = options;
+  const classic = options.classic ?? createMainThreadDetector();
+  const confident = options.confidentScore ?? CONFIDENT_SCORE;
+  return {
+    async detect(frame, detectOptions) {
+      const copy = isBitmap(frame) ? await createImageBitmap(frame) : frame;
+      let first: Awaited<ReturnType<DocumentDetector['detect']>>;
+      try {
+        first = await classic.detect(copy, { ...detectOptions, minScore: 0 });
+      } catch (error) {
+        if (isBitmap(frame)) frame.close();
+        throw error;
+      }
+      if (first && first.score >= confident) {
+        if (isBitmap(frame)) frame.close();
+        return first;
+      }
+      return nn.detect(frame, detectOptions);
+    },
+    dispose() {
+      classic.dispose();
+      nn.dispose();
+    },
+  };
+}

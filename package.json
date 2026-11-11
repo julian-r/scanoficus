@@ -24,7 +24,9 @@
     "dev:demo": "pnpm --filter @scanoficus/demo dev",
     "preview:demo": "pnpm --filter @scanoficus/demo preview",
     "check:browser": "node scripts/browser-check.mjs",
-    "check:pack": "node scripts/pack-smoke.mjs"
+    "check:pack": "node scripts/pack-smoke.mjs",
+    "check:nn": "pnpm --filter @scanoficus/detector-nn check:browser",
+    "bench:nn": "pnpm --filter @scanoficus/detector-nn bench"
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.6",
@@ -124,6 +126,25 @@
       ],
       "gzip": true,
       "limit": "3 KB"
+    },
+    {
+      "name": "@scanoficus/detector-nn (own code, without weights)",
+      "path": "packages/detector-nn/dist/index.js",
+      "import": "*",
+      "ignore": [
+        "@scanoficus/core"
+      ],
+      "gzip": true,
+      "limit": "11 KB"
+    },
+    {
+      "name": "@scanoficus/detector-nn/worker-entry (own code)",
+      "path": "packages/detector-nn/dist/worker-entry.js",
+      "ignore": [
+        "@scanoficus/core"
+      ],
+      "gzip": true,
+      "limit": "11 KB"
     }
   ]
 }
