@@ -89,6 +89,11 @@ const scanner = new ScannerController({
 });
 ```
 
+Round 2 is opt-in. On a private iPhone set (a thin white receipt on a white table) round 2 +
+refiner reached an IoU of 0.72 against 0.81 for round 1 + edge refinement: the refiner pulled a
+corner out to the stronger edge of the table. Round 1 (with refinement, or in the classic-first
+hybrid) stays the default until round 2 does at least as well on real phone photos.
+
 - **Pipeline** (a port of `scanoficus_ml/refiner.py` and the `net:` step of
   `scanoficus_ml/pipeline.py`): main network → raw quad → the frame area-downscaled to a long
   side of 1600 (one `cv2.resize(INTER_AREA)`; smaller frames are used as they are) → a pyramid
@@ -155,18 +160,37 @@ const scanner = new ScannerController({
   measured: set `detection.maxSide` to 768–1024 when you use refinement. Gradients are computed
   only where the profiles sample. Cost per frame: +1.5 ms for 384-px frames, +11 ms for
   1280×720 RGBA frames (most of it is the full-frame gray conversion and downscale).
-- **Classic first, network on doubt** (`createHybridDetector`):
+- **Classic first, network on doubt** (`createHybridDetector`; the demo's default). Offline
+  (scanoficus-datasets `results/hybrid.md`), classic v3 with `CONFIDENT_SCORE` 0.80, else round 1
+  - edge refinement (presence > 0.85), had the best JI on every set with documents (SmartDoc
+    held-out 0.976, MIDV-500 0.872, MIDV-2019 0.844, Dizaj test 0.705, RWMD 0.654), at 10.7 %
+    false positives on photos without a document (network alone 7.4 %). The thresholds are
+    options for tuning: `confidentScore` (default `HYBRID_DEFAULTS.confidentScore`), the network
+    detector's `threshold` (`HYBRID_DEFAULTS.networkThreshold`), `fallbackMinScore` (classic
+    answer when the network fails) and `classicOptions` (e.g. `{ maxSide: 384 }` to keep the
+    classic stage at its calibrated size when the frames are larger for refinement):
 
   ```ts
   import { createDetectorWorker } from '@scanoficus/core/worker';
-  import { createHybridDetector, createNnDetectorWorker } from '@scanoficus/detector-nn';
+  import {
+    createHybridDetector,
+    createNnDetectorWorker,
+    HYBRID_DEFAULTS,
+  } from '@scanoficus/detector-nn';
 
-  createDetector: () =>
-    createHybridDetector({
-      classic: createDetectorWorker(),
-      nn: createNnDetectorWorker(),
-      onError: (error) => console.warn(error), // network failures; the classic answer is used
-    });
+  // The benchmarked setup (as in the demo): round 1 with refinement on 768-px frames, the
+  // classic stage at its calibrated 384 px.
+  const scanner = new ScannerController({
+    detection: { maxSide: 768 },
+    createDetector: () =>
+      createHybridDetector({
+        classic: createDetectorWorker(),
+        classicOptions: { maxSide: 384 },
+        confidentScore: HYBRID_DEFAULTS.confidentScore,
+        nn: createNnDetectorWorker({ refine: true, threshold: HYBRID_DEFAULTS.networkThreshold }),
+        onError: (error) => console.warn(error), // network failures; the classic answer is used
+      }),
+  });
   ```
 
   Each frame first goes to the classic detector (`minScore: 0`), RGBA frames unchanged so that
@@ -357,8 +381,9 @@ this notice with the weights:
 Round 2 (`models/docquadnet2/`, main network and refiner) was also trained on the training
 part of the Dizaj photos, which are CC BY 4.0 as well; keep this notice with those weights:
 
-> Dizaj document photos, Mendeley Data, version 3 (DOI 10.17632/x3nm4cxr83.3), training part
-> (524 photos) — CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).
+> "A New Image Dataset for Document Corner Localization" by Shima Dizaj, Mendeley Data v3,
+> DOI 10.17632/x3nm4cxr83.3, licensed under CC BY 4.0
+> (https://creativecommons.org/licenses/by/4.0/). Used: the training part (524 photos).
 
 The other training inputs need no attribution: procedural pages, CC0 textures and HDRIs from
 Poly Haven, and OFL fonts that were only rendered into images. The data manifests are in the

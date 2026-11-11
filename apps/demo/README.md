@@ -17,11 +17,13 @@ localStorage:
 - **Neural network**: DocQuadNet from `@scanoficus/detector-nn`, loaded lazily. The model
   files (688 kB) come from the package and are emitted with content hashes, so the service
   worker never serves an old graph or old weights. The footer links their license and the
-  SmartDoc attribution.
-- **Neural + refine** (the default when float WebGL2 rendering works, else Classic): the
-  network, then classic edge refinement near its quad, on 768-px frames instead of 384.
-- **Hybrid**: the classic detector first, and the network only when the classic score is
-  below `CONFIDENT_SCORE`.
+  SmartDoc and Dizaj attributions.
+- **Neural + refine**: the network, then classic edge refinement near its quad, on 768-px
+  frames instead of 384.
+- **Hybrid** (the default when float WebGL2 rendering works, else Classic; a stored choice is
+  kept): the classic detector first (at 384 px); when its score is below `CONFIDENT_SCORE`
+  (0.80), "Neural + refine" (round 1, presence > 0.85, 768-px frames). This is the combination
+  with the best offline JI on every set with documents.
 - **Neural v2 + refiner**: round 2 of the network (threshold 0.98) on live frames (raw quad),
   and the corner refiner on the full-resolution still after capture and on imported photos
   (`detectStill`). The Debug overlay shows the still's size and time. Its model files (930 kB)

@@ -27,8 +27,9 @@ requires attribution. This notice must be kept with the weights:
 Round 2 (`docquadnet2/`) was also trained on the training part of the Dizaj photos (CC BY 4.0).
 This notice must be kept with those weights:
 
-> Dizaj document photos, Mendeley Data, version 3 (DOI 10.17632/x3nm4cxr83.3), training part
-> (524 photos) — CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).
+> "A New Image Dataset for Document Corner Localization" by Shima Dizaj, Mendeley Data v3,
+> DOI 10.17632/x3nm4cxr83.3, licensed under CC BY 4.0
+> (https://creativecommons.org/licenses/by/4.0/). Used: the training part (524 photos).
 
 The other training inputs need no attribution: procedural pages, CC0 textures and HDRIs from
 Poly Haven, and OFL fonts that were only rendered into images. Hashes of all training inputs

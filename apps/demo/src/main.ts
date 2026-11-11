@@ -41,12 +41,14 @@ onDetectorStatus((status) => {
   (window as unknown as { scanoficusDetector: unknown }).scanoficusDetector = status;
 });
 
-// Attribution that must travel with the neural detector's weights (SmartDoc, CC BY 4.0).
+// Attribution that must travel with the neural detector's weights (SmartDoc and, for round 2,
+// Dizaj; both CC BY 4.0).
 const credits = document.createElement('footer');
 credits.className = 'credits';
 credits.innerHTML = `Neural detector: DocQuadNet weights (BSD-3-Clause), trained with SmartDoc 2015
-frames (CC BY 4.0, © Chazalon et al.); round 2 also with Dizaj photos (CC BY 4.0, Mendeley Data
-v3). <a href="${modelLicenseUrl}">Model license and attribution</a>.`;
+frames (CC BY 4.0, © Chazalon et al.); round 2 also with "A New Image Dataset for Document Corner
+Localization" by Shima Dizaj, Mendeley Data v3, DOI 10.17632/x3nm4cxr83.3, licensed under CC BY
+4.0. <a href="${modelLicenseUrl}">Model license and attribution</a>.`;
 document.body.append(credits);
 
 let unmount: (() => void) | null = null;
