@@ -129,11 +129,15 @@ quad, those quads have a JI of 0.634, against 0.777 for round 4 on the same phot
   `export/docquadnet4/decision-4b.json` (same features, new coefficients). It is not shipped: on
   RWMD-Extended the two decisions differ on 1 of 503 photos, not a significant difference. To
   ship another decision, run `package_model.py --decision docquadnet4=decision-4b.json` (it
-  pins the file to the weights and regenerates `decision.json` and the bundle module, nothing
-  else); a self-hosted bundle only needs the other `decision.json` next to its `bundle.json`.
-  `test/round4.test.ts` checks both paths with `test/fixtures/decision-4b-round4.json`
-  (decision-only vectors of the refit, from `make_decision_fixtures.py --decision
-  decision-4b.json`).
+  pins the file to the weights and regenerates `decision.json` and the bundle module, whose
+  inline decision then names it in `exportFile`; the demo's debug overlay shows that name). The
+  parity fixtures hold the shipped decision's scores, so a swap also needs
+  `make_decision_fixtures.py` run again (it rewrites `test/fixtures/round4.json` and
+  `decision-near-round4.json` from the packaged decision); otherwise `test/round4.test.ts` and
+  `check:nn` fail. A self-hosted bundle only needs the other `decision.json` next to its
+  `bundle.json`. `test/round4.test.ts` checks both swap paths with
+  `test/fixtures/decision-4b-round4.json` (decision-only vectors of the refit, from
+  `make_decision_fixtures.py --decision decision-4b.json`).
 - **Pipeline** (a port of `scanoficus_ml/refiner.py` and the `net:` step of
   `scanoficus_ml/pipeline.py`): main network → raw quad → the frame area-downscaled to a long
   side of 1600 (one `cv2.resize(INTER_AREA)`; smaller frames are used as they are) → a pyramid
@@ -329,9 +333,12 @@ retraining, regenerate `models/` with `scripts/package_model.py`.
 **Package size.** The tarball is 2.01 MB (gzip; 3.26 MB unpacked, 42 files): round 1 0.65 MB
 gzip, round 4 1.19 MB (of which the COCO image list is 0.32 MB). With rounds 1–3 it was
 2.23 MB (3.52 MB unpacked, 49 files). Rounds 2 and 3 moved to the demo (`apps/demo/models/`,
-loaded from `apps/demo/src/bundles/`), because only its comparison options use them; their
-subpath exports `./docquadnet2` and `./docquadnet3` are gone. `package_model.py` writes each
-bundle to the package or the demo (`target` in its `BUNDLES` table).
+loaded from `apps/demo/src/bundles/`), because only its comparison options use them. Their
+subpath exports `./docquadnet2` and `./docquadnet3` are gone; this breaks no published consumer,
+because the package has not been published yet. The files stay in `apps/demo/models/` (with
+their own `LICENSE.md`), and a self-hosted copy can still be loaded with
+`bundle: '…/docquadnet3/bundle.json'`. `package_model.py` writes each bundle to the package or
+the demo (`target` in its `BUNDLES` table).
 
 ## How it works
 
@@ -548,8 +555,8 @@ in the same roles as round 3 (its main network saw none); keep this notice and
 > 2014; https://cocodataset.org; annotations CC BY 4.0, used to select the images), originally
 > from Flickr under CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/) or "no known
 > copyright restrictions" (https://flickr.com/commons/usage/): 6,329 photos without documents;
-> 3,921 trained the refiner (corner crops; round 3, and round 4's refiner fine-tuned from it),
-> 1,637 fitted the presence decision and 771 were used for validation. Changes: cropped (corner
+> 3,921 trained the round-3 and round-4 refiners (corner crops), 1,637 fitted the round-3 and
+> round-4 presence decisions and 771 were used for validation. Changes: cropped (corner
 > crops), resized, rotated and augmented. `docquadnet4/coco-credits.csv` lists each image's COCO
 > id, role, license, Flickr photo page (https://flic.kr/p/…) and, for the 6,223 CC BY 2.0
 > photos, the author and title as Flickr shows them today (oEmbed, fetched November 2026): 5,150
@@ -570,6 +577,9 @@ own notice in `apps/demo/models/LICENSE.md`.
 pnpm --filter @scanoficus/detector-nn test            # CPU parity, preprocessing, refinement, hybrid
 pnpm build && pnpm check:nn                           # WebGL2 parity and robustness in headless Chrome
 pnpm check:nn:swiftshader                             # the same on SwiftShader (as on CI)
+# check:nn logs Chrome to node_modules/.cache/check-nn/; after a browser or page crash it prints
+# the log's end, relaunches and runs that check once more ("retried after a … crash");
+# CHECK_NN_CRASH=disposeCheck (or contextLoss:page) crashes it once on purpose to test this
 pnpm bench:nn                                         # also cold start and warm timings
 # regenerate models/ and the fixtures (needs the scanoficus-ml checkout and its virtualenv):
 PY="env PYTHONDONTWRITEBYTECODE=1 $HOME/src/scanoficus-ml/.venv/bin/python"

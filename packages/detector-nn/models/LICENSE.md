@@ -48,8 +48,8 @@ roles as round 3; round 4 added only synthetic scenes from the sources below). T
 > 2014; https://cocodataset.org; annotations CC BY 4.0, used to select the images), originally
 > from Flickr under CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/) or "no known
 > copyright restrictions" (https://flickr.com/commons/usage/): 6,329 photos without documents;
-> 3,921 trained the refiner (corner crops; round 3, and round 4's refiner fine-tuned from it),
-> 1,637 fitted the presence decision and 771 were used for validation. Changes: cropped (corner
+> 3,921 trained the round-3 and round-4 refiners (corner crops), 1,637 fitted the round-3 and
+> round-4 presence decisions and 771 were used for validation. Changes: cropped (corner
 > crops), resized, rotated and augmented. `docquadnet4/coco-credits.csv` lists each image's COCO id,
 > role, license, Flickr photo page (https://flic.kr/p/…) and, for the 6,223 CC BY 2.0 photos,
 > the author and title as Flickr shows them today (oEmbed, fetched November 2026): 5,150 found,

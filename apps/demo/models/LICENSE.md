@@ -10,7 +10,7 @@ unchanged from the scanoficus-ml exports):
 - `docquadnet3/`: round 3, the round-2 main network (the files in `docquadnet2/`), the corner
   refiner with corner scores `docquadnet3-refiner.*` (`export/docquadnet3-refiner/`, run
   `r3-rf3-conf`), `decision.json` (`export/docquadnet3/`, plus the weights' hashes) and
-  `coco-credits.csv` (the COCO images below).
+  `coco-credits.csv` (the COCO images below, as used in round 3).
 
 The weights were trained by us from scratch (no pretrained weights) and are released under the
 BSD 3-Clause License (`../../../LICENSE`), Copyright (c) 2026, Julian Rath.
@@ -33,16 +33,19 @@ the weights:
 > Note (Mendeley Data): the dataset's license does not cover content shown in the photos, which
 > can belong to third parties.
 
-Round 3 (`docquadnet3/`: its refiner and decision) also used COCO photos. This notice and
-`docquadnet3/coco-credits.csv` must be kept with those files:
+Round 3 (`docquadnet3/`: its refiner and decision) also used COCO photos. This notice and the
+image list must be kept with those files. The list is `docquadnet3/coco-credits.csv` in the
+repository; the built demo does not emit that file but links round 4's list (the same images in
+the same roles: `@scanoficus/detector-nn`'s `models/docquadnet4/coco-credits.csv`, the footer's
+"list of images" link):
 
 > Images from COCO train2017 (Lin et al., "Microsoft COCO: Common Objects in Context", ECCV
 > 2014; https://cocodataset.org; annotations CC BY 4.0, used to select the images), originally
 > from Flickr under CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/) or "no known
 > copyright restrictions" (https://flickr.com/commons/usage/): 6,329 photos without documents;
-> 3,921 trained the refiner (corner crops; round 3, and round 4's refiner fine-tuned from it),
-> 1,637 fitted the presence decision and 771 were used for validation. Changes: cropped (corner
-> crops), resized, rotated and augmented. `docquadnet3/coco-credits.csv` lists each image's COCO id,
+> 3,921 trained the round-3 refiner (corner crops), 1,637 fitted the round-3 presence decision
+> and 771 were used for validation. Changes: cropped (corner crops), resized, rotated and
+> augmented. The image list (`coco-credits.csv`) gives each image's COCO id,
 > role, license, Flickr photo page (https://flic.kr/p/…) and, for the 6,223 CC BY 2.0 photos,
 > the author and title as Flickr shows them today (oEmbed, fetched November 2026): 5,150 found,
 > 1,073 no longer on Flickr (author and title unknown; the COCO source URL is listed). 106
