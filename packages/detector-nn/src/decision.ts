@@ -21,6 +21,12 @@ export interface DecisionSpec {
   bias: number;
   /** Score threshold (the score is a logit; the document probability is its sigmoid). */
   threshold: number;
+  /**
+   * SHA-256 of the main network's and the refiner's weights the decision was fitted with
+   * (added by `scripts/package_model.py`); `loadBundle` rejects other weights.
+   */
+  mainSha256: string;
+  refinerSha256: string;
 }
 
 /** A loaded decision. */
@@ -30,24 +36,39 @@ export interface Decision {
   threshold: number;
   /** Presence rule returning `sigmoid(score)` (0 if the refiner did not run). */
   rule: PresenceRule;
-  /** The linear score and its features for one frame, or null without refiner outputs. */
+  /**
+   * The linear score of one frame (with {@link FLOAT16_SCORE_OFFSET} if it ran on float16
+   * activations) and its features, or null without refiner outputs.
+   */
   score(signals: PresenceSignals): { score: number; features: Record<string, number> } | null;
+  /** The linear score of given feature values (`z` unclipped; the decision clips it). */
+  scoreFeatures(features: Record<string, number>): number;
 }
 
 const sigmoid = (x: number) => 1 / (1 + Math.exp(-x));
 
 /**
+ * Added to the decision score when the frame ran on WebGL2 with float16 activations. Measured in
+ * `pnpm check:nn` (Apple M5 Pro, ANGLE Metal) on the 21 round-3 scenes: float16 − float32 score
+ * mean −0.14, standard deviation 0.22 (clear pages −0.06 ± 0.10, faint near-threshold pages
+ * −0.23 ± 0.27). The offset removes the mean; the spread remains, so float16 decisions within
+ * about ±0.7 of the threshold can still differ from float32 (2–4 % of the validation frames
+ * lie within 0.3–0.66 of it).
+ */
+export const FLOAT16_SCORE_OFFSET = 0.14;
+
+/**
  * The features `verify.features` defines and the decision can use; each needs only the main
  * network and the refiner's corner logits (no image work):
  * - `z`: presence logit as Python computes it, `log(p / (1 − p))` of the float32 sigmoid `p`
- *   (clamped to [1e-7, 1 − 1e-7]), then clipped to [−12, 12] by the decision;
+ *   (clamped to [1e-7, 1 − 1e-7]); the score clips it to [−12, 12];
  * - `cl_min` / `cl_mean`: min / mean of the last pass's corner logits;
  * - `cl1_min`: min of the first pass's corner logits.
  */
 const FEATURES: Record<string, (s: PresenceSignals) => number | null> = {
   z: (s) => {
     const p = Math.min(Math.max(Math.fround(sigmoid(s.logit)), 1e-7), 1 - 1e-7);
-    return Math.min(Math.max(Math.log(p / (1 - p)), -12), 12);
+    return Math.log(p / (1 - p));
   },
   cl_min: (s) => {
     const l = s.refiner?.at(-1)?.cornerLogits;
@@ -82,21 +103,30 @@ export function createDecision(spec: DecisionSpec): Decision {
         `(supported: ${DECISION_FEATURES.join(', ')})`,
     );
   }
-  const score = (signals: PresenceSignals) => {
-    const values: Record<string, number> = {};
+  /** As `OwnPipeline3.detect`: `bias + Σ w·f`, with `z` clipped to [−12, 12]. */
+  const scoreFeatures = (values: Record<string, number>) => {
     let sum = 0;
     for (let k = 0; k < features.length; k++) {
-      const value = FEATURES[features[k]](signals);
-      if (value === null) return null;
-      values[features[k]] = value;
-      sum += weights[k] * value;
+      const v = values[features[k]];
+      sum += weights[k] * (features[k] === 'z' ? Math.min(Math.max(v, -12), 12) : v);
     }
-    return { score: bias + sum, features: values };
+    return bias + sum;
+  };
+  const score = (signals: PresenceSignals) => {
+    const values: Record<string, number> = {};
+    for (const name of features) {
+      const value = FEATURES[name](signals);
+      if (value === null) return null;
+      values[name] = value;
+    }
+    const offset = signals.precision === 'float16' ? FLOAT16_SCORE_OFFSET : 0;
+    return { score: scoreFeatures(values) + offset, features: values };
   };
   return {
     spec,
     threshold: sigmoid(threshold),
     score,
+    scoreFeatures,
     rule: (signals) => {
       const result = score(signals);
       return result ? sigmoid(result.score) : 0;

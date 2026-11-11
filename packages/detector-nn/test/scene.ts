@@ -12,6 +12,10 @@ export interface SceneCase {
   page: Corners | 'noise' | null;
   text: Corners | null;
   seed: number;
+  /** `'white'`: a light table (white-on-white). Default: a dark table. */
+  style?: 'default' | 'white';
+  /** Blend 0–4096 of the scene into the same scene without a page (integer, as Python). */
+  blend?: number | null;
 }
 
 function hash32(x: number, y: number, c: number, seed: number): number {
@@ -44,7 +48,19 @@ export function renderScene(scene: SceneCase): {
   height: number;
   data: Uint8ClampedArray;
 } {
+  if (scene.blend !== undefined && scene.blend !== null) {
+    const a = scene.blend;
+    const withPage = renderScene({ ...scene, blend: null });
+    const empty = renderScene({ ...scene, page: null, text: null, blend: null });
+    const data = new Uint8ClampedArray(withPage.data.length);
+    for (let i = 0; i < data.length; i++) {
+      data[i] =
+        (i & 3) === 3 ? 255 : (a * withPage.data[i] + (4096 - a) * empty.data[i] + 2048) >> 12;
+    }
+    return { width: scene.width, height: scene.height, data };
+  }
   const { width, height, page, text, seed } = scene;
+  const white = scene.style === 'white';
   const data = new Uint8ClampedArray(width * height * 4);
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
@@ -63,7 +79,9 @@ export function renderScene(scene: SceneCase): {
         if (page === 'noise') v = h & 255;
         else if (ink) v = 60 + (h & 15);
         else if (onPage) v = 225 - 5 * c - (h & 15);
-        else v = 50 + 15 * c + Math.floor(((x + 2 * y) * 60) / (width + 2 * height)) + (h & 15);
+        else if (white) {
+          v = 200 - 5 * c + Math.floor(((x + 2 * y) * 20) / (width + 2 * height)) + (h & 15);
+        } else v = 50 + 15 * c + Math.floor(((x + 2 * y) * 60) / (width + 2 * height)) + (h & 15);
         data[p + c] = v;
       }
       data[p + 3] = 255;

@@ -37,6 +37,7 @@ export {
   DECISION_FEATURES,
   type Decision,
   type DecisionSpec,
+  FLOAT16_SCORE_OFFSET,
 } from './decision.ts';
 export { decodeHeads, fitQuadToFrame, type NnOutput } from './decode.ts';
 export {

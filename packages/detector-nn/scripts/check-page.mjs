@@ -532,6 +532,9 @@ export async function round3Parity({ precision }) {
     });
     captured = null;
     const detection = await detector.detect(image);
+    r.value = captured?.score ?? null;
+    r.margin = c.numpy.margin;
+    r.faint = Math.abs(c.numpy.margin) < 4;
     r.score = captured ? Math.abs(captured.score - c.numpy.score) : null;
     r.scoreOnnx = captured ? Math.abs(captured.score - c.onnx.score) : null;
     r.accept = !!detection;

@@ -68,8 +68,16 @@ def inside(px: np.ndarray, py: np.ndarray, quad) -> np.ndarray:
     return ok
 
 
-def scene(width: int, height: int, page, text, seed: int) -> np.ndarray:
-    """RGB uint8 (height, width, 3); `test/scene.ts` must produce the same bytes."""
+def scene(width: int, height: int, page, text, seed: int, style: str = "default", blend: int | None = None) -> np.ndarray:
+    """RGB uint8 (height, width, 3); `test/scene.ts` must produce the same bytes.
+
+    `style="white"`: a light table (white-on-white, low contrast). `blend=a` (0–4096): the page
+    scene blended into the same scene without a page, `(a·page + (4096 − a)·empty + 2048) >> 12`
+    (integer arithmetic), for scores near the presence threshold."""
+    if blend is not None:
+        with_page = scene(width, height, page, text, seed, style).astype(np.int64)
+        empty = scene(width, height, None, None, seed, style).astype(np.int64)
+        return ((blend * with_page + (4096 - blend) * empty + 2048) >> 12).astype(np.uint8)
     y, x = np.mgrid[0:height, 0:width].astype(np.int64)
     img = np.zeros((height, width, 3), np.int64)
     px, py = 2 * x + 1, 2 * y + 1
@@ -78,7 +86,10 @@ def scene(width: int, height: int, page, text, seed: int) -> np.ndarray:
         if page == "noise":
             img[..., c] = h & 255
             continue
-        v = 50 + 15 * c + ((x + 2 * y) * 60) // (width + 2 * height) + (h & 15)
+        if style == "white":
+            v = 200 - 5 * c + ((x + 2 * y) * 20) // (width + 2 * height) + (h & 15)
+        else:
+            v = 50 + 15 * c + ((x + 2 * y) * 60) // (width + 2 * height) + (h & 15)
         if page is not None:
             on_page = inside(px, py, page)
             v = np.where(on_page, 225 - 5 * c - (h & 15), v)
