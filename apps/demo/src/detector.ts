@@ -1,4 +1,4 @@
-import type { DetectOptions } from '@scanoficus/core/detect';
+import type { Detection, DetectOptions } from '@scanoficus/core/detect';
 import {
   createDetectorWorker,
   type DetectorFrame,
@@ -12,13 +12,14 @@ import {
  * not download it.
  */
 
-export type DetectorChoice = 'classic' | 'nn' | 'nn-refine' | 'hybrid';
+export type DetectorChoice = 'classic' | 'nn' | 'nn-refine' | 'hybrid' | 'nn2-refiner';
 
 export const DETECTOR_LABELS: Record<DetectorChoice, string> = {
   classic: 'Classic',
   nn: 'Neural network',
   'nn-refine': 'Neural + refine',
   hybrid: 'Hybrid',
+  'nn2-refiner': 'Neural v2 + refiner',
 };
 
 const STORAGE_KEY = 'scanoficus-detector';
@@ -82,6 +83,10 @@ export interface DetectorStatus {
   coldStartMs: number | null;
   /** Median detect time over the last 60 frames, in ms. */
   p50Ms: number | null;
+  /** Time of the last still detection (full-resolution still with the corner refiner), in ms. */
+  stillMs: number | null;
+  /** Size of that still. */
+  stillSize: string | null;
   /** Why the network is not used (fallback to Classic), if it is not. */
   error: string | null;
   /** Transient trouble that did not end the network: context losses, failed frames. */
@@ -109,6 +114,8 @@ export function createDemoDetector(choice: DetectorChoice): DocumentDetector {
     running: choice === 'classic' ? 'Classic · worker' : `${DETECTOR_LABELS[choice]} · loading…`,
     coldStartMs: null,
     p50Ms: null,
+    stillMs: null,
+    stillSize: null,
     error: null,
     notice: null,
   };
@@ -120,7 +127,8 @@ export function createDemoDetector(choice: DetectorChoice): DocumentDetector {
   };
   const times: number[] = [];
   let disposed = false;
-  let detector: DocumentDetector | null = null;
+  let detector: (DocumentDetector & { detectStill?: DocumentDetector['detectStill'] }) | null =
+    null;
 
   const fallback = (reason: string): DocumentDetector => {
     status.error = reason;
@@ -141,9 +149,16 @@ export function createDemoDetector(choice: DetectorChoice): DocumentDetector {
     }
     // The model files come with the package (`models/`); Vite emits them as content-hashed
     // assets, so the service worker's cache-first strategy can never serve a stale pair.
+    // Round 2 (with the corner refiner on stills; threshold 0.98 from the bundle) is a
+    // separate entry, so its files are only fetched when this choice is used.
+    const v2 =
+      choice === 'nn2-refiner'
+        ? (await import('@scanoficus/detector-nn/docquadnet2')).DOCQUADNET2
+        : undefined;
     const options = {
       refine: choice === 'nn-refine',
       backend: 'webgl2' as const, // never the slow CPU path in a live loop
+      ...(v2 ? { bundle: v2, refiner: { live: false, still: true } } : {}),
     };
     let network: DocumentDetector | null = null;
     let workerError = '';
@@ -193,7 +208,27 @@ export function createDemoDetector(choice: DetectorChoice): DocumentDetector {
   });
   publish();
 
+  /** Full-resolution still detection (round 2 with refiner; others use the downscaled path). */
+  const detectStill = async (
+    still: DetectorFrame,
+    options?: DetectOptions,
+  ): Promise<Detection | null> => {
+    const d = detector ?? (await building);
+    if (disposed || !d.detectStill) {
+      if ('close' in still) still.close();
+      throw new Error('No still detection: the controller uses the downscaled frame');
+    }
+    const t = performance.now();
+    const size = `${still.width}×${still.height}`;
+    const result = await d.detectStill(still, options);
+    status.stillMs = performance.now() - t;
+    status.stillSize = size;
+    publish();
+    return result;
+  };
+
   return {
+    ...(choice === 'nn2-refiner' ? { detectStill } : {}),
     async detect(frame: DetectorFrame, options?: DetectOptions) {
       const d = detector ?? (await building);
       if (disposed) throw new Error('Detector disposed');

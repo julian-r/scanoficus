@@ -275,7 +275,7 @@ async function checkDemo(label, url) {
   );
 }
 
-const CHOICES = ['classic', 'nn', 'nn-refine', 'hybrid'];
+const CHOICES = ['classic', 'nn', 'nn-refine', 'hybrid', 'nn2-refiner'];
 
 /** Live scanner and photo import with every detector choice find the synthetic page. */
 async function checkDetectorChoices(label, url) {
@@ -391,17 +391,23 @@ async function checkDetectorChoices(label, url) {
                 Math.min(...page.map(([x, y]) => Math.hypot(p.x - x, p.y - y))),
               ),
             ) / 800;
-          return { error };
+          return { error, status: window.scanoficusDetector };
         },
         SCENE.page,
         { timeout: 40000 },
       )
       .then((h) => h.jsonValue())
       .catch((e) => ({ failed: String(e).split('\n')[0] }));
+    // Round 2 re-detects the full-resolution still with the corner refiner (detectStill).
+    const usedStill = photo.status?.stillSize === '640×480';
     check(
       `${label}: photo import with "${choice}" finds the page`,
-      !photo.failed && photo.error < 0.02,
-      photo.failed ?? `corner error ${(photo.error * 100).toFixed(2)} % of the diagonal`,
+      !photo.failed && photo.error < 0.02 && usedStill === (choice === 'nn2-refiner'),
+      photo.failed ??
+        `corner error ${(photo.error * 100).toFixed(2)} % of the diagonal` +
+          (usedStill
+            ? `; detectStill on the 640×480 still in ${Math.round(photo.status.stillMs)} ms`
+            : ''),
     );
     if (errors.length) check(`${label}: no page errors ("${choice}")`, false, errors.join(' | '));
     await page.close();

@@ -66,14 +66,23 @@ try {
     if (!existsSync(join(dir, 'LICENSE'))) throw new Error(`${name}: LICENSE missing`);
   }
   const nnDir = join(tmp, 'node_modules/@scanoficus/detector-nn');
-  const graph = JSON.parse(readFileSync(join(nnDir, 'models/docquadnet.json'), 'utf8'));
-  for (const file of [graph.weights.file, 'LICENSE.md']) {
-    if (!existsSync(join(nnDir, 'models', file)))
-      throw new Error(`detector-nn: models/${file} missing`);
+  const shipped = ['LICENSE.md'];
+  for (const [bundle, graphs] of [
+    ['docquadnet', ['docquadnet']],
+    ['docquadnet2', ['docquadnet2', 'docquadnet2-refiner']],
+  ]) {
+    for (const name of graphs) {
+      const graph = JSON.parse(readFileSync(join(nnDir, `models/${bundle}/${name}.json`), 'utf8'));
+      shipped.push(`${bundle}/${name}.json`, `${bundle}/${graph.weights.file}`);
+    }
+    shipped.push(`${bundle}/bundle.json`);
   }
-  console.log(
-    `LICENSE in every package; detector-nn ships models/${graph.weights.file} and LICENSE.md`,
-  );
+  for (const file of shipped) {
+    if (!existsSync(join(nnDir, 'models', file))) {
+      throw new Error(`detector-nn: models/${file} missing`);
+    }
+  }
+  console.log(`LICENSE in every package; detector-nn ships models/{${shipped.join(', ')}}`);
 
   const core = JSON.parse(
     readFileSync(join(tmp, 'node_modules/@scanoficus/core/package.json'), 'utf8'),
@@ -86,6 +95,7 @@ try {
     '@scanoficus/elements/define',
     '@scanoficus/react',
     '@scanoficus/detector-nn',
+    '@scanoficus/detector-nn/docquadnet2',
   ];
   // Runtime: every entry imports in Node (SSR safety) and exposes exports.
   writeFileSync(
@@ -169,9 +179,17 @@ detector.detect(ctx.getImageData(0, 0, 384, 288)).then(
 );
 // The neural detector with its default model URLs (the files shipped in the package).
 import { createNnDetector } from '@scanoficus/detector-nn';
+// Round 2 + refiner from its subpath (its own model files); the rule accepts any frame.
+import { DOCQUADNET2 } from '@scanoficus/detector-nn/docquadnet2';
 const nn = createNnDetector({ backend: 'webgl2' });
-nn.infer(ctx.getImageData(0, 0, 384, 288)).then(
-  (out) => { window.nnResult = { presence: out.presence, backend: nn.backend }; },
+const nn2 = createNnDetector({ backend: 'webgl2', bundle: DOCQUADNET2, presence: () => 1 });
+Promise.all([
+  nn.infer(ctx.getImageData(0, 0, 384, 288)),
+  nn2.detectStill(ctx.getImageData(0, 0, 384, 288)),
+]).then(
+  ([out, still]) => {
+    window.nnResult = { presence: out.presence, backend: nn.backend, refined: !!still, backend2: nn2.backend };
+  },
   (error) => { window.nnResult = { error: String(error) }; },
 );
 `,
@@ -192,11 +210,17 @@ nn.infer(ctx.getImageData(0, 0, 384, 288)).then(
     await page.close();
     if (!result.detection) throw new Error(`${label}: worker detection failed: ${result.error}`);
     console.log(`vite ${label} (installed package): default worker detects a document`);
-    if (nn.backend !== 'webgl2' || !(nn.presence >= 0 && nn.presence <= 1)) {
+    if (
+      nn.backend !== 'webgl2' ||
+      nn.backend2 !== 'webgl2' ||
+      !nn.refined ||
+      !(nn.presence >= 0 && nn.presence <= 1)
+    ) {
       throw new Error(`${label}: neural detector with default model URLs failed: ${nn.error}`);
     }
     console.log(
-      `vite ${label} (installed package): neural detector loads its packaged model ` +
+      `vite ${label} (installed package): neural detectors load their packaged models ` +
+        '(round 1; round 2 + refiner on a still) ' +
         `(presence ${nn.presence.toFixed(3)})`,
     );
   };
