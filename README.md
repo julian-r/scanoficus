@@ -166,7 +166,7 @@ min+gzip, as measured by `pnpm size` (budget: 40 KB for core):
 | `@scanoficus/core/warp` · `/filters` · `/camera` · `/pdf`        | 3.0 · 2.2 · 2.6 · 1.7 KB |
 | `@scanoficus/elements/define` (including core)                   |                  30.5 KB |
 | `@scanoficus/react` (own code, without elements, core and React) |                   1.4 KB |
-| `@scanoficus/detector-nn` (optional; own code, without weights)  |                  10.5 KB |
+| `@scanoficus/detector-nn` (optional; own code, without weights)  |                  12.7 KB |
 
 ## Detector quality (synthetic benchmark)
 
@@ -240,11 +240,9 @@ import { createNnDetectorWorker } from '@scanoficus/detector-nn';
 
 const scanner = new ScannerController({
   createDetector: () =>
-    createNnDetectorWorker({
-      graphUrl: '/models/docquadnet/docquadnet.json',
-      weightsUrl: '/models/docquadnet/docquadnet.bin',
-      refine: true, // network first, then classic edge refinement near the predicted quad
-    }),
+    // The model files ship in the package; bundlers emit them as content-hashed assets.
+    createNnDetectorWorker({ refine: true }), // network first, then edge refinement near its quad
+  detection: { maxSide: 768 }, // refinement profits from larger frames than the default 384
 });
 ```
 
@@ -253,13 +251,15 @@ const scanner = new ScannerController({
   backgrounds and pages that leave the frame. On clean scenes the classic detector is still
   more precise; `createHybridDetector` uses the network only when the classic score is below
   `CONFIDENT_SCORE`.
-- **Size.** The package is 10.5 KB min+gzip. The fp16 weights (608 kB brotli) are fetched
-  from URLs that you host; they are not part of the bundle. The demo ships them in
-  `apps/demo/public/models/docquadnet/`.
-- **Speed.** A 1280×720 frame takes 5.6 ms (median) on an M5 Pro in headless Chrome, and the
-  cold start is about 40–60 ms. The CPU fallback takes about 160 ms per frame.
-- **Parity.** On the same input, the outputs match the NumPy reference within 2·10⁻⁶ (CPU)
-  and 5·10⁻⁶ (WebGL2). End to end with GPU preprocessing, they match within 2·10⁻⁴.
+- **Size.** The package is 12.7 KB min+gzip. The fp16 weights (688 kB, 608 kB brotli) ship
+  in its `models/` folder with their license and attribution and are fetched at runtime; the
+  graph names the weights' SHA-256, so mismatched files are rejected.
+- **Speed.** A 1280×720 frame takes 2–6 ms (median, depending on machine load) on an M5 Pro in
+  headless Chrome, and the cold start is about 35–60 ms. The CPU fallback takes 100–160 ms
+  per frame. Phones are not measured yet.
+- **Parity.** On the same input, the outputs match the NumPy reference within 5·10⁻⁶ (CPU and
+  WebGL2 with float32 activations). End to end with GPU preprocessing, the corners match within
+  2·10⁻⁵ (float32) and 7·10⁻⁴ (float16 activations).
 - **License.** The weights are BSD-3. They require the SmartDoc CC BY 4.0 attribution; see the
   package README.
 
@@ -271,8 +271,8 @@ const scanner = new ScannerController({
   leaving the frame; see [docs/benchmarks.md](docs/benchmarks.md).
 - OCR adapters, lazy-loaded: `@scanoficus/ocr-tesseract`, then PaddleOCR via
   `@scanoficus/ocr-onnx`, plus searchable PDFs with an invisible text layer.
-- The neural detector (`@scanoficus/detector-nn`, available): phone measurements, a demo
-  toggle, and fusing depthwise and pointwise passes to cut the per-draw cost.
+- The neural detector (`@scanoficus/detector-nn`, available): phone measurements, and fusing
+  depthwise and pointwise passes to cut the per-draw cost.
 - A camera picker (switching between rear lenses) and page persistence (IndexedDB).
 
 ## Development

@@ -8,10 +8,13 @@ this graph, with a plain TypeScript CPU fallback. It plugs into the scanner as a
 - The network predicts 4 corners (also outside the frame) and a document-presence probability.
   It handles cluttered backgrounds, white-on-white, hand-held and partly visible pages, where the
   classic edge detector fails (see "Quality" below).
-- The JavaScript is 10.5 KB min+gzip without the weights. The weights (fp16, 688 kB raw,
-  608 kB brotli) are fetched at runtime from URLs that you host.
-- It runs on the main thread and in a Web Worker (`OffscreenCanvas`). It survives WebGL
-  context loss and frees all GPU resources on `dispose()`.
+- The JavaScript is 12.7 KB min+gzip without the weights. The weights (fp16, 688 kB raw,
+  608 kB brotli) ship in the package (`models/`) and are fetched at runtime; bundlers emit
+  them as content-hashed assets. The graph names its weights file, length and SHA-256, so a
+  graph and weights from different versions never run together.
+- It runs on the main thread and in a Web Worker (`OffscreenCanvas`). A self-test after
+  initialization catches a broken GPU path (the `'auto'` backend then uses the CPU). It survives
+  WebGL context loss and frees all GPU resources on `dispose()`.
 - Optional hybrids: run the network first, then classic edge refinement near the predicted
   quad; or run the classic detector first and use the network only when the classic detector
   is unsure.
@@ -26,11 +29,12 @@ const scanner = new ScannerController({
   // Owned by the controller: if the worker fails, the controller falls back to the classic
   // main-thread detector.
   createDetector: () =>
-    createNnDetectorWorker({
-      graphUrl: '/models/docquadnet/docquadnet.json',
-      weightsUrl: '/models/docquadnet/docquadnet.bin',
-      refine: true, // network first, then classic edge refinement
-    }),
+    // The model files shipped in the package are used by default.
+    createNnDetectorWorker({ refine: true }), // network first, then classic edge refinement
+  // Refinement was tuned on frames downscaled to a long side of 1024 px; the controller gives
+  // detectors 384 px by default. A larger size helps refinement (and costs a larger frame copy
+  // per detection; not measured on phones).
+  detection: { maxSide: 768 },
 });
 ```
 
@@ -48,32 +52,40 @@ On the calling thread (the main thread, or your own worker):
 ```ts
 import { createNnDetector } from '@scanoficus/detector-nn';
 
-const detector = createNnDetector({ graphUrl, weightsUrl });
+const detector = createNnDetector(); // or { graphUrl } for self-hosted files
 await detector.ready(); // optional: load and compile ahead of the first frame (the cold start)
 const detection = await detector.detect(imageDataOrBitmap); // { quad, score } or null
 const raw = await detector.infer(frame); // { quad, presence, heads }, no threshold, no refinement
-detector.backend;
-detector.precision; // 'webgl2' | 'cpu', 'float32' | 'float16' | null
+detector.backend; // 'webgl2' | 'cpu' (the backend that answered the last frame)
+detector.precision; // 'float32' | 'float16' | null
+detector.glError; // why WebGL2 is not used, with backend 'auto'
 detector.dispose();
 ```
 
 `detect()` returns the quad (TL, TR, BR, BL) in the frame's pixels. `score` is the presence
 probability. The result is `null` when the presence is not above the threshold. The
-`DetectOptions` of the classic detector are ignored. Like every `DocumentDetector`, the
-detector consumes (closes) `ImageBitmap` frames and leaves RGBA frames unchanged. Frames must
-be at least 192×192 pixels.
+`DetectOptions` of the classic detector are ignored. Corners outside the frame are clamped onto
+its border, and a non-convex or degenerate quad gives `null` (`clipToFrame: false` keeps the raw
+quad; `infer()` always does). Like every `DocumentDetector`, the detector consumes (closes)
+`ImageBitmap` frames and leaves RGBA frames unchanged. Frames of any size work: a side shorter
+than 192 px (a 384×173 frame from a 20:9 stream) is upscaled as `cv2.resize(INTER_AREA)` does.
+
+The package needs `@scanoficus/core` with the classic detector v3 (colour edges from RGBA input,
+`CONFIDENT_SCORE` 0.80); the peer dependency range is open (`>=0.0.0`) while all packages are
+0.0.x.
 
 ### Options (`createNnDetector`, `createNnDetectorWorker`)
 
-| option                                               | default      | meaning                                                                                                                                                                                                                      |
-| ---------------------------------------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `graphUrl`, `weightsUrl`                             | –            | where to fetch `docquadnet.json` and `docquadnet.bin` (relative URLs resolve against the page). `createNnDetector` also accepts `model` (from `loadModel`).                                                                  |
-| `threshold`                                          | `0.85`       | presence threshold, chosen on validation. On 785 real photos without a document, 8.8 % pass at 0.85, 7.1 % at 0.9 and 4.6 % at 0.95.                                                                                         |
-| `backend`                                            | `'auto'`     | `'auto'`: WebGL2, with the CPU when WebGL2 or float render targets are missing, when a run fails, and for frames during a context loss. `'webgl2'`: no fallback (errors reject). `'cpu'`: CPU only.                          |
-| `precision`                                          | `'auto'`     | storage of WebGL2 activations: `'float32'` if renderable (`EXT_color_buffer_float`), else `'float16'`. Arithmetic is always float32.                                                                                         |
-| `refine`                                             | `false`      | `true` or `RefineOptions`: network first, then classic edge refinement near the quad.                                                                                                                                        |
-| `canvas`                                             | new canvas   | canvas for the WebGL2 context (`createNnDetector` only).                                                                                                                                                                     |
-| `workerUrl`, `worker`, `timeoutMs`, `transferPixels` | see the core | as in `createDetectorWorker` from `@scanoficus/core/worker`. The default worker URL is `new URL('./worker-entry.js', import.meta.url)`. `timeoutMs` defaults to 30 s, because the first request includes the model download. |
+| option                                               | default      | meaning                                                                                                                                                                                                                                                                            |
+| ---------------------------------------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `graphUrl`, `weightsUrl`                             | package      | the graph JSON and the weights. Default: the files in the package's `models/` (`DOCQUADNET_GRAPH_URL`, `DOCQUADNET_WEIGHTS_URL`). With only `graphUrl`, the weights file named in the graph is loaded from next to it. `createNnDetector` also accepts `model` (from `loadModel`). |
+| `threshold`                                          | `0.85`       | presence threshold, chosen on validation. On 785 real photos without a document, 8.8 % pass at 0.85, 7.1 % at 0.9 and 4.6 % at 0.95.                                                                                                                                               |
+| `backend`                                            | `'auto'`     | `'auto'`: WebGL2, with the CPU when WebGL2 or float render targets are missing, when a run fails, and for frames during a context loss. `'webgl2'`: no fallback (errors reject). `'cpu'`: CPU only.                                                                                |
+| `precision`                                          | `'auto'`     | storage of WebGL2 activations: `'float32'` if renderable (`EXT_color_buffer_float`), else `'float16'`. Arithmetic is always float32.                                                                                                                                               |
+| `refine`                                             | `false`      | `true` or `RefineOptions`: network first, then classic edge refinement near the quad.                                                                                                                                                                                              |
+| `canvas`                                             | new canvas   | canvas for the WebGL2 context (`createNnDetector` only). Default: an `OffscreenCanvas`, or a `<canvas>` where `OffscreenCanvas` has no WebGL2 (Safari 16.4–16.x).                                                                                                                  |
+| `clipToFrame`                                        | `true`       | clamp the quad to the frame; `null` for non-convex or degenerate quads.                                                                                                                                                                                                            |
+| `workerUrl`, `worker`, `timeoutMs`, `transferPixels` | see the core | as in `createDetectorWorker` from `@scanoficus/core/worker`. The default worker URL is `new URL('./worker-entry.js', import.meta.url)`. `timeoutMs` defaults to 30 s, because the first request includes the model download.                                                       |
 
 ### Hybrids
 
@@ -81,11 +93,13 @@ be at least 192×192 pixels.
   `scanoficus_ml/refine.py`. For each side of the predicted quad, the gradient across the side
   is profiled at 48 positions within ±0.8 % of the image diagonal. The window was tuned for
   DocQuadNet. A robust (Huber) line through the edge points replaces the side only if it stays
-  close to and parallel with the side. Offline, this raised the held-out SmartDoc JI from 0.950
-  to 0.973 and MIDV-2019 from 0.793 to 0.813. Gradients are computed only where the profiles
-  sample, at most at a long side of 1024 px. Cost per frame: +1.5 ms for the controller's
-  384-px frames, +14 ms for 1280×720 RGBA frames (most of it is the full-frame gray conversion
-  and downscale).
+  close to and parallel with the side. Offline, on full-resolution frames downscaled to a long
+  side of 1024 px, this raised the held-out SmartDoc JI from 0.950 to 0.973 and MIDV-2019 from
+  0.793 to 0.813. The `ScannerController` gives detectors 384-px frames by default (also for the
+  re-detection on a captured still), where the window is coarser and the gain was not
+  measured: set `detection.maxSide` to 768–1024 when you use refinement. Gradients are computed
+  only where the profiles sample. Cost per frame: +1.5 ms for 384-px frames, +11 ms for
+  1280×720 RGBA frames (most of it is the full-frame gray conversion and downscale).
 - **Classic first, network on doubt** (`createHybridDetector`):
 
   ```ts
@@ -95,7 +109,8 @@ be at least 192×192 pixels.
   createDetector: () =>
     createHybridDetector({
       classic: createDetectorWorker(),
-      nn: createNnDetectorWorker({ graphUrl, weightsUrl }),
+      nn: createNnDetectorWorker(),
+      onError: (error) => console.warn(error), // network failures; the classic answer is used
     });
   ```
 
@@ -105,17 +120,25 @@ be at least 192×192 pixels.
   right, and about 3 % of photos without a document reach it) is returned as is. Frames
   with a lower score go to the network, which then decides alone. The `score` of the result is
   the classic edge score or the network's presence probability, depending on which detector
-  answered.
+  answered. If the network fails on a frame, the classic quad answers if it reaches
+  `DEFAULT_MIN_SCORE`, else `null`, and `onError` is called.
 
 ## Hosting the weights
 
-Copy `docquadnet.json` and `docquadnet.bin` (the files are in `apps/demo/public/models/docquadnet/`
-in this repository, or in `export/docquadnet/` of the scanoficus-ml repository). Keep the
-`LICENSE.md` file next to them. Serve both files from your origin, or with CORS. Precompress
-them (the weights shrink to 608 kB with brotli or 642 kB with gzip; the graph to 1.3 kB) and
-cache them for a long time, for example with a versioned path, or by letting the PWA's service
-worker cache them. They are fetched once per detector: share one `model` from `loadModel()`
-between `createNnDetector` instances.
+By default the model comes from the package: `models/docquadnet.json` and
+`models/docquadnet-<sha256 prefix>.bin`, referenced as `new URL('../models/…', import.meta.url)`.
+Vite, webpack 5 and other bundlers that understand this pattern emit both as content-hashed
+assets, so caches (including a cache-first service worker) can keep them forever. Keep
+`models/LICENSE.md` with them (for example, link it from your app's credits).
+
+To host the files yourself, copy the three files from `models/` and pass `graphUrl` (the
+weights are loaded from the file name in the graph, relative to it) or both URLs. `loadModel`
+fetches the graph with `cache: 'no-cache'` and checks the weights' length and SHA-256 against
+the graph (with `crypto.subtle`, which exists only in secure contexts; elsewhere only the length
+is checked) and rejects a mismatched pair. Precompress the files (the weights shrink to 608 kB
+with brotli or 642 kB with gzip; the graph to 1.4 kB). They are fetched once per detector:
+share one `model` from `loadModel()` between `createNnDetector` instances. After retraining,
+regenerate `models/` with `scripts/package_model.py`.
 
 ## How it works
 
@@ -127,16 +150,25 @@ between `createNnDetector` instances.
   projection.
 - **WebGL2.** A `C×H×W` tensor is one texture of `W × H·⌈C/4⌉` texels, with 4 channels per
   texel. Each step is one full-screen draw with a fragment shader. There are 5 programs:
-  dense convolution, depthwise convolution, elementwise, 2× box halving and area resize. The
+  dense convolution, depthwise convolution, elementwise, 2× box halving and resize. The
   weights are RGBA16F textures that hold the exact stored fp16 values. Activations are float32
   (or float16) textures, reused by a static liveness plan. Only the 9 outputs are read back.
+- **Self-test.** After compiling and uploading, the runtime checks `getError()`, the
+  completeness of every framebuffer and one inference on a constant input against the outputs
+  stored in the graph (`selfTest`, from the NumPy reference). Each new frame size is checked for
+  GL errors once. Any failure throws (the `'auto'` backend then uses the CPU and reports
+  `glError`); failed shader links carry both compile logs. A failed constructor releases
+  everything it created, including the context.
 - **Preprocessing.** The whole frame is stretched to 192×192 (no letterbox). The CPU path
-  reproduces `scanoficus_ml.data.preprocess` **bit-exactly** on the test frames: 2×2 box
-  halvings while both sides are even and at least 384 px, then OpenCV's `INTER_AREA` with its
-  float32 weights and rounding. The WebGL2 path does the same halvings exactly, then a
-  single-pass area filter in float32. In that pass, 192 of 663,552 input values differ by one
-  8-bit level from Python. For refinement, `ImageBitmap` frames are drawn to the refinement
-  size by the browser (`imageSmoothingQuality: 'high'`), not by an area filter.
+  reproduces `scanoficus_ml.data.preprocess` **bit-exactly** on the 10 test frames: 2×2 box
+  halvings while both sides are even and at least 384 px, then `cv2.resize(INTER_AREA)`: area
+  weights in float32 with OpenCV's rounding when both axes shrink (half up for 2×2, half to
+  even otherwise, e.g. 4:1), and OpenCV's 11-bit fixed-point bilinear emulation when an axis
+  grows. The WebGL2 path does the halvings and the upscaling exactly (integer arithmetic in the
+  shader, the same coefficient tables) and the area filter in float32 on 8-bit levels: 263 of
+  1,105,920 input values differ by one level from Python. For refinement, `ImageBitmap` frames
+  are drawn to the refinement size by the browser (`imageSmoothingQuality: 'high'`), not by an
+  area filter.
 - **Context loss.** While the context is lost, `'auto'` answers from the CPU. After the
   browser restores the context, the next frame rebuilds the programs, weights and textures
   from the model kept in memory. `dispose()` deletes every GPU object and releases the
@@ -144,45 +176,51 @@ between `createNnDetector` instances.
 
 ## Parity and speed
 
-Checked with `pnpm --filter @scanoficus/detector-nn check:browser`. The reference is the NumPy
-interpreter `scanoficus_ml.rawgraph.run_graph`. The 6 synthetic test frames (640×480 to
-1280×720, including empty and noise frames) are generated bit-identically in Python and
-TypeScript, so the fixtures (`test/fixtures/cases.json`, 7 kB) hold only hashes and expected
-outputs. Errors are the maximum absolute difference over all 9 outputs; the presence logit is
-the largest of them.
+Checked with `pnpm check:nn` (headless Chrome; it also passes with SwiftShader, as on CI). The
+reference is the NumPy interpreter `scanoficus_ml.rawgraph.run_graph`. The 10 synthetic test
+frames (160×120 to 1280×720, including 384×173 and 173×384 from 20:9 streams, 768×192, an
+empty and a noise frame) are generated bit-identically in Python and TypeScript, so the
+fixtures (`test/fixtures/cases.json`) hold only hashes and expected outputs. Corners are
+normalized coordinates; the presence logit is checked separately (its probability changes far
+less). Two tiny random-weight graphs (`test/fixtures/synthetic/`, from
+`scripts/make_synthetic.py`) cover what DocQuadNet does not: non-square and odd sizes with
+stride 2, channel counts that are not a multiple of 4, a 2-channel input, an add that cannot
+be fused, hswish, a convolution without padding and a sigmoid node.
 
-| path                                                   | max abs error vs NumPy                                      |
-| ------------------------------------------------------ | ----------------------------------------------------------- |
-| CPU (Vitest)                                           | 1.9·10⁻⁶                                                    |
-| WebGL2 float32, network only                           | 4.3·10⁻⁶ (corners 1.8·10⁻⁷)                                 |
-| WebGL2 float32, end to end with GPU preprocessing      | 1.8·10⁻⁴ (corners 2.7·10⁻⁵, presence 8.7·10⁻⁸)              |
-| WebGL2 float16 activations                             | 1.6·10⁻² on the logit (corners 6.8·10⁻⁴, presence 2.7·10⁻⁵) |
-| detect() on main thread and in a worker, 12 frame runs | corners within 0.033 px of the reference quad               |
-| `refineQuad` vs `refine.py`                            | within 0.28 px                                              |
+| path                                                   |                     corners (max abs) |   logit (max abs) | tolerance (corners / logit) |
+| ------------------------------------------------------ | ------------------------------------: | ----------------: | --------------------------- |
+| CPU (Vitest), all 9 outputs                            |                              4.8·10⁻⁶ |          4.8·10⁻⁶ | 1e-3                        |
+| WebGL2 float32, network only                           |                              1.8·10⁻⁷ |          5.3·10⁻⁶ | 1e-5 / 1e-4                 |
+| WebGL2 float32, end to end with GPU preprocessing      |                              1.7·10⁻⁵ |          5.1·10⁻⁴ | 1e-4 / 5e-3                 |
+| WebGL2 float16 activations, end to end                 |                              6.8·10⁻⁴ |          4.2·10⁻² | 2e-3 / 1e-1                 |
+| synthetic graphs (relative): WebGL2 float32 / float16  |                   4.2·10⁻⁷ / 1.9·10⁻³ |                   | 1e-4 / 1e-2 (CPU: 1e-5)     |
+| detect() on main thread and in a worker, 20 frame runs | within 0.023 px of the reference quad | presence 2.4·10⁻⁷ |                             |
+| `refineQuad` vs `refine.py`, where refine.py converged |                        within 0.28 px |                   | 0.5 px                      |
 
 Speed in headless Chrome on an Apple M5 Pro (ANGLE Metal; `pnpm bench:nn`). A frame is
 1280×720 unless noted. "384" is a 384×216 frame, which is what the `ScannerController` gives
 detectors by default. Each warm figure is the median and 95th percentile over 100 frames
-(20 for the CPU). Cold start = model fetch from localhost and parse / shader compilation and
-weight upload / first frame:
+(20 for the CPU). Cold start = model fetch from localhost, parse and SHA-256 check / shader
+compilation, weight upload and self-test / first frame:
 
 | thread | backend | input             | cold start ms            | warm p50 / p95 ms |
 | ------ | ------- | ----------------- | ------------------------ | ----------------- |
-| main   | WebGL2  | RGBA              | 44 (10 / 20 / 13)        | 5.6 / 11.0        |
-| main   | WebGL2  | ImageBitmap       | 110 (29 / 29 / 45)       | 6.8 / 10.6        |
-| main   | WebGL2  | RGBA, float16     | 39 (8 / 20 / 12)         | 5.9 / 10.7        |
-| main   | WebGL2  | RGBA 384          | 38 (9 / 20 / 9)          | 4.6 / 9.6         |
-| main   | WebGL2  | RGBA 384 + refine | 52                       | 6.1 / 9.7         |
-| main   | WebGL2  | RGBA + refine     | 73                       | 20.1 / 29.1       |
-| main   | CPU     | RGBA              | 272 (9 / 0 / 263)        | 160 / 196         |
-| worker | WebGL2  | ImageBitmap       | 63 (to the first result) | 6.7 / 9.2         |
-| worker | WebGL2  | RGBA (copied)     | 63                       | 7.3 / 13.4        |
-| worker | WebGL2  | RGBA 384          | 91                       | 4.4 / 8.2         |
-| worker | CPU     | ImageBitmap       | 266                      | 159 / 178         |
+| main   | WebGL2  | RGBA              | 44 (13 / 23 / 8)         | 1.9 / 5.3         |
+| main   | WebGL2  | ImageBitmap       | 40 (8 / 23 / 7)          | 4.1 / 5.9         |
+| main   | WebGL2  | RGBA, float16     | 37 (7 / 22 / 7)          | 2.6 / 3.9         |
+| main   | WebGL2  | RGBA 384          | 34 (7 / 22 / 5)          | 1.9 / 2.2         |
+| main   | WebGL2  | RGBA 384 + refine | 43                       | 3.4 / 4.3         |
+| main   | WebGL2  | RGBA + refine     | 53                       | 13.4 / 15.4       |
+| main   | CPU     | RGBA              | 167 (7 / 0 / 160)        | 106 / 127         |
+| worker | WebGL2  | ImageBitmap       | 43 (to the first result) | 5.0 / 6.0         |
+| worker | WebGL2  | RGBA (copied)     | 43                       | 5.2 / 7.5         |
+| worker | WebGL2  | RGBA 384          | 42                       | 3.6 / 4.0         |
+| worker | CPU     | ImageBitmap       | 180                      | 109 / 147         |
 
-Timings vary between runs by about ±1 ms (p50) and more at p95. About 1.5 ms of each WebGL2
-frame is the synchronous read-back round trip. The remaining cost is about 0.1 ms per draw
-(36 network draws), so float16 storage hardly helps on this GPU. Phones are not measured yet.
+The machine was less loaded than for the first measurement of this package (the CPU path then
+took 160 ms per frame instead of 106 ms, WebGL2 5.6 instead of 1.9 ms), so compare rows within
+one table only. A synchronous read-back round trip is part of every WebGL2 frame; a worker adds
+the message round trip. Phones are not measured yet.
 
 ## Quality
 
@@ -204,7 +242,8 @@ hybrid uses it there.
 
 ## License of the weights
 
-The code is BSD-3-Clause. The weights (`docquadnet.json`, `docquadnet.bin`) were trained by us
+The code is BSD-3-Clause (`LICENSE`). The weights (`models/docquadnet.json`,
+`models/docquadnet-*.bin`) were trained by us
 from scratch (no pretrained weights) and are also released under BSD-3-Clause. The training
 data includes frames of the SmartDoc 2015 dataset, whose license requires attribution. Keep
 this notice with the weights:
@@ -217,7 +256,7 @@ this notice with the weights:
 
 The other training inputs need no attribution: procedural pages, CC0 textures and HDRIs from
 Poly Haven, and OFL fonts that were only rendered into images. The data manifests are in the
-scanoficus-ml repository.
+scanoficus-ml repository. `models/LICENSE.md` carries this notice next to the files.
 
 ## Development
 
@@ -225,6 +264,9 @@ scanoficus-ml repository.
 pnpm --filter @scanoficus/detector-nn test            # CPU parity, preprocessing, refinement, hybrid
 pnpm build && pnpm check:nn                           # WebGL2 parity and robustness in headless Chrome
 pnpm bench:nn                                         # also cold start and warm timings
-# regenerate the fixtures (needs the scanoficus-ml checkout and its virtualenv):
-PYTHONDONTWRITEBYTECODE=1 ~/src/scanoficus-ml/.venv/bin/python packages/detector-nn/scripts/make_fixtures.py
+# regenerate models/ and the fixtures (needs the scanoficus-ml checkout and its virtualenv):
+PY="env PYTHONDONTWRITEBYTECODE=1 $HOME/src/scanoficus-ml/.venv/bin/python"
+$PY packages/detector-nn/scripts/package_model.py
+$PY packages/detector-nn/scripts/make_fixtures.py
+$PY packages/detector-nn/scripts/make_synthetic.py
 ```
