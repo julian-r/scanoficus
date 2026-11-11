@@ -6,10 +6,13 @@ import {
   createNnDetectorWorker,
   GlRunner,
   loadModel,
+  parseModel,
   preprocessRgba,
 } from '@scanoficus/detector-nn';
 
-const MODEL = { graphUrl: '/models/docquadnet.json', weightsUrl: '/models/docquadnet.bin' };
+// The weights are resolved from the graph's `weights.file` (and checked against it). The
+// detector checks below use the package's default URLs instead.
+const MODEL = { graphUrl: '/models/docquadnet.json' };
 
 async function fixtures() {
   return (await fetch('/fixtures/cases.json')).json();
@@ -69,17 +72,18 @@ export async function parity({ precision }) {
   for (const c of meta.cases) {
     const image = await frame(c);
     const bytes = preprocessRgba(image, model.size);
-    const networkHeads = runner.runTensor(bytesToInput(bytes));
-    const network = maxAbs(networkHeads, c.heads);
-    const networkSplit = split(networkHeads, c);
-    const e2eHeads = runner.run(image);
-    const e2e = maxAbs(e2eHeads, c.heads);
-    const e2eSplit = split(e2eHeads, c);
-    const input = compareInput(runner.readInput(), bytes);
+    // GPU preprocessing first, so a failed preprocessing draw cannot reuse this frame's input.
     const bitmap = await createImageBitmap(image);
     const e2eBitmap = maxAbs(runner.run(bitmap), c.heads);
     const inputBitmap = compareInput(runner.readInput(), bytes);
     bitmap.close();
+    const e2eHeads = runner.run(image);
+    const e2e = maxAbs(e2eHeads, c.heads);
+    const e2eSplit = split(e2eHeads, c);
+    const input = compareInput(runner.readInput(), bytes);
+    const networkHeads = runner.runTensor(bytesToInput(bytes));
+    const network = maxAbs(networkHeads, c.heads);
+    const networkSplit = split(networkHeads, c);
     cases.push({
       name: c.name,
       network,
@@ -98,11 +102,16 @@ export async function parity({ precision }) {
 /** The detector API on this thread or in a worker, against the fixture quads. */
 export async function detectors({ worker, refine }) {
   const meta = await fixtures();
-  const detector = worker
-    ? createNnDetectorWorker({ ...MODEL, backend: 'webgl2', refine })
-    : createNnDetector({ ...MODEL, backend: 'webgl2', refine });
+  // Default model URLs (the files next to dist/), raw quads (no clipping) for the comparison.
+  const options = { backend: 'webgl2', refine, clipToFrame: false };
+  const detector = worker ? createNnDetectorWorker(options) : createNnDetector(options);
   const results = [];
-  for (const c of meta.cases) {
+  // With refinement, compare where refine.py converged (see test/refine.test.ts).
+  const converged = (c) =>
+    Math.max(
+      ...c.refined.map(([x, y]) => Math.min(...c.page.map(([u, v]) => Math.hypot(x - u, y - v)))),
+    ) < 1;
+  for (const c of meta.cases.filter((x) => !refine || !x.detected || converged(x))) {
     const image = await frame(c);
     // Bitmaps are consumed (transferred to the worker); RGBA frames are copied.
     for (const kind of ['rgba', 'bitmap']) {
@@ -129,9 +138,14 @@ export async function contextLoss() {
   const c = meta.cases[0];
   const image = await frame(c);
   const canvas = new OffscreenCanvas(1, 1);
-  const detector = createNnDetector({ ...MODEL, canvas });
+  const detector = createNnDetector({ ...MODEL, canvas, clipToFrame: false });
   const strictCanvas = new OffscreenCanvas(1, 1);
-  const strict = createNnDetector({ ...MODEL, canvas: strictCanvas, backend: 'webgl2' });
+  const strict = createNnDetector({
+    ...MODEL,
+    canvas: strictCanvas,
+    backend: 'webgl2',
+    clipToFrame: false,
+  });
   const before = await detector.detect(image);
   await strict.detect(image);
   const lose = (cv) => cv.getContext('webgl2').getExtension('WEBGL_lose_context');
@@ -194,20 +208,7 @@ export async function disposeCheck() {
     premultipliedAlpha: false,
     preserveDrawingBuffer: false,
   });
-  const counts = {};
-  for (const kind of ['Texture', 'Framebuffer', 'Program', 'Buffer', 'VertexArray']) {
-    const create = gl[`create${kind}`].bind(gl);
-    const remove = gl[`delete${kind}`].bind(gl);
-    counts[kind] = 0;
-    gl[`create${kind}`] = () => {
-      counts[kind]++;
-      return create();
-    };
-    gl[`delete${kind}`] = (o) => {
-      if (o) counts[kind]--;
-      return remove(o);
-    };
-  }
+  const counts = countObjects(gl);
   const detector = createNnDetector({ ...MODEL, canvas, backend: 'webgl2' });
   for (const c of meta.cases.slice(0, 3)) await detector.detect(await frame(c));
   const live = { ...counts };
@@ -217,6 +218,82 @@ export async function disposeCheck() {
     () => true,
   );
   return { live, leaked: counts, rejected };
+}
+
+/** Wraps create/delete calls of a context to count live GPU objects. */
+function countObjects(gl) {
+  const counts = {};
+  for (const kind of ['Texture', 'Framebuffer', 'Program', 'Shader', 'Buffer', 'VertexArray']) {
+    const create = gl[`create${kind}`].bind(gl);
+    const remove = gl[`delete${kind}`].bind(gl);
+    counts[kind] = 0;
+    gl[`create${kind}`] = (...args) => {
+      counts[kind]++;
+      return create(...args);
+    };
+    gl[`delete${kind}`] = (o) => {
+      if (o) counts[kind]--;
+      return remove(o);
+    };
+  }
+  return counts;
+}
+
+/**
+ * A broken GPU path (simulated by a wrong self-test reference) makes the constructor throw and
+ * release everything; the 'auto' detector then answers from the CPU and reports why.
+ */
+export async function selfTestFailure() {
+  const graph = await (await fetch(MODEL.graphUrl)).json();
+  const weights = await (await fetch(`/models/${graph.weights.file}`)).arrayBuffer();
+  graph.selfTest.heads[8] += 1;
+  const broken = parseModel(graph, weights);
+  const canvas = new OffscreenCanvas(1, 1);
+  const counts = countObjects(
+    canvas.getContext('webgl2', {
+      alpha: false,
+      antialias: false,
+      depth: false,
+      stencil: false,
+      premultipliedAlpha: false,
+      preserveDrawingBuffer: false,
+    }),
+  );
+  let error = null;
+  try {
+    new GlRunner(broken, { canvas });
+  } catch (e) {
+    error = String(e);
+  }
+  const detector = createNnDetector({ model: broken });
+  const meta = await fixtures();
+  const detection = await detector.detect(await frame(meta.cases[0]));
+  const result = {
+    error,
+    leaked: counts,
+    backend: detector.backend,
+    glError: detector.glError,
+    detected: !!detection,
+  };
+  detector.dispose();
+  return result;
+}
+
+/** The synthetic random-weight graphs (test/fixtures/synthetic) on the GPU vs NumPy. */
+export async function synthetic({ precision }) {
+  const results = [];
+  for (const name of ['odd-mix', 'two-channels']) {
+    const graph = await (await fetch(`/fixtures/synthetic/${name}.json`)).json();
+    const weights = await (await fetch(`/fixtures/synthetic/${name}.bin`)).arrayBuffer();
+    const runner = new GlRunner(parseModel(graph, weights), { precision });
+    const out = runner.runTensor(Float32Array.from(graph.test.input));
+    runner.dispose();
+    const error = Math.max(
+      ...graph.test.output.map((v, i) => Math.abs(out[i] - v) / Math.max(1, Math.abs(v))),
+    );
+    results.push({ name, error, length: out.length, expected: graph.test.output.length });
+  }
+  return results;
 }
 
 const percentile = (sorted, p) =>

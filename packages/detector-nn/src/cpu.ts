@@ -17,10 +17,10 @@ export class CpuRunner {
     );
   }
 
-  /** Runs the network on a `C×S×S` input in [0, 1] and returns the output tensor (9 values). */
+  /** Runs the network on a `C×H×W` input (CHW) and returns the output tensor (9 values). */
   run(input: Float32Array): Float32Array {
     const { model } = this;
-    const expected = model.channels * model.size * model.size;
+    const expected = model.channels * model.height * model.width;
     if (input.length !== expected) throw new RangeError(`Expected ${expected} input values`);
     const env = new Map<string, Float32Array>([[model.graph.input.name, input]]);
     const get = (name: string) => env.get(name) as Float32Array;

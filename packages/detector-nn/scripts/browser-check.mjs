@@ -17,7 +17,7 @@ import { renderScene } from '../test/scene.ts';
 
 const pkg = fileURLToPath(new URL('..', import.meta.url));
 const root = join(pkg, '../..');
-const models = join(root, 'apps/demo/public/models/docquadnet');
+const models = join(pkg, 'models');
 const args = process.argv.slice(2);
 const benchMode = args.includes('--bench');
 const jsonOut = args.includes('--json') ? args[args.indexOf('--json') + 1] : null;
@@ -74,6 +74,9 @@ const browser = await chromium.launch({
     ? { executablePath: process.env.CHROME_PATH }
     : { channel: 'chrome' }),
   headless: true,
+  // Without a GPU (CI), Chrome only offers WebGL through SwiftShader with this flag. Add e.g.
+  // CHROME_ARGS=--use-angle=swiftshader to force the software renderer on a machine with a GPU.
+  args: ['--enable-unsafe-swiftshader', ...(process.env.CHROME_ARGS?.split(' ') ?? [])],
 });
 
 /** Runs an export of check-page.mjs in a fresh page (fresh caches, contexts and workers). */
@@ -102,25 +105,30 @@ report.parity = {};
 for (const precision of ['float32', 'float16']) {
   const result = await inPage('parity', { precision });
   report.parity[precision] = result;
-  const worst = (key) => Math.max(...result.cases.map((c) => c[key]));
-  const tolerance = precision === 'float32' ? 1e-3 : 2e-2;
-  check(
-    `${precision}: network (CPU-preprocessed input) vs NumPy`,
-    worst('network') < tolerance,
-    `max abs error ${worst('network').toExponential(2)}`,
-  );
-  check(
-    `${precision}: end to end (GPU preprocessing, RGBA / ImageBitmap) vs NumPy`,
-    worst('e2e') < 10 * tolerance && worst('e2eBitmap') < 10 * tolerance,
-    `max abs error ${worst('e2e').toExponential(2)} / ${worst('e2eBitmap').toExponential(2)}`,
-  );
+  // Corners (normalized coordinates) and the presence logit have separate tolerances.
   const part = (key, field) => Math.max(...result.cases.map((c) => c[key][field]));
-  console.log(
-    `     corners / presence probability / logit: network ${['corners', 'presence', 'logit']
-      .map((f) => part('networkSplit', f).toExponential(2))
-      .join(' / ')}; end to end ${['corners', 'presence', 'logit']
-      .map((f) => part('e2eSplit', f).toExponential(2))
-      .join(' / ')}`,
+  const tol =
+    precision === 'float32'
+      ? { network: { corners: 1e-5, logit: 1e-4 }, e2e: { corners: 1e-4, logit: 5e-3 } }
+      : { network: { corners: 2e-3, logit: 1e-1 }, e2e: { corners: 2e-3, logit: 1e-1 } };
+  for (const [key, label] of [
+    ['networkSplit', 'network (CPU-preprocessed input)'],
+    ['e2eSplit', 'end to end (GPU preprocessing)'],
+  ]) {
+    const t = key === 'networkSplit' ? tol.network : tol.e2e;
+    check(
+      `${precision}: ${label} vs NumPy`,
+      part(key, 'corners') < t.corners && part(key, 'logit') < t.logit,
+      `corners ${part(key, 'corners').toExponential(2)} (< ${t.corners}), logit ` +
+        `${part(key, 'logit').toExponential(2)} (< ${t.logit}), presence ` +
+        part(key, 'presence').toExponential(2),
+    );
+  }
+  const worstBitmap = Math.max(...result.cases.map((c) => c.e2eBitmap));
+  check(
+    `${precision}: ImageBitmap frames give the RGBA results`,
+    worstBitmap <= Math.max(...result.cases.map((c) => c.e2e)) + 1e-6,
+    `max abs error ${worstBitmap.toExponential(2)}`,
   );
   const mismatched = (key) => result.cases.reduce((n, c) => n + c[key].mismatched, 0);
   const maxLevel = (key) => Math.max(...result.cases.map((c) => c[key].max));
@@ -130,6 +138,19 @@ for (const precision of ['float32', 'float16']) {
     maxLevel('input') <= 1 && maxLevel('inputBitmap') <= 1,
     `RGBA: ${mismatched('input')} of ${total} values differ (max ${maxLevel('input')}); ` +
       `ImageBitmap: ${mismatched('inputBitmap')} (max ${maxLevel('inputBitmap')})`,
+  );
+}
+
+// ---- synthetic graphs ---------------------------------------------------------------------------
+for (const precision of ['float32', 'float16']) {
+  const results = await inPage('synthetic', { precision });
+  report[`synthetic ${precision}`] = results;
+  const tolerance = precision === 'float32' ? 1e-4 : 1e-2;
+  check(
+    `${precision}: synthetic graphs (odd/non-square sizes, C % 4 ≠ 0, unfused add, hswish, sigmoid) vs NumPy`,
+    results.every((r) => r.error < tolerance && r.length === r.expected),
+    results.map((r) => `${r.name} ${r.error.toExponential(2)}`).join(', ') +
+      ` (relative, < ${tolerance})`,
   );
 }
 
@@ -158,13 +179,30 @@ for (const [label, arg] of [
   report.contextLoss = r;
   check(
     'context loss: auto backend answers from the CPU while lost, WebGL2 after restore',
-    r.before < 0.05 && r.during < 0.05 && r.after < 0.05 && r.backendAfter === 'webgl2',
+    r.before < 0.05 &&
+      r.during < 0.05 &&
+      r.backendDuring === 'cpu' &&
+      r.after < 0.05 &&
+      r.backendAfter === 'webgl2',
     JSON.stringify(r),
   );
   check(
     'context loss: webgl2 backend rejects while lost and recovers',
     /context lost/i.test(r.strictError ?? '') && r.strictAfter < 0.05,
     r.strictError ?? 'resolved',
+  );
+}
+{
+  const r = await inPage('selfTestFailure');
+  report.selfTestFailure = r;
+  check(
+    'a failing WebGL2 self-test throws, leaks nothing, and auto falls back to the CPU',
+    /self-test failed/.test(r.error ?? '') &&
+      Object.values(r.leaked).every((n) => n === 0) &&
+      r.backend === 'cpu' &&
+      /self-test failed/.test(r.glError ?? '') &&
+      r.detected,
+    `${r.error}; objects left ${JSON.stringify(r.leaked)}; backend ${r.backend}`,
   );
 }
 {

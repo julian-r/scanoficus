@@ -1,20 +1,22 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   bytesToInput,
   CpuRunner,
   createNnDetector,
   decodeHeads,
   halfToFloat,
+  loadModel,
   parseModel,
   preprocessRgba,
+  verifyWeights,
 } from '../src/index.ts';
+import { DOCQUADNET_GRAPH_URL, DOCQUADNET_WEIGHTS_URL } from '../src/model-files.ts';
 import { renderScene, type SceneCase } from './scene.ts';
 
-const modelDir = new URL('../../../apps/demo/public/models/docquadnet/', import.meta.url);
-const graphJson = readFileSync(new URL('docquadnet.json', modelDir), 'utf8');
-const weightBytes = readFileSync(new URL('docquadnet.bin', modelDir));
+const graphJson = readFileSync(DOCQUADNET_GRAPH_URL, 'utf8');
+const weightBytes = readFileSync(DOCQUADNET_WEIGHTS_URL);
 const fixtures = JSON.parse(
   readFileSync(new URL('fixtures/cases.json', import.meta.url), 'utf8'),
 ) as {
@@ -55,6 +57,8 @@ describe('model', () => {
 
   it('lowers the 44-node graph', () => {
     expect(model.graph.nodes).toHaveLength(44);
+    expect(model.graph.weights?.byteLength).toBe(weightBytes.length);
+    expect(model.graph.selfTest?.heads).toHaveLength(9);
     const convs = model.steps.filter((s) => s.kind === 'conv');
     expect(convs).toHaveLength(36); // 34 convolutions + 2 linear layers
     expect(convs.filter((s) => s.depthwise)).toHaveLength(11);
@@ -75,7 +79,9 @@ describe('model', () => {
   it('rejects unknown formats and out-of-range weights', () => {
     const graph = JSON.parse(graphJson);
     expect(() => parseModel({ ...graph, format: 'x' }, weightBytes)).toThrow(/format/);
-    expect(() => parseModel(graph, weightBytes.subarray(0, 1000))).toThrow(/reference/);
+    expect(() => parseModel(graph, weightBytes.subarray(0, 1000))).toThrow(/do not match/);
+    const { weights: _, ...unpaired } = graph;
+    expect(() => parseModel(unpaired, weightBytes.subarray(0, 1000))).toThrow(/reference/);
   });
 });
 
@@ -134,8 +140,76 @@ describe('createNnDetector (CPU backend)', () => {
     detector.dispose();
   });
 
-  it('rejects a missing model source', async () => {
-    const detector = createNnDetector({ backend: 'cpu' });
-    await expect(detector.ready()).rejects.toThrow(/graphUrl/);
+  it('retries a failed model load', async () => {
+    const fetchMock = vi.fn(async () => new Response('', { status: 503 }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const detector = createNnDetector({ backend: 'cpu', graphUrl: 'https://x.test/m.json' });
+      await expect(detector.ready()).rejects.toThrow(/HTTP 503/);
+      const calls = fetchMock.mock.calls.length;
+      await expect(detector.ready()).rejects.toThrow(/HTTP 503/);
+      expect(fetchMock.mock.calls.length).toBeGreaterThan(calls);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe('loadModel', () => {
+  const graph = JSON.parse(graphJson);
+  /** fetch stub serving the packaged files (and variants) from memory; records requests. */
+  const serve = (files: Record<string, Uint8Array | string>) => {
+    const requests: { url: string; cache?: string }[] = [];
+    vi.stubGlobal('fetch', async (url: URL | string, init?: RequestInit) => {
+      const href = String(url);
+      requests.push({ url: href, cache: init?.cache });
+      const body = files[href];
+      return body === undefined
+        ? new Response(null, { status: 404 })
+        : new Response(body as BodyInit);
+    });
+    return requests;
+  };
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('loads the packaged model by default, revalidating the graph', async () => {
+    const requests = serve({
+      [DOCQUADNET_GRAPH_URL.href]: graphJson,
+      [DOCQUADNET_WEIGHTS_URL.href]: new Uint8Array(weightBytes),
+    });
+    const loaded = await loadModel();
+    expect(loaded.steps).toHaveLength(36);
+    expect(requests.find((r) => r.url === DOCQUADNET_GRAPH_URL.href)?.cache).toBe('no-cache');
+  });
+
+  it('resolves the weights named by the graph relative to the graph URL', async () => {
+    const requests = serve({
+      'https://cdn.test/models/v2/docquadnet.json': graphJson,
+      [`https://cdn.test/models/v2/${graph.weights.file}`]: new Uint8Array(weightBytes),
+    });
+    await loadModel({ graphUrl: 'https://cdn.test/models/v2/docquadnet.json' });
+    expect(requests.map((r) => r.url)).toContain(
+      `https://cdn.test/models/v2/${graph.weights.file}`,
+    );
+  });
+
+  it('rejects weights that do not belong to the graph', async () => {
+    const tampered = new Uint8Array(weightBytes);
+    tampered[1000] ^= 1; // same length, other content
+    serve({
+      'https://cdn.test/a.json': graphJson,
+      'https://cdn.test/b.bin': tampered,
+      'https://cdn.test/short.bin': tampered.subarray(0, 2000),
+    });
+    await expect(
+      loadModel({ graphUrl: 'https://cdn.test/a.json', weightsUrl: 'https://cdn.test/b.bin' }),
+    ).rejects.toThrow(/SHA-256/);
+    await expect(
+      loadModel({
+        graphUrl: 'https://cdn.test/a.json',
+        weightsUrl: 'https://cdn.test/short.bin',
+      }),
+    ).rejects.toThrow(/2000 bytes/);
+    await expect(verifyWeights(graph, new Uint8Array(weightBytes).buffer)).resolves.toBe(undefined);
   });
 });

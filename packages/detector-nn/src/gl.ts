@@ -1,5 +1,6 @@
 import type { RgbaImage } from '@scanoficus/core/image';
 import type { NnModel, Shape, Step } from './model.ts';
+import { linearAreaTable } from './preprocess.ts';
 
 /**
  * Minimal WebGL2 inference runtime for the lowered DocQuadNet graph.
@@ -124,13 +125,33 @@ void main() {
   o = floor((floor(s * 255.0 + 0.5) + 2.0) / 4.0) / 255.0;
 }`;
 
-/** Area resize (fractional coverage) to the network input, rounded to 8-bit levels. */
+/**
+ * Resize to the network input, rounded to 8-bit levels: area (fractional coverage, round half
+ * to even) when both
+ * axes shrink, else OpenCV's bilinear emulation of INTER_AREA in its exact integer arithmetic,
+ * with the per-axis tables of `linearAreaTable` (row 0: x, row 1: y).
+ */
 const RESIZE = `${HEADER}
+precision highp isampler2D;
 uniform sampler2D u_src;
+uniform isampler2D u_tab;
 uniform ivec2 u_srcSize;
 uniform vec2 u_scale;
+uniform int u_linear;
+ivec3 px(int x, int y) {
+  return ivec3(floor(texelFetch(u_src, ivec2(x, y), 0).rgb * 255.0 + 0.5));
+}
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy);
+  if (u_linear == 1) {
+    ivec4 tx = texelFetch(u_tab, ivec2(p.x, 0), 0);
+    ivec4 ty = texelFetch(u_tab, ivec2(p.y, 1), 0);
+    ivec3 h0 = px(tx.x, ty.x) * tx.y + px(tx.w, ty.x) * tx.z;
+    ivec3 h1 = px(tx.x, ty.w) * tx.y + px(tx.w, ty.w) * tx.z;
+    ivec3 v = (((ty.y * (h0 >> 4)) >> 16) + ((ty.z * (h1 >> 4)) >> 16) + 2) >> 2;
+    o = vec4(vec3(clamp(v, 0, 255)) / 255.0, 0.0);
+    return;
+  }
   vec2 lo = vec2(p) * u_scale;
   vec2 hi = min(lo + u_scale, vec2(u_srcSize));
   ivec2 start = ivec2(floor(lo));
@@ -141,12 +162,14 @@ void main() {
     vec3 row = vec3(0.0);
     for (int x = start.x; x < end.x; x++) {
       float wx = min(float(x + 1), hi.x) - max(float(x), lo.x);
-      row += wx * texelFetch(u_src, ivec2(x, y), 0).rgb;
+      row += wx * vec3(px(x, y));
     }
     acc += wy * row;
   }
   vec2 cell = hi - lo;
-  o = vec4(floor(acc / (cell.x * cell.y) * 255.0 + 0.5) / 255.0, 0.0);
+  // Integer levels in, round half to even out: exact for integer factors (e.g. 4:1, where
+  // OpenCV's scalar path rounds the float mean half to even).
+  o = vec4(roundEven(acc / (cell.x * cell.y)) / 255.0, 0.0);
 }`;
 
 interface Target {
@@ -200,13 +223,56 @@ function renderable(gl: WebGL2RenderingContext, format: number): boolean {
 export interface GlRunnerOptions {
   /** Activation storage: `'auto'` (default) prefers float32, then float16. */
   precision?: 'auto' | GlPrecision;
-  /** Canvas to create the context on. Default: a new 1×1 `OffscreenCanvas` (or `<canvas>`). */
+  /**
+   * Canvas to create the context on. Default: a new 1×1 `OffscreenCanvas`, or a `<canvas>` where
+   * `OffscreenCanvas` has no WebGL2 (Safari 16.4–16.x) and a document exists.
+   */
   canvas?: OffscreenCanvas | HTMLCanvasElement;
 }
 
+const CONTEXT_ATTRIBUTES: WebGLContextAttributes = {
+  alpha: false,
+  antialias: false,
+  depth: false,
+  stencil: false,
+  premultipliedAlpha: false,
+  preserveDrawingBuffer: false,
+};
+
 /**
- * Runs a model with WebGL2. The constructor compiles the shaders and uploads the weights (the
- * cold start) and throws if WebGL2 or a renderable float format is missing.
+ * Creates a WebGL2 context on `canvas`, or on a new canvas: an `OffscreenCanvas` first, then a
+ * document `<canvas>` if that gives no WebGL2 context. Returns `null` without WebGL2.
+ */
+export function createGlContext(
+  canvas?: OffscreenCanvas | HTMLCanvasElement,
+): { canvas: OffscreenCanvas | HTMLCanvasElement; gl: WebGL2RenderingContext } | null {
+  const attempt = (c: OffscreenCanvas | HTMLCanvasElement) => {
+    try {
+      const gl = c.getContext('webgl2', CONTEXT_ATTRIBUTES) as WebGL2RenderingContext | null;
+      return gl ? { canvas: c, gl } : null;
+    } catch {
+      return null;
+    }
+  };
+  if (canvas) return attempt(canvas);
+  if (typeof OffscreenCanvas !== 'undefined') {
+    const found = attempt(new OffscreenCanvas(1, 1));
+    if (found) return found;
+  }
+  if (typeof document !== 'undefined') {
+    const element = document.createElement('canvas');
+    element.width = element.height = 1;
+    return attempt(element);
+  }
+  return null;
+}
+
+/**
+ * Runs a model with WebGL2. The constructor compiles the shaders, uploads the weights (the
+ * cold start) and runs a self-test: GL errors, framebuffer completeness and, if the graph has a
+ * `selfTest` record, one inference on its constant input against the stored outputs. It throws
+ * (releasing everything it created) if WebGL2 or a renderable float format is missing or the
+ * self-test fails, so callers can fall back to the CPU instead of getting wrong answers.
  *
  * Context loss: while the context is lost, {@link run} throws {@link ContextLostError}; after
  * the browser restores the context, the next run rebuilds all GPU resources from the model kept
@@ -228,6 +294,14 @@ export class GlRunner {
   private tensorTarget = new Map<string, number>();
   private frameTexture: WebGLTexture | null = null;
   private levels: Target[] = [];
+  /**
+   * Integer coefficient table of the upscaling resize and the sizes it was made for. Always
+   * bound (a 1×1 placeholder at first): an integer sampler left on the unit of `u_src` would
+   * make every resize draw fail with INVALID_OPERATION.
+   */
+  private table: { texture: WebGLTexture; key: string } | null = null;
+  /** Frame sizes whose preprocessing was checked for GL errors. */
+  private checkedSizes = new Set<string>();
   private readonly maxTextureSize: number;
   private readonly onLost = (event: Event) => {
     event.preventDefault(); // allows the browser to restore the context
@@ -237,30 +311,33 @@ export class GlRunner {
   constructor(model: NnModel, options: GlRunnerOptions = {}) {
     this.model = model;
     this.ownsCanvas = !options.canvas;
-    this.canvas = options.canvas ?? createCanvas();
-    const gl = this.canvas.getContext('webgl2', {
-      alpha: false,
-      antialias: false,
-      depth: false,
-      stencil: false,
-      premultipliedAlpha: false,
-      preserveDrawingBuffer: false,
-    }) as WebGL2RenderingContext | null;
-    if (!gl) throw new Error('WebGL2 is not available');
+    const context = createGlContext(options.canvas);
+    if (!context) throw new Error('WebGL2 is not available');
+    this.canvas = context.canvas;
+    const gl = context.gl;
     this.gl = gl;
-    const support = probeGl(gl);
-    const wanted = options.precision ?? 'auto';
-    const precision = wanted === 'auto' ? support.precisions[0] : wanted;
-    if (!precision || !support.precisions.includes(precision)) {
-      throw new Error(
-        `WebGL2 cannot render to ${wanted === 'auto' ? 'float' : wanted} textures ` +
-          '(needs EXT_color_buffer_float or EXT_color_buffer_half_float)',
-      );
+    try {
+      const support = probeGl(gl);
+      const wanted = options.precision ?? 'auto';
+      const precision = wanted === 'auto' ? support.precisions[0] : wanted;
+      if (!precision || !support.precisions.includes(precision)) {
+        throw new Error(
+          `WebGL2 cannot render to ${wanted === 'auto' ? 'float' : wanted} textures ` +
+            '(needs EXT_color_buffer_float or EXT_color_buffer_half_float)',
+        );
+      }
+      this.precision = precision;
+      this.maxTextureSize = support.maxTextureSize;
+      this.canvas.addEventListener('webglcontextlost', this.onLost as EventListener);
+      this.build();
+    } catch (error) {
+      // Leave nothing behind: GPU objects, the listener and (if ours) the context.
+      this.canvas.removeEventListener('webglcontextlost', this.onLost as EventListener);
+      if (!gl.isContextLost()) this.release();
+      if (this.ownsCanvas) gl.getExtension('WEBGL_lose_context')?.loseContext();
+      this.state = 'disposed';
+      throw error;
     }
-    this.precision = precision;
-    this.maxTextureSize = support.maxTextureSize;
-    this.canvas.addEventListener('webglcontextlost', this.onLost as EventListener);
-    this.build();
   }
 
   /** True while the context is lost (runs throw {@link ContextLostError}). */
@@ -280,32 +357,37 @@ export class GlRunner {
     return this.execute();
   }
 
-  /** Runs the network on an already preprocessed `C × S × S` input in [0, 1]. */
+  /** Runs the network on an already preprocessed `C × H × W` input (CHW). */
   runTensor(input: Float32Array): Float32Array {
     this.ensure();
-    const { size, channels } = this.model;
-    if (input.length !== channels * size * size) throw new RangeError('Bad input length');
-    const texels = new Float32Array(size * size * 4);
+    return this.runTensorUnchecked(input);
+  }
+
+  private runTensorUnchecked(input: Float32Array): Float32Array {
+    const { width, height, channels } = this.model;
+    const plane = width * height;
+    if (channels > 4) throw new RangeError('Inputs with more than 4 channels are not supported');
+    if (input.length !== channels * plane) throw new RangeError('Bad input length');
+    const texels = new Float32Array(plane * 4);
     for (let c = 0; c < channels; c++) {
-      for (let i = 0; i < size * size; i++) texels[i * 4 + c] = input[c * size * size + i];
+      for (let i = 0; i < plane; i++) texels[i * 4 + c] = input[c * plane + i];
     }
     const gl = this.gl;
     const target = this.target(this.model.graph.input.name);
     gl.bindTexture(gl.TEXTURE_2D, target.texture);
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, size, size, gl.RGBA, gl.FLOAT, texels);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RGBA, gl.FLOAT, texels);
     return this.execute();
   }
 
   /** Reads back the last network input as 8-bit CHW planes (debugging and tests). */
   readInput(): Uint8Array {
     this.ensure();
-    const { size, channels } = this.model;
-    const texels = this.read(this.target(this.model.graph.input.name), size, size);
-    const out = new Uint8Array(channels * size * size);
+    const { width, height, channels } = this.model;
+    const plane = width * height;
+    const texels = this.read(this.target(this.model.graph.input.name), width, height);
+    const out = new Uint8Array(channels * plane);
     for (let c = 0; c < channels; c++) {
-      for (let i = 0; i < size * size; i++) {
-        out[c * size * size + i] = Math.round(texels[i * 4 + c] * 255);
-      }
+      for (let i = 0; i < plane; i++) out[c * plane + i] = Math.round(texels[i * 4 + c] * 255);
     }
     return out;
   }
@@ -336,15 +418,20 @@ export class GlRunner {
       this.targets = [];
       this.levels = [];
       this.frameTexture = null;
+      this.table = null;
       probeGl(this.gl); // re-enables the float render extensions
       this.build();
       this.state = 'ready';
     }
   }
 
-  /** Compiles the programs, uploads the weights and allocates the activation textures. */
+  /**
+   * Compiles the programs, uploads the weights, allocates the activation textures and runs the
+   * self-test; throws on any failure.
+   */
   private build(): void {
     const gl = this.gl;
+    gl.getError(); // clear stale errors
     this.programs = {
       conv: link(gl, CONV),
       depthwise: link(gl, DEPTHWISE),
@@ -358,23 +445,71 @@ export class GlRunner {
     for (const step of this.model.steps) {
       if (step.kind === 'conv') this.weights.push(this.uploadWeights(step));
     }
+    this.table = { texture: this.uploadTable(new Int32Array(4), 1), key: '' };
+    this.checkedSizes.clear();
     this.allocate();
+    this.selfTest();
+  }
+
+  /**
+   * Checks that the GPU path works: no GL error, and the stored outputs for a constant input are
+   * reproduced (relative tolerance 1e-3 for float32 storage, 1e-2 for float16).
+   */
+  private selfTest(): void {
+    const gl = this.gl;
+    const check = (what: string) => {
+      const error = gl.getError();
+      if (error !== gl.NO_ERROR && !gl.isContextLost()) {
+        throw new Error(`WebGL2 self-test failed: GL error 0x${error.toString(16)} ${what}`);
+      }
+    };
+    check('during initialization');
+    const test = this.model.graph.selfTest;
+    if (!test) return;
+    const { width, height, channels } = this.model;
+    const out = this.runTensorUnchecked(
+      new Float32Array(channels * width * height).fill(test.input),
+    );
+    check('during the test inference');
+    const tolerance = this.precision === 'float32' ? 1e-3 : 1e-2;
+    test.heads.forEach((expected, i) => {
+      const error = Math.abs(out[i] - expected);
+      if (!(error <= tolerance * Math.max(1, Math.abs(expected)))) {
+        throw new Error(
+          `WebGL2 self-test failed (${this.precision}): output ${i} is ${out[i]}, expected ` +
+            `${expected}`,
+        );
+      }
+    });
   }
 
   private release(): void {
     const gl = this.gl;
-    for (const p of Object.values(this.programs)) gl.deleteProgram(p);
+    for (const p of Object.values(this.programs ?? {})) gl.deleteProgram(p);
     for (const t of this.weights) gl.deleteTexture(t);
     for (const t of [...this.targets, ...this.levels]) {
       gl.deleteFramebuffer(t.framebuffer);
       gl.deleteTexture(t.texture);
     }
     if (this.frameTexture) gl.deleteTexture(this.frameTexture);
+    if (this.table) gl.deleteTexture(this.table.texture);
     this.weights = [];
     this.targets = [];
     this.levels = [];
     this.frameTexture = null;
+    this.table = null;
     this.uniforms.clear();
+  }
+
+  /** Uploads an integer coefficient table (`n × 2` texels of RGBA32I). */
+  private uploadTable(data: Int32Array, n: number): WebGLTexture {
+    const gl = this.gl;
+    const texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    const rows = data.length / (4 * n);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32I, n, rows, 0, gl.RGBA_INTEGER, gl.INT, data);
+    setNearest(gl);
+    return texture;
   }
 
   /** Packs a convolution's fp16 weights and bias into one RGBA16F texture (exact values). */
@@ -420,7 +555,7 @@ export class GlRunner {
    * pool (per texture size) after its last use, so peak memory is a few tensors, not all 40.
    */
   private allocate(): void {
-    const { steps, graph, size, channels } = this.model;
+    const { steps, graph, width, height, channels } = this.model;
     const lastUse = new Map<string, number>();
     steps.forEach((step, i) => {
       for (const name of inputsOf(step)) lastUse.set(name, i);
@@ -435,7 +570,7 @@ export class GlRunner {
       this.tensorTarget.set(name, index);
     };
     this.tensorTarget.clear();
-    acquire(graph.input.name, [channels, size, size]);
+    acquire(graph.input.name, [channels, height, width]);
     steps.forEach((step, i) => {
       acquire(step.output, step.kind === 'conv' ? step.outShape : step.shape);
       for (const name of new Set(inputsOf(step))) {
@@ -460,6 +595,12 @@ export class GlRunner {
     const framebuffer = gl.createFramebuffer();
     gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+    const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    if (status !== gl.FRAMEBUFFER_COMPLETE && !gl.isContextLost()) {
+      gl.deleteFramebuffer(framebuffer);
+      gl.deleteTexture(texture);
+      throw new Error(`Framebuffer incomplete (0x${status.toString(16)}) for ${width}×${height}`);
+    }
     return { texture, framebuffer, width, height };
   }
 
@@ -491,16 +632,16 @@ export class GlRunner {
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
-  /** Uploads the frame, halves it while possible and area-resizes it into the input tensor. */
+  /** Uploads the frame, halves it while possible and resizes it into the input tensor. */
   private preprocess(frame: GlFrame): void {
     const gl = this.gl;
-    const { size } = this.model;
+    const { width: mw, height: mh } = this.model;
     let width = frame.width;
     let height = frame.height;
     if (width > this.maxTextureSize || height > this.maxTextureSize) {
       throw new RangeError('Frame larger than MAX_TEXTURE_SIZE');
     }
-    if (width < size || height < size) throw new RangeError(`Frame smaller than ${size}×${size}`);
+    if (!(width >= 1 && height >= 1)) throw new RangeError('Empty frame');
     this.frameTexture ??= gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, this.frameTexture);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
@@ -515,7 +656,7 @@ export class GlRunner {
     let source = this.frameTexture as WebGLTexture;
     let level = 0;
     const { halve, resize } = this.programs;
-    while (width >= 2 * size && height >= 2 * size && width % 2 === 0 && height % 2 === 0) {
+    while (width >= 2 * mw && height >= 2 * mh && width % 2 === 0 && height % 2 === 0) {
       width /= 2;
       height /= 2;
       let target = this.levels[level];
@@ -533,11 +674,36 @@ export class GlRunner {
       source = target.texture;
       level++;
     }
+    // OpenCV uses true area interpolation only when neither axis grows.
+    const linear = width < mw || height < mh;
+    if (linear) {
+      const key = `${width}x${height}`;
+      if (this.table?.key !== key) {
+        if (this.table) gl.deleteTexture(this.table.texture);
+        const n = Math.max(mw, mh);
+        const data = new Int32Array(n * 2 * 4);
+        data.set(linearAreaTable(width, mw, true), 0);
+        data.set(linearAreaTable(height, mh, false), n * 4);
+        this.table = { texture: this.uploadTable(data, n), key };
+      }
+    }
+    // Bind after any upload: uploads go through the active texture unit.
     gl.useProgram(resize);
     this.bindTexture(resize, 'u_src', 0, source);
+    this.bindTexture(resize, 'u_tab', 1, this.table?.texture as WebGLTexture);
+    gl.uniform1i(this.uniform(resize, 'u_linear'), linear ? 1 : 0);
     gl.uniform2i(this.uniform(resize, 'u_srcSize'), width, height);
-    gl.uniform2f(this.uniform(resize, 'u_scale'), width / size, height / size);
+    gl.uniform2f(this.uniform(resize, 'u_scale'), width / mw, height / mh);
     this.draw(this.target(this.model.graph.input.name));
+    // A failed draw would silently leave the previous input in place: check each new frame size.
+    const size = `${frame.width}x${frame.height}`;
+    if (!this.checkedSizes.has(size)) {
+      const error = gl.getError();
+      if (error !== gl.NO_ERROR && !gl.isContextLost()) {
+        throw new Error(`WebGL2 preprocessing failed: GL error 0x${error.toString(16)} (${size})`);
+      }
+      this.checkedSizes.add(size);
+    }
   }
 
   /** Runs every step and reads back the output tensor. */
@@ -610,8 +776,14 @@ function setNearest(gl: WebGL2RenderingContext): void {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 }
 
+/**
+ * Compiles and links a program. The compile status is only queried if linking fails (querying
+ * it right away would serialize parallel shader compilation); the error then carries the
+ * compile logs of both shaders.
+ */
 function link(gl: WebGL2RenderingContext, fragment: string): WebGLProgram {
   const program = gl.createProgram();
+  const shaders: WebGLShader[] = [];
   for (const [type, source] of [
     [gl.VERTEX_SHADER, VERTEX],
     [gl.FRAGMENT_SHADER, fragment],
@@ -621,13 +793,22 @@ function link(gl: WebGL2RenderingContext, fragment: string): WebGLProgram {
     gl.shaderSource(shader, source);
     gl.compileShader(shader);
     gl.attachShader(program, shader);
-    gl.deleteShader(shader);
+    shaders.push(shader);
   }
   gl.linkProgram(program);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+  const linked = gl.getProgramParameter(program, gl.LINK_STATUS);
+  const logs = linked
+    ? []
+    : shaders.map((shader, i) => {
+        const compiled = gl.getShaderParameter(shader, gl.COMPILE_STATUS);
+        const name = i === 0 ? 'vertex' : 'fragment';
+        return `${name} shader ${compiled ? 'compiled' : `failed: ${gl.getShaderInfoLog(shader)}`}`;
+      });
+  for (const shader of shaders) gl.deleteShader(shader);
+  if (!linked) {
     const log = gl.getProgramInfoLog(program);
     gl.deleteProgram(program);
-    throw new Error(`Shader link error: ${log}`);
+    throw new Error(`Shader link error: ${log}; ${logs.join('; ')}`);
   }
   return program;
 }

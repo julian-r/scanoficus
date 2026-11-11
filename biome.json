@@ -11,7 +11,7 @@
       "!**/dist",
       "!**/coverage",
       "!**/eval-out",
-      "!apps/demo/public/models",
+      "!packages/detector-nn/models",
       "!packages/detector-nn/test/fixtures"
     ]
   },

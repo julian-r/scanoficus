@@ -3,11 +3,18 @@ import type { RgbaImage } from '@scanoficus/core/image';
 /**
  * CPU preprocessing that reproduces the Python reference (`scanoficus_ml.data.preprocess`)
  * bit-exactly on the test frames: the frame is halved with exact 2×2 box means while both sides
- * are even and at least twice the target, then stretched to `size × size` with OpenCV's
- * `INTER_AREA` (fractional coverage weights in float32, round half to even). Returns the RGB
- * planes (CHW) as bytes; the network input is `byte / 255`.
+ * are even and at least twice the target, then stretched to `width × height` with OpenCV's
+ * `cv2.resize(INTER_AREA)`: fractional coverage weights in float32 (round half to even) when
+ * both axes shrink, and OpenCV's bilinear emulation of `INTER_AREA` (11-bit fixed point) when an
+ * axis grows (e.g. a 384×173 frame from a 20:9 stream). Returns the RGB planes (CHW) as bytes;
+ * the network input is `byte / 255`.
  */
-export function preprocessRgba(frame: RgbaImage, size: number): Uint8Array {
+export function preprocessRgba(
+  frame: RgbaImage,
+  targetWidth: number,
+  targetHeight: number = targetWidth,
+): Uint8Array {
+  const size = targetWidth;
   let width = frame.width;
   let height = frame.height;
   if (frame.data.length !== width * height * 4) throw new RangeError('Expected RGBA pixels');
@@ -18,15 +25,15 @@ export function preprocessRgba(frame: RgbaImage, size: number): Uint8Array {
     rgb[3 * i + 1] = frame.data[p + 1];
     rgb[3 * i + 2] = frame.data[p + 2];
   }
-  while (width >= 2 * size && height >= 2 * size && width % 2 === 0 && height % 2 === 0) {
+  while (width >= 2 * size && height >= 2 * targetHeight && width % 2 === 0 && height % 2 === 0) {
     rgb = areaInteger(rgb, width, height, 2, 2);
     width /= 2;
     height /= 2;
   }
-  const out = resizeArea(rgb, width, height, size, size);
+  const out = resize(rgb, width, height, size, targetHeight);
   // Interleaved → planar.
-  const planar = new Uint8Array(3 * size * size);
-  const plane = size * size;
+  const plane = size * targetHeight;
+  const planar = new Uint8Array(3 * plane);
   for (let i = 0; i < plane; i++) {
     planar[i] = out[3 * i];
     planar[plane + i] = out[3 * i + 1];
@@ -55,12 +62,12 @@ function saturate(v: number): number {
   return Math.min(255, Math.max(0, r));
 }
 
-/** `cv::resize(INTER_AREA)` of interleaved RGB bytes (downscaling only). */
-function resizeArea(src: Uint8Array, sw: number, sh: number, dw: number, dh: number): Uint8Array {
+/** `cv::resize(INTER_AREA)` of interleaved RGB bytes. */
+function resize(src: Uint8Array, sw: number, sh: number, dw: number, dh: number): Uint8Array {
   if (sw === dw && sh === dh) return src.slice();
   const scaleX = 1 / (dw / sw);
   const scaleY = 1 / (dh / sh);
-  if (scaleX < 1 || scaleY < 1) throw new RangeError('Upscaling is not supported');
+  if (scaleX < 1 || scaleY < 1) return resizeLinear(src, sw, sh, dw, dh);
   const ix = Math.round(scaleX);
   const iy = Math.round(scaleY);
   if (Math.abs(scaleX - ix) < Number.EPSILON && Math.abs(scaleY - iy) < Number.EPSILON) {
@@ -156,8 +163,79 @@ function areaInteger(src: Uint8Array, sw: number, sh: number, fx: number, fy: nu
           const row = (y * fy + v) * sw;
           for (let u = 0; u < fx; u++) s += src[(row + x * fx + u) * 3 + c];
         }
-        dst[(y * dw + x) * 3 + c] = area === 4 ? (s + 2) >> 2 : saturate(Math.fround(s * scale));
+        // OpenCV vectorizes only the 2×2 case, which rounds half up; the scalar path rounds the
+        // float product half to even.
+        dst[(y * dw + x) * 3 + c] =
+          fx === 2 && fy === 2 ? (s + 2) >> 2 : saturate(Math.fround(s * scale));
       }
+    }
+  }
+  return dst;
+}
+
+/**
+ * Per destination index along one axis, OpenCV's `INTER_AREA` coefficients for an axis that is
+ * not downscaled on both sides (`cv::resize` emulates area interpolation with bilinear weights
+ * then): the first source index, the two 11-bit fixed-point weights, and the second source index
+ * (clamped to the last sample). Horizontally (`horizontal`), OpenCV then uses the first sample at
+ * full weight (2048); vertically it keeps both weights on the clamped rows.
+ */
+export function linearAreaTable(srcLen: number, dstLen: number, horizontal: boolean): Int32Array {
+  const inv = dstLen / srcLen;
+  const scale = 1 / inv;
+  const f = Math.fround;
+  const out = new Int32Array(dstLen * 4);
+  for (let d = 0; d < dstLen; d++) {
+    let s = Math.floor(d * scale);
+    let fx = f(d + 1 - (s + 1) * inv);
+    fx = fx <= 0 ? 0 : f(fx - Math.floor(fx));
+    let a0 = roundHalfEven(f(1 - fx) * 2048);
+    let a1 = roundHalfEven(fx * 2048);
+    let next = s + 1;
+    if (s + 1 >= srcLen) {
+      next = srcLen - 1;
+      if (horizontal) {
+        // OpenCV's `xmax` region: only the (clamped) first sample, at full weight.
+        s = srcLen - 1;
+        next = s;
+        a0 = 2048;
+        a1 = 0;
+      }
+    }
+    out.set([s, a0, a1, next], d * 4);
+  }
+  return out;
+}
+
+/**
+ * `cv::resize(INTER_AREA)` of interleaved RGB bytes when an axis grows: horizontal pass in
+ * integers, vertical pass as OpenCV's SIMD `VResizeLinearVec_32s8u`
+ * (`((b0·(h0 >> 4)) >> 16) + ((b1·(h1 >> 4)) >> 16) + 2 >> 2`).
+ */
+function resizeLinear(src: Uint8Array, sw: number, sh: number, dw: number, dh: number): Uint8Array {
+  const xt = linearAreaTable(sw, dw, true);
+  const yt = linearAreaTable(sh, dh, false);
+  const row = (y: number, out: Int32Array) => {
+    const base = y * sw * 3;
+    for (let x = 0; x < dw; x++) {
+      const s0 = base + xt[4 * x] * 3;
+      const s1 = base + xt[4 * x + 3] * 3;
+      for (let c = 0; c < 3; c++) {
+        out[3 * x + c] = src[s0 + c] * xt[4 * x + 1] + src[s1 + c] * xt[4 * x + 2];
+      }
+    }
+  };
+  const h0 = new Int32Array(dw * 3);
+  const h1 = new Int32Array(dw * 3);
+  const dst = new Uint8Array(dw * dh * 3);
+  for (let y = 0; y < dh; y++) {
+    row(yt[4 * y], h0);
+    row(yt[4 * y + 3], h1);
+    const b0 = yt[4 * y + 1];
+    const b1 = yt[4 * y + 2];
+    for (let i = 0; i < dw * 3; i++) {
+      const v = (((b0 * (h0[i] >> 4)) >> 16) + ((b1 * (h1[i] >> 4)) >> 16) + 2) >> 2;
+      dst[y * dw * 3 + i] = Math.min(255, Math.max(0, v));
     }
   }
   return dst;

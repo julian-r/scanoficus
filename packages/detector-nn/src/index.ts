@@ -7,7 +7,7 @@
  * @module
  */
 export { CpuRunner } from './cpu.ts';
-export { decodeHeads, type NnOutput } from './decode.ts';
+export { decodeHeads, fitQuadToFrame, type NnOutput } from './decode.ts';
 export {
   createNnDetector,
   DEFAULT_THRESHOLD,
@@ -17,6 +17,7 @@ export {
 } from './detector.ts';
 export {
   ContextLostError,
+  createGlContext,
   type GlFrame,
   type GlPrecision,
   GlRunner,
@@ -37,8 +38,10 @@ export {
   parseModel,
   type Shape,
   type Step,
+  verifyWeights,
   type WeightRef,
 } from './model.ts';
+export { DOCQUADNET_GRAPH_URL, DOCQUADNET_WEIGHTS_URL } from './model-files.ts';
 export { bytesToInput, preprocessRgba } from './preprocess.ts';
 export { type RefineOptions, refineQuad } from './refine.ts';
 export {

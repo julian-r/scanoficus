@@ -60,6 +60,21 @@ try {
   );
   run('pnpm', ['install', '--prefer-offline'], tmp);
 
+  // Every tarball carries the license; detector-nn also its model files and their attribution.
+  for (const name of ['core', 'elements', 'react', 'detector-nn']) {
+    const dir = join(tmp, 'node_modules/@scanoficus', name);
+    if (!existsSync(join(dir, 'LICENSE'))) throw new Error(`${name}: LICENSE missing`);
+  }
+  const nnDir = join(tmp, 'node_modules/@scanoficus/detector-nn');
+  const graph = JSON.parse(readFileSync(join(nnDir, 'models/docquadnet.json'), 'utf8'));
+  for (const file of [graph.weights.file, 'LICENSE.md']) {
+    if (!existsSync(join(nnDir, 'models', file)))
+      throw new Error(`detector-nn: models/${file} missing`);
+  }
+  console.log(
+    `LICENSE in every package; detector-nn ships models/${graph.weights.file} and LICENSE.md`,
+  );
+
   const core = JSON.parse(
     readFileSync(join(tmp, 'node_modules/@scanoficus/core/package.json'), 'utf8'),
   );
@@ -152,6 +167,13 @@ detector.detect(ctx.getImageData(0, 0, 384, 288)).then(
   (detection) => { window.result = { detection }; },
   (error) => { window.result = { error: String(error) }; },
 );
+// The neural detector with its default model URLs (the files shipped in the package).
+import { createNnDetector } from '@scanoficus/detector-nn';
+const nn = createNnDetector({ backend: 'webgl2' });
+nn.infer(ctx.getImageData(0, 0, 384, 288)).then(
+  (out) => { window.nnResult = { presence: out.presence, backend: nn.backend }; },
+  (error) => { window.nnResult = { error: String(error) }; },
+);
 `,
   );
   const vite = await import(pathToFileURL(join(tmp, 'node_modules/vite/dist/node/index.js')).href);
@@ -160,15 +182,23 @@ detector.detect(ctx.getImageData(0, 0, 384, 288)).then(
       ? { executablePath: process.env.CHROME_PATH }
       : { channel: 'chrome' }),
     headless: true,
+    args: ['--enable-unsafe-swiftshader'], // WebGL without a GPU (CI)
   });
   const probe = async (label, url) => {
     const page = await browser.newPage();
     await page.goto(url);
-    await page.waitForFunction(() => window.result, null, { timeout: 20000 });
-    const result = await page.evaluate(() => window.result);
+    await page.waitForFunction(() => window.result && window.nnResult, null, { timeout: 30000 });
+    const [result, nn] = await page.evaluate(() => [window.result, window.nnResult]);
     await page.close();
     if (!result.detection) throw new Error(`${label}: worker detection failed: ${result.error}`);
     console.log(`vite ${label} (installed package): default worker detects a document`);
+    if (nn.backend !== 'webgl2' || !(nn.presence >= 0 && nn.presence <= 1)) {
+      throw new Error(`${label}: neural detector with default model URLs failed: ${nn.error}`);
+    }
+    console.log(
+      `vite ${label} (installed package): neural detector loads its packaged model ` +
+        `(presence ${nn.presence.toFixed(3)})`,
+    );
   };
   try {
     const dev = await vite.createServer({ root: app, logLevel: 'error', server: { port: 0 } });

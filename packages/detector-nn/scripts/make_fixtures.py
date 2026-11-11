@@ -35,6 +35,10 @@ CASES = [
     ("partial-500x375", 500, 375, [(-60, 40), (380, 20), (420, 330), (-30, 360)], [(10, 80), (340, 66), (370, 290), (20, 312)], 2),
     ("tilted-1280x720", 1280, 720, [(400, 60), (900, 140), (820, 680), (310, 600)], [(440, 130), (840, 196), (780, 600), (380, 540)], 3),
     ("small-333x251", 333, 251, [(40, 30), (290, 50), (280, 220), (30, 210)], [(60, 60), (260, 74), (254, 190), (56, 182)], 4),
+    ("wide-384x173", 384, 173, [(70, 20), (310, 30), (300, 160), (60, 150)], [(95, 45), (285, 52), (278, 135), (88, 128)], 7),
+    ("tall-173x384", 173, 384, [(20, 60), (150, 50), (160, 330), (15, 340)], [(35, 90), (135, 82), (142, 300), (30, 308)], 8),
+    ("tiny-160x120", 160, 120, [(25, 15), (135, 22), (130, 105), (20, 98)], [(38, 30), (122, 35), (118, 90), (34, 85)], 9),
+    ("strip-768x192", 768, 192, [(150, 20), (620, 30), (610, 175), (140, 165)], [(190, 45), (580, 52), (572, 150), (182, 142)], 10),
     ("empty-192x192", 192, 192, None, None, 5),
     ("noise-192x192", 192, 192, "noise", None, 6),
 ]
@@ -97,9 +101,13 @@ def main() -> None:
     from scanoficus_ml.refine import refine_quad
     import cv2
 
+    # The packaged model (scripts/package_model.py); its weights must equal the ML export.
     export = ml / "export" / "docquadnet"
-    graph = json.loads((export / "docquadnet.json").read_text())
-    blob = (export / "docquadnet.bin").read_bytes()
+    models = HERE.parent / "models"
+    graph_path = models / "docquadnet.json"
+    graph = json.loads(graph_path.read_text())
+    blob = (models / graph["weights"]["file"]).read_bytes()
+    assert blob == (export / "docquadnet.bin").read_bytes(), "models/ is stale: run package_model.py"
     weights = np.frombuffer(blob, "<f2").astype(np.float32)
     threshold = float(json.loads((export / "threshold.json").read_text())["threshold"])
 
@@ -138,7 +146,7 @@ def main() -> None:
     meta = {
         "generator": "packages/detector-nn/scripts/make_fixtures.py",
         "reference": "scanoficus_ml.rawgraph.run_graph (NumPy, float32) on scanoficus_ml.data.preprocess",
-        "graphSha256": hashlib.sha256((export / "docquadnet.json").read_bytes()).hexdigest(),
+        "graphSha256": hashlib.sha256(graph_path.read_bytes()).hexdigest(),
         "weightsSha256": hashlib.sha256(blob).hexdigest(),
         "threshold": threshold,
         "cases": cases,

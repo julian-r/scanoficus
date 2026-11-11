@@ -41,6 +41,13 @@ export interface ModelGraph {
   input: { name: string; shape: number[] };
   nodes: GraphNode[];
   outputs: { heads: string };
+  /**
+   * The weight blob this graph belongs to: its file name (resolved relative to the graph URL),
+   * length and SHA-256. Written by `scripts/package_model.py`; checked by {@link loadModel}.
+   */
+  weights?: { file: string; byteLength: number; sha256: string };
+  /** Expected outputs for a constant input, used by the WebGL2 self-test. */
+  selfTest?: { input: number; heads: number[] };
 }
 
 /** Shape of an activation: channels, height, width (batch 1). */
@@ -77,8 +84,11 @@ export interface NnModel {
   readonly graph: ModelGraph;
   /** fp16 weights as stored (IEEE 754 binary16 bit patterns). */
   readonly weights: Uint16Array;
-  /** Square input side (192 for DocQuadNet). */
+  /** Input side for square inputs (192 for DocQuadNet); the input width otherwise. */
   readonly size: number;
+  /** Input height and width (the network input is `channels × height × width`). */
+  readonly height: number;
+  readonly width: number;
   /** Input channels (3 = RGB). */
   readonly channels: number;
   readonly steps: readonly Step[];
@@ -87,33 +97,78 @@ export interface NnModel {
   readonly outputShape: Shape;
 }
 
+import { DOCQUADNET_GRAPH_URL, DOCQUADNET_WEIGHTS_URL } from './model-files.ts';
+
 /** The format identifier this runtime understands. */
 export const MODEL_FORMAT = 'scanoficus-docquadnet-raw/1';
 
-/** Where to fetch a model from (resolved against the document / worker location). */
+/** Where to fetch a model from (relative URLs resolve against the document / worker location). */
 export interface ModelSource {
-  /** URL of the graph JSON (`docquadnet.json`). */
-  graphUrl: string | URL;
-  /** URL of the fp16 weight blob (`docquadnet.bin`). */
-  weightsUrl: string | URL;
+  /**
+   * URL of the graph JSON. Default: `DOCQUADNET_GRAPH_URL`, the copy shipped in the package
+   * (`models/docquadnet.json`), which bundlers emit as a hashed asset.
+   */
+  graphUrl?: string | URL;
+  /**
+   * URL of the fp16 weight blob. Default: the graph's `weights.file` resolved relative to the
+   * graph URL (or `DOCQUADNET_WEIGHTS_URL` with the default graph).
+   */
+  weightsUrl?: string | URL;
 }
 
 /**
- * Fetches and validates a model. The weights are not part of any JavaScript bundle: host
- * `docquadnet.json` and `docquadnet.bin` next to your app (served with compression, see the
- * package README).
+ * Fetches and validates a model. The weights are not part of any JavaScript bundle; by default
+ * they are the files shipped in the package's `models/` folder. If the graph JSON names its
+ * weights (`weights: { file, byteLength, sha256 }`), the blob must have that length and SHA-256
+ * (checked with `crypto.subtle` where available, i.e. in secure contexts), so an old cached
+ * graph can never run with new weights or vice versa. The graph is fetched with
+ * `cache: 'no-cache'` (revalidated); the weights should have a content-hashed name.
  */
-export async function loadModel(source: ModelSource, init?: RequestInit): Promise<NnModel> {
-  const get = async (url: string | URL) => {
-    const response = await fetch(url, init);
-    if (!response.ok) throw new Error(`Failed to load ${String(url)}: HTTP ${response.status}`);
+export async function loadModel(source: ModelSource = {}, init?: RequestInit): Promise<NnModel> {
+  const base = typeof location !== 'undefined' ? location.href : undefined;
+  const useDefaults = !source.graphUrl;
+  const graphUrl = new URL(source.graphUrl ?? DOCQUADNET_GRAPH_URL, base);
+  const get = async (url: URL, extra?: RequestInit) => {
+    const response = await fetch(url, { ...init, ...extra });
+    if (!response.ok) throw new Error(`Failed to load ${url.href}: HTTP ${response.status}`);
     return response;
   };
-  const [graph, weights] = await Promise.all([
-    get(source.graphUrl).then((r) => r.json() as Promise<unknown>),
-    get(source.weightsUrl).then((r) => r.arrayBuffer()),
-  ]);
+  const explicitWeights = source.weightsUrl ?? (useDefaults ? DOCQUADNET_WEIGHTS_URL : null);
+  const weightsPromise = explicitWeights
+    ? get(new URL(explicitWeights, base)).then((r) => r.arrayBuffer())
+    : null;
+  weightsPromise?.catch(() => {}); // awaited below; avoid an unhandled rejection meanwhile
+  const graph = (await (await get(graphUrl, { cache: 'no-cache' })).json()) as ModelGraph;
+  let weights: ArrayBuffer;
+  if (weightsPromise) weights = await weightsPromise;
+  else {
+    if (!graph.weights?.file) throw new Error('The graph names no weights file: pass weightsUrl');
+    weights = await (await get(new URL(graph.weights.file, graphUrl))).arrayBuffer();
+  }
+  await verifyWeights(graph, weights);
   return parseModel(graph, weights);
+}
+
+/**
+ * Checks a weight blob against the graph's `weights` record: length always, SHA-256 when
+ * `crypto.subtle` is available. Rejects on mismatch; graphs without the record pass.
+ */
+export async function verifyWeights(graph: ModelGraph, weights: ArrayBuffer): Promise<void> {
+  const expected = graph.weights;
+  if (!expected) return;
+  if (weights.byteLength !== expected.byteLength) {
+    throw new Error(
+      `Weights do not match the graph: ${weights.byteLength} bytes, expected ` +
+        `${expected.byteLength} (${expected.file})`,
+    );
+  }
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) return;
+  const digest = new Uint8Array(await subtle.digest('SHA-256', weights));
+  const hex = Array.from(digest, (b) => b.toString(16).padStart(2, '0')).join('');
+  if (hex !== expected.sha256) {
+    throw new Error(`Weights do not match the graph: SHA-256 ${hex}, expected ${expected.sha256}`);
+  }
 }
 
 /** Validates a graph and fp16 weight blob and lowers the graph into runtime steps. */
@@ -128,12 +183,17 @@ export function parseModel(graph: unknown, weights: ArrayBuffer | ArrayBufferVie
       ? new Uint8Array(weights)
       : new Uint8Array(weights.buffer, weights.byteOffset, weights.byteLength);
   if (bytes.byteLength % 2) throw new Error('Weight blob has an odd number of bytes');
+  if (g.weights && g.weights.byteLength !== bytes.byteLength) {
+    throw new Error(
+      `Weights do not match the graph: ${bytes.byteLength} bytes, expected ${g.weights.byteLength}`,
+    );
+  }
   // Copy into an aligned buffer and read little-endian regardless of the platform.
   const fp16 = new Uint16Array(bytes.byteLength / 2);
   for (let i = 0; i < fp16.length; i++) fp16[i] = bytes[2 * i] | (bytes[2 * i + 1] << 8);
 
   const [batch, channels, height, width] = g.input.shape;
-  if (batch !== 1 || height !== width) throw new Error('Expected a 1×C×S×S input');
+  if (batch !== 1 || !(height > 0 && width > 0)) throw new Error('Expected a 1×C×H×W input');
   const shapes = new Map<string, Shape>([[g.input.name, [channels, height, width]]]);
   const shapeOf = (name: string): Shape => {
     const s = shapes.get(name);
@@ -264,7 +324,9 @@ export function parseModel(graph: unknown, weights: ArrayBuffer | ArrayBufferVie
   return {
     graph: g,
     weights: fp16,
-    size: height,
+    size: width,
+    height,
+    width,
     channels,
     steps,
     output,

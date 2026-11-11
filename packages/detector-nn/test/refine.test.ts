@@ -5,6 +5,7 @@ import { rgbaToGray } from '@scanoficus/core/image';
 import type { DocumentDetector } from '@scanoficus/core/worker';
 import { describe, expect, it, vi } from 'vitest';
 import { createHybridDetector, createNnDetector, parseModel, refineQuad } from '../src/index.ts';
+import { DOCQUADNET_GRAPH_URL, DOCQUADNET_WEIGHTS_URL } from '../src/model-files.ts';
 import { renderScene, type SceneCase } from './scene.ts';
 
 const fixtures = JSON.parse(
@@ -24,7 +25,15 @@ const truthError = (a: Quad, page: [number, number][]) =>
 
 describe('refineQuad', () => {
   const positives = fixtures.cases.filter((c) => c.detected);
-  for (const c of positives) {
+  // Frames where refine.py converged (every corner within 1 px of the page, partly visible
+  // pages excluded). Where it fails on a side (wide-384x173, strip-768x192: a predicted corner
+  // more than twice the 4-px window away), the half-pixel convention shift of the port can flip
+  // which fitted lines are accepted, so the two then fail differently.
+  const converged = positives.filter(
+    (c) => truthError(toQuad(c.refined), c.page as [number, number][]) < 1,
+  );
+  it('has converged reference cases', () => expect(converged.length).toBeGreaterThanOrEqual(5));
+  for (const c of converged) {
     it(`matches scanoficus_ml.refine on ${c.name}`, () => {
       const gray = rgbaToGray(renderScene(c));
       const refined = refineQuad(gray, toQuad(c.quad));
@@ -62,15 +71,8 @@ describe('refineQuad', () => {
 
 describe('detectors', () => {
   const model = parseModel(
-    JSON.parse(
-      readFileSync(
-        new URL('../../../apps/demo/public/models/docquadnet/docquadnet.json', import.meta.url),
-        'utf8',
-      ),
-    ),
-    readFileSync(
-      new URL('../../../apps/demo/public/models/docquadnet/docquadnet.bin', import.meta.url),
-    ),
+    JSON.parse(readFileSync(DOCQUADNET_GRAPH_URL, 'utf8')),
+    readFileSync(DOCQUADNET_WEIGHTS_URL),
   );
 
   it('refines network detections when asked', async () => {

@@ -1,4 +1,10 @@
-import { orderQuad, type Point, type Quad } from '@scanoficus/core/geometry';
+import {
+  isConvexQuad,
+  orderQuad,
+  type Point,
+  type Quad,
+  quadArea,
+} from '@scanoficus/core/geometry';
 
 /** Decoded network output for one frame. */
 export interface NnOutput {
@@ -19,4 +25,27 @@ export function decodeHeads(heads: Float32Array, width: number, height: number):
   for (let i = 0; i < 4; i++)
     points.push({ x: heads[2 * i] * width, y: heads[2 * i + 1] * height });
   return { quad: orderQuad(points), presence: 1 / (1 + Math.exp(-heads[8])), heads };
+}
+
+/**
+ * Makes a predicted quad safe for the scanner: a non-convex quad gives `null`; corners outside
+ * the `width × height` frame are clamped onto its border; the result must still be convex and
+ * cover at least `minArea` of the frame, else `null`. (Two corners clamped onto the same frame
+ * corner make the quad degenerate.)
+ */
+export function fitQuadToFrame(
+  quad: Quad,
+  width: number,
+  height: number,
+  minArea = 0.01,
+): Quad | null {
+  if (!quad.every((p) => Number.isFinite(p.x) && Number.isFinite(p.y))) return null;
+  if (!isConvexQuad(quad)) return null;
+  const clamp = (v: number, max: number) => Math.min(max, Math.max(0, v));
+  const fitted = quad.map((p) => ({
+    x: clamp(p.x, width),
+    y: clamp(p.y, height),
+  })) as unknown as Quad;
+  if (!isConvexQuad(fitted) || quadArea(fitted) < minArea * width * height) return null;
+  return fitted;
 }

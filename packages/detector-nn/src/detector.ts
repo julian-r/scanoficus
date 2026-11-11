@@ -2,7 +2,7 @@ import type { Quad } from '@scanoficus/core/geometry';
 import { type GrayImage, type RgbaImage, rgbaToGray } from '@scanoficus/core/image';
 import type { DetectorFrame, DocumentDetector } from '@scanoficus/core/worker';
 import { CpuRunner } from './cpu.ts';
-import { decodeHeads, type NnOutput } from './decode.ts';
+import { decodeHeads, fitQuadToFrame, type NnOutput } from './decode.ts';
 import { ContextLostError, createCanvas, type GlPrecision, GlRunner } from './gl.ts';
 import { loadModel, type NnModel } from './model.ts';
 import { bytesToInput, preprocessRgba } from './preprocess.ts';
@@ -16,9 +16,15 @@ export type NnBackend = 'webgl2' | 'cpu';
 
 /** Options for {@link createNnDetector}. */
 export interface NnDetectorOptions {
-  /** URL of `docquadnet.json` (relative URLs resolve against the page / worker location). */
+  /**
+   * URL of the graph JSON (relative URLs resolve against the page / worker location). Default:
+   * the copy shipped in the package (`models/docquadnet.json`; see `loadModel`).
+   */
   graphUrl?: string | URL;
-  /** URL of `docquadnet.bin` (fp16 weights, ≈ 690 kB; not part of the JS bundle). */
+  /**
+   * URL of the fp16 weights (≈ 690 kB; not part of the JS bundle). Default: the file named by
+   * the graph, relative to `graphUrl`, or the package's copy with the default graph.
+   */
   weightsUrl?: string | URL;
   /** An already loaded model instead of the URLs (e.g. shared by several detectors). */
   model?: NnModel | Promise<NnModel>;
@@ -42,12 +48,23 @@ export interface NnDetectorOptions {
   refine?: boolean | RefineOptions;
   /** Canvas for the WebGL2 context. Default: a new `OffscreenCanvas` (or `<canvas>`). */
   canvas?: OffscreenCanvas | HTMLCanvasElement;
+  /**
+   * `detect()` clamps the quad's corners to the frame and returns `null` for a non-convex or
+   * degenerate quad (below 1 % of the frame), so the scanner never gets corners it cannot crop.
+   * `infer()` always returns the raw quad. Default true.
+   */
+  clipToFrame?: boolean;
 }
 
 /** A {@link DocumentDetector} backed by DocQuadNet, with access to the raw network output. */
 export interface NnDetector extends DocumentDetector {
-  /** The backend in use (`null` until initialized); can switch to `'cpu'` after failures. */
+  /**
+   * The backend that answered the last frame (before the first frame: the one initialized, or
+   * `null`). `'cpu'` while the CPU answers during a WebGL context loss or after a WebGL2 failure.
+   */
   readonly backend: NnBackend | null;
+  /** Why WebGL2 is not (or no longer) used, with backend `'auto'`; `null` otherwise. */
+  readonly glError: string | null;
   /** WebGL2 activation precision in use, or `null` (CPU, or not initialized yet). */
   readonly precision: GlPrecision | null;
   /**
@@ -81,16 +98,20 @@ export function createNnDetector(options: NnDetectorOptions): NnDetector {
   let gl: GlRunner | null = null;
   let cpu: CpuRunner | null = null;
   let disposed = false;
+  let lastBackend: NnBackend | null = null;
+  let glError: string | null = null;
   let canvas2d: { canvas: OffscreenCanvas | HTMLCanvasElement; ctx: Canvas2D } | null = null;
 
   const getModel = () => {
-    if (!modelPromise) {
-      if (options.model) modelPromise = Promise.resolve(options.model);
-      else if (options.graphUrl && options.weightsUrl) {
-        modelPromise = loadModel({ graphUrl: options.graphUrl, weightsUrl: options.weightsUrl });
-      } else modelPromise = Promise.reject(new Error('Pass graphUrl and weightsUrl, or model'));
-    }
+    modelPromise ??= options.model
+      ? Promise.resolve(options.model)
+      : loadModel({ graphUrl: options.graphUrl, weightsUrl: options.weightsUrl });
     return modelPromise;
+  };
+
+  const fallBack = (error: unknown) => {
+    glError = error instanceof Error ? error.message : String(error);
+    console.warn(`[detector-nn] WebGL2 not used, running on the CPU: ${glError}`);
   };
 
   const ready = (): Promise<NnBackend> => {
@@ -102,9 +123,15 @@ export function createNnDetector(options: NnDetectorOptions): NnDetector {
           gl = new GlRunner(m, { precision: options.precision, canvas: options.canvas });
         } catch (error) {
           if (mode === 'webgl2') throw error;
+          fallBack(error);
         }
       }
       return gl ? 'webgl2' : 'cpu';
+    });
+    // A failure (network, WebGL2 with backend 'webgl2') is not cached: the next call retries.
+    init.catch(() => {
+      if (!model) modelPromise = null;
+      init = null;
     });
     return init;
   };
@@ -134,16 +161,19 @@ export function createNnDetector(options: NnDetectorOptions): NnDetector {
 
   const runCpu = (m: NnModel, frame: DetectorFrame): Float32Array => {
     cpu ??= new CpuRunner(m);
-    return cpu.run(bytesToInput(preprocessRgba(pixels(frame), m.size)));
+    lastBackend = 'cpu';
+    return cpu.run(bytesToInput(preprocessRgba(pixels(frame), m.width, m.height)));
   };
 
   const run = (m: NnModel, frame: DetectorFrame): Float32Array => {
     if (gl) {
       try {
-        if (Math.max(frame.width, frame.height) > gl.maxFrameSize) {
-          return gl.runTensor(bytesToInput(preprocessRgba(pixels(frame), m.size)));
-        }
-        return gl.run(frame);
+        const heads =
+          Math.max(frame.width, frame.height) > gl.maxFrameSize
+            ? gl.runTensor(bytesToInput(preprocessRgba(pixels(frame), m.width, m.height)))
+            : gl.run(frame);
+        lastBackend = 'webgl2';
+        return heads;
       } catch (error) {
         if (mode === 'webgl2') throw error;
         // During a context loss, use the CPU for this frame and retry WebGL2 later; any other
@@ -151,6 +181,7 @@ export function createNnDetector(options: NnDetectorOptions): NnDetector {
         if (!(error instanceof ContextLostError)) {
           gl.dispose();
           gl = null;
+          fallBack(error);
         }
       }
     }
@@ -162,9 +193,7 @@ export function createNnDetector(options: NnDetectorOptions): NnDetector {
     await ready();
     if (disposed) throw new Error('Detector disposed');
     const m = model as NnModel;
-    if (frame.width < m.size || frame.height < m.size) {
-      throw new RangeError(`Frames must be at least ${m.size}×${m.size} pixels`);
-    }
+    if (!(frame.width >= 1 && frame.height >= 1)) throw new RangeError('Empty frame');
     if (!isBitmap(frame) && frame.data?.length !== frame.width * frame.height * 4) {
       throw new TypeError('Expected an ImageBitmap or RGBA pixels with ImageData layout');
     }
@@ -184,7 +213,10 @@ export function createNnDetector(options: NnDetectorOptions): NnDetector {
 
   return {
     get backend() {
-      return gl ? 'webgl2' : model ? 'cpu' : null;
+      return lastBackend ?? (gl ? 'webgl2' : model ? 'cpu' : null);
+    },
+    get glError() {
+      return glError;
     },
     get precision() {
       return (gl as GlRunner | null)?.precision ?? null;
@@ -212,6 +244,11 @@ export function createNnDetector(options: NnDetectorOptions): NnDetector {
             x: p.x / sx,
             y: p.y / sy,
           })) as unknown as Quad;
+        }
+        if (options.clipToFrame !== false) {
+          const fitted = fitQuadToFrame(quad, frame.width, frame.height);
+          if (!fitted) return null;
+          quad = fitted;
         }
         return { quad, score: out.presence };
       } finally {

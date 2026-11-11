@@ -23,7 +23,8 @@
   ],
   "files": [
     "dist",
-    "src"
+    "src",
+    "models"
   ],
   "exports": {
     ".": {
@@ -36,6 +37,7 @@
       "types": "./dist/worker-entry.d.ts",
       "import": "./dist/worker-entry.js"
     },
+    "./models/*": "./models/*",
     "./package.json": "./package.json"
   },
   "scripts": {
@@ -46,7 +48,7 @@
     "bench": "node scripts/browser-check.mjs --bench"
   },
   "peerDependencies": {
-    "@scanoficus/core": "workspace:*"
+    "@scanoficus/core": ">=0.0.0"
   },
   "devDependencies": {
     "@scanoficus/core": "workspace:*",
