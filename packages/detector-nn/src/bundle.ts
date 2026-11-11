@@ -1,3 +1,4 @@
+import { createDecision, type Decision, type DecisionSpec } from './decision.ts';
 import { loadModel, type ModelSource, type NnModel } from './model.ts';
 
 /**
@@ -14,16 +15,27 @@ export interface RefinerSettings {
   crop: number;
   /** Long side of the work image the crops are taken from (1600). */
   workSide: number;
+  /**
+   * How the network's quad enters the work image: `'frame'` (round 2, `pipeline.py`: frame
+   * pixels times work width / frame width) or `'normalized'` (round 3, `verify.py`: normalized
+   * corners times the work-image size). Default `'frame'`.
+   */
+  coordinates?: 'frame' | 'normalized';
 }
 
 /** Where to fetch a bundle from; every graph names its weights (length, SHA-256). */
 export interface BundleSource {
   /** Short name, e.g. `docquadnet2`. */
   name?: string;
-  /** Presence threshold chosen for this main network on validation. */
-  threshold: number;
+  /**
+   * Presence threshold chosen for this main network on validation. With a `decisionUrl`, the
+   * decision's threshold is used instead (as a probability: the sigmoid of its score threshold).
+   */
+  threshold?: number;
   main: ModelSource;
   refiner?: ModelSource & RefinerSettings;
+  /** URL of a `decision.json` (round 3): the bundle's built-in presence rule. */
+  decisionUrl?: string | URL;
 }
 
 /** A loaded corner refiner. */
@@ -34,9 +46,12 @@ export interface RefinerModel extends RefinerSettings {
 /** A loaded bundle. */
 export interface NnBundle {
   name: string;
+  /** Presence threshold (a probability; for a decision bundle the sigmoid of its threshold). */
   threshold: number;
   main: NnModel;
   refiner: RefinerModel | null;
+  /** The built-in presence decision, if the bundle has one. */
+  decision: Decision | null;
 }
 
 /** Format of `bundle.json` (written by `scripts/package_model.py`). */
@@ -54,10 +69,23 @@ export async function loadBundle(
 ): Promise<NnBundle> {
   const resolved = typeof source === 'object' && 'main' in source ? source : null;
   const spec = resolved ?? (await fetchManifest(source as string | URL, init));
-  const [main, refiner] = await Promise.all([
+  const [main, refiner, decisionSpec] = await Promise.all([
     loadModel(spec.main, init),
     spec.refiner ? loadModel(spec.refiner, init) : null,
+    spec.decisionUrl ? fetchJson(spec.decisionUrl, init) : null,
   ]);
+  const decision = decisionSpec ? createDecision(decisionSpec as DecisionSpec) : null;
+  if (decision) {
+    const refinerOutputs = refiner?.outputShape[0] ?? 0;
+    if (!spec.refiner || refinerOutputs < 3) {
+      throw new Error('The decision needs a refiner with corner-confidence outputs');
+    }
+    if (decision.spec.scales.join() !== spec.refiner.scales.join()) {
+      throw new Error('The decision was fitted with other refiner scales');
+    }
+  }
+  const threshold = decision?.threshold ?? spec.threshold;
+  if (threshold === undefined) throw new Error('The bundle has no threshold');
   if (main.outputShape[0] < 9) throw new Error('The main network must output 8 corners + presence');
   if (refiner && spec.refiner) {
     const { batch, channels, height, width, outputShape } = refiner;
@@ -69,7 +97,8 @@ export async function loadBundle(
   }
   return {
     name: spec.name ?? 'custom',
-    threshold: spec.threshold,
+    threshold,
+    decision,
     main,
     refiner:
       refiner && spec.refiner
@@ -78,9 +107,18 @@ export async function loadBundle(
             scales: spec.refiner.scales,
             crop: spec.refiner.crop,
             workSide: spec.refiner.workSide,
+            coordinates: spec.refiner.coordinates ?? 'frame',
           }
         : null,
   };
+}
+
+async function fetchJson(url: string | URL, init?: RequestInit): Promise<unknown> {
+  const base = typeof location !== 'undefined' ? location.href : undefined;
+  const href = new URL(url, base);
+  const response = await fetch(href, { ...init, cache: 'no-cache' });
+  if (!response.ok) throw new Error(`Failed to load ${href.href}: HTTP ${response.status}`);
+  return response.json();
 }
 
 async function fetchManifest(url: string | URL, init?: RequestInit): Promise<BundleSource> {
@@ -91,20 +129,23 @@ async function fetchManifest(url: string | URL, init?: RequestInit): Promise<Bun
   const m = (await response.json()) as {
     format: string;
     name?: string;
-    threshold: number;
+    threshold: number | null;
     main: { graph: string };
     refiner?: { graph: string } & RefinerSettings;
+    decision?: string;
   };
   if (m.format !== BUNDLE_FORMAT) throw new Error(`Unsupported bundle format ${m.format}`);
   return {
     name: m.name,
-    threshold: m.threshold,
+    threshold: m.threshold ?? undefined,
+    decisionUrl: m.decision ? new URL(m.decision, href) : undefined,
     main: { graphUrl: new URL(m.main.graph, href) },
     refiner: m.refiner && {
       graphUrl: new URL(m.refiner.graph, href),
       scales: m.refiner.scales,
       crop: m.refiner.crop,
       workSide: m.refiner.workSide,
+      coordinates: m.refiner.coordinates,
     },
   };
 }
@@ -123,5 +164,6 @@ export function serializableBundle(source: BundleSource): BundleSource {
     ...source,
     main: model(source.main),
     refiner: source.refiner && model(source.refiner),
+    decisionUrl: abs(source.decisionUrl),
   };
 }

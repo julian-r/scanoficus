@@ -12,6 +12,7 @@
    0.2
   ],
   "crop": 64,
-  "workSide": 1600
+  "workSide": 1600,
+  "coordinates": "frame"
  }
 }

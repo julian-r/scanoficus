@@ -37,6 +37,8 @@ export interface CornerFrame {
 export interface RefinerPass {
   scale: number;
   offsets: [number, number][];
+  /** Corner-confidence logits per corner, if the refiner has that output (round 3), else null. */
+  cornerLogits: number[] | null;
 }
 
 /** Result of the corner refinement. */
@@ -196,6 +198,46 @@ export function warpCrop(img: RgbImage, m: Float32Array, crop: number, out: Uint
   }
 }
 
+/**
+ * The quad in work-image pixels. `coordinates: 'frame'` (round 2, `pipeline.py`): frame pixels
+ * times `s = workWidth / width`. `'normalized'` (round 3, `verify.run_pipeline`): the network's
+ * normalized corners times the work-image size.
+ */
+export function toWork(
+  quad: readonly Point[],
+  frame: { width: number; height: number },
+  work: { width: number; height: number },
+  settings: Pick<RefinerSettings, 'coordinates'>,
+): Point[] {
+  if (settings.coordinates === 'normalized') {
+    return quad.map((p) => ({ x: p.x * work.width, y: p.y * work.height }));
+  }
+  return scalePoints(quad, work.width / frame.width);
+}
+
+/** The refined work-image quad in frame pixels (the inverse of {@link toWork}'s mapping). */
+export function fromWork(
+  q: readonly Point[],
+  frame: { width: number; height: number },
+  work: { width: number; height: number },
+  settings: Pick<RefinerSettings, 'coordinates'>,
+): Quad {
+  if (settings.coordinates === 'normalized') {
+    const sx = frame.width / work.width;
+    const sy = frame.height / work.height;
+    return q.map((p) => ({ x: p.x * sx, y: p.y * sy })) as unknown as Quad;
+  }
+  return scalePoints(q, work.width / frame.width, true) as unknown as Quad;
+}
+
+/** Offsets (and corner logits, with 3 outputs per crop) of one pass from 4 crops' outputs. */
+export function readPass(out: Float32Array, scale: number): RefinerPass {
+  const per = out.length / 4;
+  const offsets = [0, 1, 2, 3].map((n) => [out[n * per], out[n * per + 1]] as [number, number]);
+  const cornerLogits = per > 2 ? [0, 1, 2, 3].map((n) => out[n * per + 2]) : null;
+  return { scale, offsets, cornerLogits };
+}
+
 /** Quad times `s` (frame → work image) or divided by it (back), like pipeline.py. */
 export function scalePoints(q: readonly Point[], s: number, divide = false): Point[] {
   return q.map((p) => (divide ? { x: p.x / s, y: p.y / s } : { x: p.x * s, y: p.y * s }));
@@ -203,7 +245,8 @@ export function scalePoints(q: readonly Point[], s: number, divide = false): Poi
 
 /**
  * The corner refinement on the CPU. `runRefiner` maps `n` crops (NCHW floats in [0, 1]) to `n`
- * offsets `[dx, dy, …]` (e.g. a `CpuRunner` of the refiner network). Also records the crops
+ * outputs `[dx, dy(, logit)], …` (e.g. a `CpuRunner` of the refiner network). `quad` is in frame
+ * pixels, or normalized to the frame with `settings.coordinates: 'normalized'`. Also records the crops
  * (`crops`, one `n × crop × crop × 3` uint8 array per pass) when given an array.
  */
 export function refineCornersCpu(
@@ -214,8 +257,8 @@ export function refineCornersCpu(
   crops?: Uint8Array[],
 ): RefinerResult {
   const levels = buildPyramid(frame, settings.workSide);
-  const s = levels[0].width / frame.width;
-  let q = scalePoints(quad, s);
+  const work = { width: levels[0].width, height: levels[0].height };
+  let q = toWork(quad, frame, work, settings);
   const { crop } = settings;
   const plane = crop * crop;
   const passes: RefinerPass[] = [];
@@ -233,9 +276,9 @@ export function refineCornersCpu(
     });
     crops?.push(hwc.slice());
     const result = runRefiner(input, 4);
-    const offsets = frames.map((_, n) => [result[n * 2], result[n * 2 + 1]] as [number, number]);
-    q = frames.map((f, n) => applyOffset(f, offsets[n]));
-    passes.push({ scale, offsets });
+    const pass = readPass(result, scale);
+    q = frames.map((f, n) => applyOffset(f, pass.offsets[n]));
+    passes.push(pass);
   }
-  return { quad: scalePoints(q, s, true) as unknown as Quad, passes };
+  return { quad: fromWork(q, frame, work, settings), passes };
 }

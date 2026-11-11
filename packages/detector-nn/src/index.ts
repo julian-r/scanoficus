@@ -32,6 +32,12 @@ export {
   workSize,
 } from './corners.ts';
 export { CpuRunner } from './cpu.ts';
+export {
+  createDecision,
+  DECISION_FEATURES,
+  type Decision,
+  type DecisionSpec,
+} from './decision.ts';
 export { decodeHeads, fitQuadToFrame, type NnOutput } from './decode.ts';
 export {
   createNnDetector,

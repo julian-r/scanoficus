@@ -1,0 +1,99 @@
+{
+ "main": "docquadnet2",
+ "refiner": "docquadnet3-refiner",
+ "scales": [
+  0.4,
+  0.2
+ ],
+ "features": [
+  "z",
+  "cl_min",
+  "cl_mean",
+  "cl1_min"
+ ],
+ "weights": [
+  0.5753093509248088,
+  -0.23591939289856673,
+  0.6655785531179895,
+  0.41959120626988994
+ ],
+ "bias": -1.6998794049714478,
+ "threshold": -1.2528567820767722,
+ "rule": "score = bias + \u03a3 weights[k] \u00b7 features[k]; return the refined quad if score > threshold",
+ "featureDefinitions": {
+  "z": "main-network presence logit (before the sigmoid), clipped to [-12, 12]",
+  "cl_min": "minimum over the 4 corners of the refiner's corner-confidence logit (heads[2]) in pass 2 (crop scale 0.2)",
+  "cl_mean": "mean over the 4 corners of the same pass-2 logits",
+  "cl1_min": "minimum over the 4 corners of the pass-1 logits (crop scale 0.4)"
+ },
+ "fit": {
+  "source": "results/r3/verify-final-zcl.json:z+cl",
+  "validation": {
+   "1%": {
+    "threshold": 1.9158416628338244,
+    "cocoValFp": 0.010376134889753566,
+    "synNegFp": 0.016666666666666666,
+    "realNegFp": 0.00927643784786642,
+    "dz-val:ji": 0.838064064841519,
+    "dz-val:rec": 0.8787878787878788,
+    "sd-val:ji": 0.9807121676865588,
+    "sd-val:rec": 1.0,
+    "syn-val-pos:ji": 0.8108579236171269,
+    "syn-val-pos:rec": 0.85
+   },
+   "2%": {
+    "threshold": 0.9347186021842107,
+    "cocoValFp": 0.019455252918287938,
+    "synNegFp": 0.030666666666666665,
+    "realNegFp": 0.011131725417439703,
+    "dz-val:ji": 0.8889803710731988,
+    "dz-val:rec": 0.9393939393939394,
+    "sd-val:ji": 0.9807121676865588,
+    "sd-val:rec": 1.0,
+    "syn-val-pos:ji": 0.8605382292185944,
+    "syn-val-pos:rec": 0.908
+   },
+   "5%": {
+    "threshold": -0.88172430083757,
+    "cocoValFp": 0.05058365758754864,
+    "synNegFp": 0.064,
+    "realNegFp": 0.01855287569573284,
+    "dz-val:ji": 0.9190638366598639,
+    "dz-val:rec": 0.9757575757575757,
+    "sd-val:ji": 0.9807121676865588,
+    "sd-val:rec": 1.0,
+    "syn-val-pos:ji": 0.9047482635991376,
+    "syn-val-pos:rec": 0.962
+   },
+   "10%": {
+    "threshold": -2.0533402871826025,
+    "cocoValFp": 0.09987029831387809,
+    "synNegFp": 0.12133333333333333,
+    "realNegFp": 0.022263450834879406,
+    "dz-val:ji": 0.9287111419393572,
+    "dz-val:rec": 0.9878787878787879,
+    "sd-val:ji": 0.9807121676865588,
+    "sd-val:rec": 1.0,
+    "syn-val-pos:ji": 0.916525261686789,
+    "syn-val-pos:rec": 0.9766666666666667
+   }
+  }
+ },
+ "thresholdRule": "lowest threshold with at most 5% of the COCO calibration half (even ids, 392 images) yielding a quad",
+ "calibration": {
+  "images": 392,
+  "fpAtThreshold": 0.04846938775510204,
+  "fpAt": {
+   "0.01": 0.007653061224489796,
+   "0.02": 0.017857142857142856,
+   "0.05": 0.04846938775510204,
+   "0.1": 0.09948979591836735
+  },
+  "thresholdsAt": {
+   "0.01": 0.5287438719197042,
+   "0.02": -0.4242210924205765,
+   "0.05": -1.2528567820767722,
+   "0.1": -1.9420471428544603
+  }
+ }
+}

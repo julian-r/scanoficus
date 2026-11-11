@@ -18,5 +18,6 @@ export const DOCQUADNET2: BundleSource = {
     scales: [0.4, 0.2],
     crop: 64,
     workSide: 1600,
+    coordinates: 'frame',
   },
 };

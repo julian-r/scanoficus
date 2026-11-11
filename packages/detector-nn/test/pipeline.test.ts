@@ -24,7 +24,8 @@ const file = (url: string | URL | undefined) => readFileSync(fileURLToPath(url a
 const refinerSource = DOCQUADNET2.refiner as NonNullable<typeof DOCQUADNET2.refiner>;
 const bundle: NnBundle = {
   name: 'docquadnet2',
-  threshold: DOCQUADNET2.threshold,
+  threshold: DOCQUADNET2.threshold as number,
+  decision: null,
   main: parseModel(
     JSON.parse(file(DOCQUADNET2.main.graphUrl).toString()),
     file(DOCQUADNET2.main.weightsUrl),

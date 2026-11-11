@@ -5,10 +5,12 @@ import {
   applyOffset,
   cornerFrame,
   cropPlan,
+  fromWork,
   pyramidSizes,
   type RefinerPass,
   type RefinerResult,
-  scalePoints,
+  readPass,
+  toWork,
   workSize,
 } from './corners.ts';
 import type { NnModel, Shape, Step } from './model.ts';
@@ -544,8 +546,8 @@ export class GlRunner {
     if (token !== undefined && token !== frame.version) throw new FrameChangedError();
     if (settings.crop !== net.model.width) throw new RangeError('Crop size does not match');
     const levels = this.buildPyramid(frame, settings.workSide);
-    const s = levels[0].width / frame.width;
-    let q = scalePoints(quad, s);
+    const work = { width: levels[0].width, height: levels[0].height };
+    let q = toWork(quad, frame, work, settings);
     const gl = this.gl;
     const { crop } = settings;
     const input = this.target(net, net.model.graph.input.name);
@@ -567,9 +569,9 @@ export class GlRunner {
         gl.drawArrays(gl.TRIANGLES, 0, 3);
       });
       const out = this.execute(net);
-      const offsets = frames.map((_, n) => [out[2 * n], out[2 * n + 1]] as [number, number]);
-      q = frames.map((f, n) => applyOffset(f, offsets[n]));
-      passes.push({ scale, offsets });
+      const pass = readPass(out, scale);
+      q = frames.map((f, n) => applyOffset(f, pass.offsets[n]));
+      passes.push(pass);
     }
     if (!this.checkedSizes.has('refine')) {
       const error = gl.getError();
@@ -578,7 +580,7 @@ export class GlRunner {
       }
       this.checkedSizes.add('refine');
     }
-    return { quad: scalePoints(q, s, true) as unknown as Quad, passes };
+    return { quad: fromWork(q, frame, work, settings), passes };
   }
 
   /** Releases all GPU resources (and the context if the runner created the canvas). */
@@ -658,7 +660,7 @@ export class GlRunner {
 
   /**
    * Checks that the GPU path works: no GL error, and the stored outputs for a constant input are
-   * reproduced by every batch item (relative tolerance 1e-3 for float32 storage, 1e-2 for
+   * reproduced by every batch item (relative tolerance 1e-3 for float32 storage, 5e-2 for
    * float16).
    */
   private selfTest(net: Net): void {
@@ -685,7 +687,9 @@ export class GlRunner {
     });
     const out = this.runTensorUnchecked(net, input);
     check('during the test inference');
-    const tolerance = this.precision === 'float32' ? 1e-3 : 1e-2;
+    // float16 activations: the refiner's corner logit moves by up to ~0.03 (fp16 vs fp32 in
+    // scanoficus-ml: 0.029), so float16 only catches gross failures.
+    const tolerance = this.precision === 'float32' ? 1e-3 : 5e-2;
     const per = out.length / net.batch;
     for (let n = 0; n < net.batch; n++) {
       cases[n].heads.forEach((expected, i) => {

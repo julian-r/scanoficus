@@ -168,14 +168,20 @@ type Canvas2D = OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D;
 export function createNnDetector(options: NnDetectorOptions = {}): NnDetector {
   const mode = options.backend ?? 'auto';
   const refine = options.refine === true ? {} : options.refine || null;
-  const refinerUse: Required<RefinerUse> =
+  /**
+   * When the refiner runs: stills by default; with a bundle decision (round 3) also live frames,
+   * because the decision needs the refiner's corner scores.
+   */
+  const refinerUse = (b: NnBundle): Required<RefinerUse> =>
     options.refiner === false
       ? { live: false, still: false }
       : {
-          live: options.refiner === true || (options.refiner?.live ?? false),
+          live: options.refiner === true || (options.refiner?.live ?? !!b.decision),
           still: options.refiner === true || (options.refiner?.still ?? true),
         };
-  const rule = options.presence ?? presenceProbability;
+  /** The presence rule: the option, else the bundle's decision, else the presence > threshold. */
+  const ruleFor = (b: NnBundle): PresenceRule =>
+    options.presence ?? b.decision?.rule ?? presenceProbability;
   let bundlePromise: Promise<NnBundle> | null = null;
   let init: Promise<NnBackend> | null = null;
   let bundle: NnBundle | null = null;
@@ -203,6 +209,7 @@ export function createNnDetector(options: NnDetectorOptions = {}): NnDetector {
         threshold: DEFAULT_THRESHOLD,
         main,
         refiner: null,
+        decision: null,
       }));
     } else bundlePromise = loadBundle(DOCQUADNET);
     return bundlePromise;
@@ -218,7 +225,8 @@ export function createNnDetector(options: NnDetectorOptions = {}): NnDetector {
       if (disposed) throw new Error('Detector disposed');
       bundle = b;
       if (mode !== 'cpu') {
-        const useRefiner = b.refiner && (refinerUse.live || refinerUse.still);
+        const use = refinerUse(b);
+        const useRefiner = b.refiner && (use.live || use.still);
         try {
           gl = new GlRunner(b.main, {
             precision: options.precision,
@@ -361,10 +369,14 @@ export function createNnDetector(options: NnDetectorOptions = {}): NnDetector {
   };
 
   /** The corner refiner on the job's frame (GPU if that frame is uploaded, else the CPU). */
-  const runRefiner = (b: NnBundle, job: FrameJob, quad: Quad) => {
+  const runRefiner = (b: NnBundle, job: FrameJob, out: NnOutput) => {
     const refiner = b.refiner as NonNullable<NnBundle['refiner']>;
     const { sx, sy } = job;
-    const scaled = quad.map((p) => ({ x: p.x * sx, y: p.y * sy })) as unknown as Quad;
+    // Round 3 starts from the network's normalized corners (in network order), round 2 from the
+    // quad in frame pixels (scaled to the source if the browser reduced a large bitmap).
+    const scaled = (refiner.coordinates === 'normalized'
+      ? [0, 1, 2, 3].map((i) => ({ x: out.heads[2 * i], y: out.heads[2 * i + 1] }))
+      : out.quad.map((p) => ({ x: p.x * sx, y: p.y * sy }))) as unknown as Quad;
     let result: ReturnType<typeof refineCornersCpu> | null = null;
     if (gl?.hasRefiner && job.token !== null) {
       try {
@@ -443,10 +455,12 @@ export function createNnDetector(options: NnDetectorOptions = {}): NnDetector {
         still,
         threshold,
       };
+      const rule = ruleFor(b);
+      const use = refinerUse(b);
       // The default rule decides before the (costly) refiner.
       if (rule === presenceProbability && !(out.presence > threshold)) return null;
-      if (b.refiner && (still ? refinerUse.still : refinerUse.live)) {
-        const refined = runRefiner(b, job, out.quad);
+      if (b.refiner && (still ? use.still : use.live)) {
+        const refined = runRefiner(b, job, out);
         signals.refinedQuad = orderQuad(refined.quad);
         signals.refiner = refined.passes;
       }
