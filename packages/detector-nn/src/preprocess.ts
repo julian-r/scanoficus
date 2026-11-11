@@ -14,11 +14,27 @@ export function preprocessRgba(
   targetWidth: number,
   targetHeight: number = targetWidth,
 ): Uint8Array {
+  if (frame.data.length !== frame.width * frame.height * 4) {
+    throw new RangeError('Expected RGBA pixels');
+  }
+  return preprocessRgb(
+    { width: frame.width, height: frame.height, data: rgbaToRgb(frame) },
+    targetWidth,
+    targetHeight,
+  );
+}
+
+/** {@link preprocessRgba} on interleaved RGB bytes (not modified). */
+export function preprocessRgb(
+  frame: { width: number; height: number; data: Uint8Array },
+  targetWidth: number,
+  targetHeight: number = targetWidth,
+): Uint8Array {
   const size = targetWidth;
   let width = frame.width;
   let height = frame.height;
-  if (frame.data.length !== width * height * 4) throw new RangeError('Expected RGBA pixels');
-  let rgb = rgbaToRgb(frame);
+  if (frame.data.length !== width * height * 3) throw new RangeError('Expected RGB pixels');
+  let rgb = frame.data;
   while (width >= 2 * size && height >= 2 * targetHeight && width % 2 === 0 && height % 2 === 0) {
     rgb = areaInteger(rgb, width, height, 2, 2);
     width /= 2;

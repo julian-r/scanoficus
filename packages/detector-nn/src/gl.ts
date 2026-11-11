@@ -36,6 +36,14 @@ export type GlPrecision = 'float32' | 'float16';
 /** Frames the runtime can upload as a texture. */
 export type GlFrame = ImageBitmap | RgbaImage | HTMLCanvasElement | OffscreenCanvas;
 
+/** Thrown by {@link GlRunner.refine} when the frame of the given token is no longer uploaded. */
+export class FrameChangedError extends Error {
+  constructor() {
+    super('The frame of this token is no longer on the GPU');
+    this.name = 'FrameChangedError';
+  }
+}
+
 /** Thrown while the WebGL context is lost; the runtime rebuilds itself after a restore. */
 export class ContextLostError extends Error {
   constructor() {
@@ -438,9 +446,19 @@ export class GlRunner {
 
   /** Preprocesses `frame` on the GPU and runs the network. Returns the 9 raw outputs. */
   run(frame: GlFrame): Float32Array {
+    return this.runFrame(frame).heads;
+  }
+
+  /**
+   * Like {@link run}, and returns a token of the uploaded frame: {@link refine} with that token
+   * throws {@link FrameChangedError} if another frame was uploaded in between (or the context
+   * was rebuilt), instead of cropping the wrong frame.
+   */
+  runFrame(frame: GlFrame): { heads: Float32Array; token: number } {
     this.ensure();
     this.preprocess(frame);
-    return this.execute(this.nets[0]);
+    const heads = this.execute(this.nets[0]);
+    return { heads, token: this.frame?.version ?? -1 };
   }
 
   /** Runs the network on an already preprocessed `C × H × W` input (CHW). */
@@ -518,11 +536,12 @@ export class GlRunner {
    * image, pyramid and per pass one crop draw per corner and one batched refiner inference (see
    * `refineCornersCpu` for the pipeline). Returns the refined quad and the offsets.
    */
-  refine(quad: Quad, settings: RefinerSettings): RefinerResult {
+  refine(quad: Quad, settings: RefinerSettings, token?: number): RefinerResult {
     this.ensure();
     const net = this.refinerNet();
     const frame = this.frame;
     if (!frame) throw new Error('refine() needs a frame: call run() first');
+    if (token !== undefined && token !== frame.version) throw new FrameChangedError();
     if (settings.crop !== net.model.width) throw new RangeError('Crop size does not match');
     const levels = this.buildPyramid(frame, settings.workSide);
     const s = levels[0].width / frame.width;

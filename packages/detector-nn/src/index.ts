@@ -47,6 +47,7 @@ export {
 export {
   ContextLostError,
   createGlContext,
+  FrameChangedError,
   type GlFrame,
   type GlPrecision,
   GlRunner,
@@ -70,7 +71,7 @@ export {
   verifyWeights,
   type WeightRef,
 } from './model.ts';
-export { bytesToInput, preprocessRgba, rgbaToRgb } from './preprocess.ts';
+export { bytesToInput, preprocessRgb, preprocessRgba, rgbaToRgb } from './preprocess.ts';
 export { type RefineOptions, refineQuad } from './refine.ts';
 export {
   createNnDetectorWorker,

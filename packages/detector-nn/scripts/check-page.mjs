@@ -396,6 +396,77 @@ export async function stillDetectors({ worker }) {
   return results;
 }
 
+/**
+ * Concurrent calls on one main-thread detector (the same tick, during the cold start and
+ * warm) refine their own frame; a stale GPU frame token is refused.
+ */
+export async function concurrency() {
+  const meta = await refinerFixtures();
+  const a = meta.cases.find((c) => c.name.startsWith('page'));
+  const b = meta.cases.find((c) => c.name.startsWith('partial'));
+  const [fa, fb] = [await frame(a), await frame(b)];
+  const detector = createNnDetector({ bundle: DOCQUADNET2, backend: 'webgl2', clipToFrame: false });
+  const errors = [];
+  for (const round of ['cold', 'warm']) {
+    const [da, db] = await Promise.all([
+      detector.detectStill(fa),
+      detector.detectStill(fb),
+      detector.detect(fa), // live, raw quad, interleaved with the stills
+    ]);
+    errors.push({ round, a: quadError(da.quad, a.refined), b: quadError(db.quad, b.refined) });
+  }
+  detector.dispose();
+  const bundle = await loadBundle(DOCQUADNET2);
+  const runner = new GlRunner(bundle.main, { refiner: bundle.refiner.model });
+  const { token } = runner.runFrame(fa);
+  runner.run(fb);
+  const quad = a.main.rawQuad.map(([x, y]) => ({ x, y }));
+  const stale = (() => {
+    try {
+      runner.refine(quad, bundle.refiner, token);
+      return null;
+    } catch (e) {
+      return e.name;
+    }
+  })();
+  runner.dispose();
+  return { errors, stale };
+}
+
+/**
+ * The CPU path with a 12 MP bitmap still: the browser draws it once at 3200 px (one
+ * getImageData), and the refined quad still lands on the page.
+ */
+export async function cpuStill() {
+  const meta = await refinerFixtures();
+  const c = meta.cases.find((x) => x.name.startsWith('page'));
+  const reads = [];
+  const proto = OffscreenCanvasRenderingContext2D.prototype;
+  const original = proto.getImageData;
+  proto.getImageData = function (...args) {
+    reads.push(`${args[2]}×${args[3]}`);
+    return original.apply(this, args);
+  };
+  try {
+    const detector = createNnDetector({ bundle: DOCQUADNET2, backend: 'cpu', clipToFrame: false });
+    await detector.ready();
+    reads.length = 0;
+    const big = await still12(meta);
+    const detection = await detector.detectStill(await createImageBitmap(big));
+    detector.dispose();
+    const scale = 4000 / c.width;
+    const truth = c.page.map(([x, y]) => [x * scale, y * scale]);
+    const error = Math.max(
+      ...detection.quad.map((p) =>
+        Math.min(...truth.map(([x, y]) => Math.hypot(p.x - x, p.y - y))),
+      ),
+    );
+    return { reads, error: error / scale };
+  } finally {
+    proto.getImageData = original;
+  }
+}
+
 /** A 4000×3000 (12 MP) still: the 640×480 page scene drawn large by the browser. */
 async function still12(meta) {
   const c = meta.cases.find((x) => x.name.startsWith('page'));

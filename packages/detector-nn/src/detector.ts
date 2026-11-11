@@ -4,12 +4,18 @@ import { type GrayImage, type RgbaImage, rgbaToGray } from '@scanoficus/core/ima
 import type { DetectorFrame, DocumentDetector } from '@scanoficus/core/worker';
 import { type BundleSource, loadBundle, type NnBundle } from './bundle.ts';
 import { DOCQUADNET } from './bundle-docquadnet.ts';
-import { type RefinerPass, refineCornersCpu } from './corners.ts';
+import { type RefinerPass, type RgbImage, refineCornersCpu } from './corners.ts';
 import { CpuRunner } from './cpu.ts';
 import { decodeHeads, fitQuadToFrame, type NnOutput } from './decode.ts';
-import { ContextLostError, createCanvas, type GlPrecision, GlRunner } from './gl.ts';
+import {
+  ContextLostError,
+  createCanvas,
+  FrameChangedError,
+  type GlPrecision,
+  GlRunner,
+} from './gl.ts';
 import { loadModel, type NnModel } from './model.ts';
-import { bytesToInput, preprocessRgba, rgbaToRgb } from './preprocess.ts';
+import { bytesToInput, preprocessRgb, rgbaToRgb } from './preprocess.ts';
 import { type RefineOptions, refineQuad } from './refine.ts';
 
 /** Presence threshold of the round-1 model (scanoficus-ml `export/docquadnet/threshold.json`). */
@@ -248,23 +254,79 @@ export function createNnDetector(options: NnDetectorOptions = {}): NnDetector {
     return canvas2d.ctx;
   };
 
-  /** RGBA pixels of a frame; bitmaps are drawn (and optionally downscaled) by the browser. */
-  const pixels = (frame: DetectorFrame, width = frame.width, height = frame.height): RgbaImage => {
-    if (!isBitmap(frame)) return frame;
+  /** RGBA pixels of a bitmap drawn (and optionally resized) by the browser. */
+  const drawBitmap = (bitmap: ImageBitmap, width: number, height: number): RgbaImage => {
     const ctx = context2d(width, height);
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(frame, 0, 0, width, height);
+    ctx.drawImage(bitmap, 0, 0, width, height);
     return ctx.getImageData(0, 0, width, height);
   };
 
-  /** Whether the frame of the last main-network run is on the GPU (for the refiner). */
-  let frameOnGpu = false;
+  /**
+   * One frame in flight: what the networks run on (`source`: the frame, or for a bitmap that is
+   * too large, a browser-drawn copy at `sx × sy` of its size), the pixels read from it (once),
+   * and the token of its upload to the GPU.
+   */
+  interface FrameJob {
+    frame: DetectorFrame;
+    source: DetectorFrame;
+    sx: number;
+    sy: number;
+    rgba: RgbaImage | null;
+    rgb: RgbImage | null;
+    token: number | null;
+  }
 
-  const runCpu = (m: NnModel, frame: DetectorFrame): Float32Array => {
+  /**
+   * Bitmaps above the GPU's texture limit (or, on the CPU, above 2 × the refiner's work side)
+   * are drawn by the browser at a long side of 2 × workSide (3200) first, so a 50 MP still is
+   * never read at full size. This path is not bit-exact with the Python pipeline (the browser's
+   * filter instead of one area resize). RGBA frames are used as they are.
+   */
+  const prepare = (frame: DetectorFrame): FrameJob => {
+    const job: FrameJob = {
+      frame,
+      source: frame,
+      sx: 1,
+      sy: 1,
+      rgba: null,
+      rgb: null,
+      token: null,
+    };
+    if (!isBitmap(frame)) return job;
+    const reduced = 2 * (bundle?.refiner?.workSide ?? 1600);
+    const long = Math.max(frame.width, frame.height);
+    const limit = gl ? gl.maxFrameSize : reduced;
+    if (long <= limit) return job;
+    const k = Math.min(limit, reduced) / long;
+    const width = Math.max(1, Math.round(frame.width * k));
+    const height = Math.max(1, Math.round(frame.height * k));
+    job.rgba = drawBitmap(frame, width, height);
+    job.source = job.rgba;
+    job.sx = width / frame.width;
+    job.sy = height / frame.height;
+    return job;
+  };
+
+  const rgbaOf = (job: FrameJob): RgbaImage => {
+    job.rgba ??= isBitmap(job.source)
+      ? drawBitmap(job.source, job.source.width, job.source.height)
+      : job.source;
+    return job.rgba;
+  };
+
+  const rgbOf = (job: FrameJob): RgbImage => {
+    if (!job.rgb) {
+      const rgba = rgbaOf(job);
+      job.rgb = { width: rgba.width, height: rgba.height, data: rgbaToRgb(rgba) };
+    }
+    return job.rgb;
+  };
+
+  const runCpu = (m: NnModel, job: FrameJob): Float32Array => {
     cpu ??= new CpuRunner(m);
     lastBackend = 'cpu';
-    frameOnGpu = false;
-    return cpu.run(bytesToInput(preprocessRgba(pixels(frame), m.width, m.height)));
+    return cpu.run(bytesToInput(preprocessRgb(rgbOf(job), m.width, m.height)));
   };
 
   /** A GL failure: context loss → this frame on the CPU; anything else → CPU from now on. */
@@ -277,72 +339,97 @@ export function createNnDetector(options: NnDetectorOptions = {}): NnDetector {
     }
   };
 
-  const run = (m: NnModel, frame: DetectorFrame): Float32Array => {
+  const run = (m: NnModel, job: FrameJob): Float32Array => {
     if (gl) {
       try {
-        const fits = Math.max(frame.width, frame.height) <= gl.maxFrameSize;
-        const heads = fits
-          ? gl.run(frame)
-          : gl.runTensor(bytesToInput(preprocessRgba(pixels(frame), m.width, m.height)));
+        const { source } = job;
+        let heads: Float32Array;
+        if (Math.max(source.width, source.height) <= gl.maxFrameSize) {
+          const result = gl.runFrame(source);
+          heads = result.heads;
+          job.token = result.token;
+        } else {
+          heads = gl.runTensor(bytesToInput(preprocessRgb(rgbOf(job), m.width, m.height)));
+        }
         lastBackend = 'webgl2';
-        frameOnGpu = fits;
         return heads;
       } catch (error) {
         glFailed(error);
       }
     }
-    return runCpu(m, frame);
+    return runCpu(m, job);
   };
 
-  /** The corner refiner on the frame of the last run (GPU if it is there, else the CPU). */
-  const runRefiner = (b: NnBundle, frame: DetectorFrame, quad: Quad) => {
+  /** The corner refiner on the job's frame (GPU if that frame is uploaded, else the CPU). */
+  const runRefiner = (b: NnBundle, job: FrameJob, quad: Quad) => {
     const refiner = b.refiner as NonNullable<NnBundle['refiner']>;
-    if (gl?.hasRefiner && frameOnGpu) {
+    const { sx, sy } = job;
+    const scaled = quad.map((p) => ({ x: p.x * sx, y: p.y * sy })) as unknown as Quad;
+    let result: ReturnType<typeof refineCornersCpu> | null = null;
+    if (gl?.hasRefiner && job.token !== null) {
       try {
-        return gl.refine(quad, refiner);
+        result = gl.refine(scaled, refiner, job.token);
       } catch (error) {
-        glFailed(error);
+        // Another frame on the GPU (cannot happen while process() is serialized): CPU.
+        if (!(error instanceof FrameChangedError)) glFailed(error);
       }
     }
-    cpuRefiner ??= new CpuRunner(refiner.model);
-    const runner = cpuRefiner;
-    const rgba = pixels(frame);
-    lastBackend = 'cpu';
-    return refineCornersCpu(
-      { width: rgba.width, height: rgba.height, data: rgbaToRgb(rgba) },
-      quad,
-      refiner,
-      (input, n) => runner.run(input, n),
-    );
+    if (!result) {
+      cpuRefiner ??= new CpuRunner(refiner.model);
+      const runner = cpuRefiner;
+      lastBackend = 'cpu';
+      result = refineCornersCpu(rgbOf(job), scaled, refiner, (input, n) => runner.run(input, n));
+    }
+    if (sx === 1 && sy === 1) return result;
+    return {
+      ...result,
+      quad: result.quad.map((p) => ({ x: p.x / sx, y: p.y / sy })) as unknown as Quad,
+    };
   };
 
   /** Runs the network without consuming the frame. */
-  const evaluate = async (frame: DetectorFrame): Promise<NnOutput> => {
+  const evaluate = async (job: FrameJob): Promise<NnOutput> => {
     await ready();
     if (disposed) throw new Error('Detector disposed');
     const m = (bundle as NnBundle).main;
+    const { frame } = job;
     if (!(frame.width >= 1 && frame.height >= 1)) throw new RangeError('Empty frame');
     if (!isBitmap(frame) && frame.data?.length !== frame.width * frame.height * 4) {
       throw new TypeError('Expected an ImageBitmap or RGBA pixels with ImageData layout');
     }
-    return decodeHeads(run(m, frame), frame.width, frame.height);
+    return decodeHeads(run(m, job), frame.width, frame.height);
   };
 
   /** Gray frame at ≤ `longSide` for refinement (bitmaps are downscaled by the browser). */
-  const grayFor = (frame: DetectorFrame, longSide: number): GrayImage => {
+  const grayFor = (job: FrameJob, longSide: number): GrayImage => {
+    const { frame } = job;
     const scale = Math.min(1, longSide / Math.max(frame.width, frame.height));
     if (isBitmap(frame)) {
       const w = Math.max(1, Math.round(frame.width * scale));
       const h = Math.max(1, Math.round(frame.height * scale));
-      return rgbaToGray(pixels(frame, w, h));
+      return rgbaToGray(drawBitmap(frame, w, h));
     }
     return rgbaToGray(frame); // refineQuad area-downscales it
+  };
+
+  /**
+   * Frames are processed one at a time, in call order: the GPU holds one uploaded frame and the
+   * refiner reads it, so two concurrent calls must not interleave.
+   */
+  let tail: Promise<unknown> = Promise.resolve();
+  const serialized = <T>(task: () => Promise<T>): Promise<T> => {
+    const next = tail.then(task, task);
+    tail = next.catch(() => {});
+    return next;
   };
 
   /** The whole pipeline for one frame: network, refiner, presence rule, edge refinement. */
   const process = async (frame: DetectorFrame, still: boolean): Promise<Detection | null> => {
     try {
-      const out = await evaluate(frame);
+      await ready();
+      if (disposed) throw new Error('Detector disposed');
+      const job = prepare(frame);
+      const out = await evaluate(job);
       const b = bundle as NnBundle;
       const threshold = options.threshold ?? b.threshold;
       const signals: PresenceSignals = {
@@ -359,7 +446,7 @@ export function createNnDetector(options: NnDetectorOptions = {}): NnDetector {
       // The default rule decides before the (costly) refiner.
       if (rule === presenceProbability && !(out.presence > threshold)) return null;
       if (b.refiner && (still ? refinerUse.still : refinerUse.live)) {
-        const refined = runRefiner(b, frame, out.quad);
+        const refined = runRefiner(b, job, out.quad);
         signals.refinedQuad = orderQuad(refined.quad);
         signals.refiner = refined.passes;
       }
@@ -368,7 +455,7 @@ export function createNnDetector(options: NnDetectorOptions = {}): NnDetector {
       let quad: Quad = signals.refinedQuad ?? out.quad;
       if (refine) {
         const longSide = refine.longSide ?? 1024;
-        const gray = grayFor(frame, longSide);
+        const gray = grayFor(job, longSide);
         const sx = gray.width / frame.width;
         const sy = gray.height / frame.height;
         const scaled = quad.map((p) => ({ x: p.x * sx, y: p.y * sy })) as unknown as Quad;
@@ -402,15 +489,18 @@ export function createNnDetector(options: NnDetectorOptions = {}): NnDetector {
       return bundle;
     },
     ready,
-    async infer(frame) {
-      try {
-        return await evaluate(frame);
-      } finally {
-        if (isBitmap(frame)) frame.close();
-      }
-    },
-    detect: (frame) => process(frame, false),
-    detectStill: (frame) => process(frame, true),
+    infer: (frame) =>
+      serialized(async () => {
+        try {
+          await ready();
+          if (disposed) throw new Error('Detector disposed');
+          return await evaluate(prepare(frame));
+        } finally {
+          if (isBitmap(frame)) frame.close();
+        }
+      }),
+    detect: (frame) => serialized(() => process(frame, false)),
+    detectStill: (frame) => serialized(() => process(frame, true)),
     dispose() {
       disposed = true;
       (gl as GlRunner | null)?.dispose();

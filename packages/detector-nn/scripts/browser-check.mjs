@@ -232,6 +232,28 @@ for (const [label, arg] of [
   );
 }
 
+{
+  const r = await inPage('concurrency');
+  report.concurrency = r;
+  const worst = Math.max(...r.errors.flatMap((e) => [e.a, e.b]));
+  check(
+    'concurrent detectStill/detect calls on one detector refine their own frames',
+    worst < 0.05 && r.stale === 'FrameChangedError',
+    `${r.errors.map((e) => `${e.round}: ${e.a.toFixed(4)} / ${e.b.toFixed(4)} px`).join(', ')}; ` +
+      `stale token → ${r.stale}`,
+  );
+}
+
+{
+  const r = await inPage('cpuStill');
+  report.cpuStill = r;
+  check(
+    'CPU path: a 12 MP bitmap still is read once, at 3200 px, and refined onto the page',
+    r.reads.length === 1 && r.reads[0] === '3200×2400' && r.error < 2,
+    `reads ${r.reads.join(', ')}; corner error ${r.error.toFixed(2)} px (640×480 scale)`,
+  );
+}
+
 // ---- robustness -------------------------------------------------------------------------------
 {
   const r = await inPage('contextLoss');

@@ -64,6 +64,20 @@ describe('round-2 pipeline (CPU backend)', () => {
     }
   });
 
+  it('serializes concurrent calls (each frame refined on its own pixels)', async () => {
+    const detector = createNnDetector({ bundle, backend: 'cpu', clipToFrame: false });
+    const a = byName('page-640x480');
+    const b = byName('partial-500x375');
+    const order: string[] = [];
+    const [da, db] = await Promise.all([
+      detector.detectStill(renderScene(a)).finally(() => order.push('a')),
+      detector.detectStill(renderScene(b)).finally(() => order.push('b')),
+    ]);
+    expect(quadError(da?.quad ?? [], a.refined)).toBeLessThan(0.02);
+    expect(quadError(db?.quad ?? [], b.refined)).toBeLessThan(0.02);
+    expect(order).toEqual(['a', 'b']);
+  });
+
   it('live detect() returns the raw quad unless live refinement is on', async () => {
     const c = byName('page-640x480');
     const live = await createNnDetector({ bundle, backend: 'cpu' }).detect(renderScene(c));
