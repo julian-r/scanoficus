@@ -222,9 +222,11 @@ export function detectDocument(
   const best = refined[0];
   if (!best || best.score < minScore) return null;
 
-  const back = gray.width / width;
+  // Width and height are rounded independently when downscaling, so map each axis separately.
+  const backX = gray.width / width;
+  const backY = gray.height / height;
   const toInput = (q: ScoredQuad): ScoredQuad => ({
-    quad: orderQuad(scaleQuad(q.quad, back)),
+    quad: orderQuad(scaleQuad(q.quad, backX, backY)),
     score: q.score,
   });
   const detection: Detection = toInput(best);

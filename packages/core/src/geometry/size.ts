@@ -12,6 +12,8 @@ export interface OutputSizeOptions {
   imageSize?: { width: number; height: number };
   /** Clamp the longer output side to this many pixels (aspect ratio is preserved). */
   maxLongSide?: number;
+  /** Clamp the output area to this many pixels (aspect ratio is preserved). */
+  maxPixels?: number;
 }
 
 /**
@@ -43,14 +45,17 @@ export function estimateOutputSize(
       else width = height * ratio;
     }
   }
-  if (options.maxLongSide !== undefined) {
-    const k = options.maxLongSide / Math.max(width, height);
-    if (k < 1) {
-      width *= k;
-      height *= k;
-    }
-  }
-  return { width: Math.max(1, Math.round(width)), height: Math.max(1, Math.round(height)) };
+  let k = 1;
+  if (options.maxLongSide !== undefined)
+    k = Math.min(k, options.maxLongSide / Math.max(width, height));
+  if (options.maxPixels !== undefined)
+    k = Math.min(k, Math.sqrt(options.maxPixels / (width * height)));
+  // Floor when scaling down so that rounding never exceeds the caps.
+  const round = k < 1 ? Math.floor : Math.round;
+  return {
+    width: Math.max(1, round(width * k)),
+    height: Math.max(1, round(height * k)),
+  };
 }
 
 /**

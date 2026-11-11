@@ -222,6 +222,8 @@ function projectRectangle(
 }
 
 describe('estimateOutputSize', () => {
+  const square4k = scaleQuad(square, 400);
+
   it('uses the longest opposite edges', () => {
     const quad: Quad = [
       { x: 0, y: 0 },
@@ -232,6 +234,18 @@ describe('estimateOutputSize', () => {
     const size = estimateOutputSize(quad);
     expect(size.width).toBe(100);
     expect(size.height).toBe(Math.round(Math.hypot(10, 60)));
+  });
+
+  it('clamps the pixel area preserving aspect', () => {
+    const square = estimateOutputSize(scaleQuad(square4k, 1), { maxPixels: 12_000_000 });
+    expect(square.width * square.height).toBeLessThanOrEqual(12_000_000);
+    expect(square.width).toBe(square.height);
+    const nearSquare = estimateOutputSize(scaleQuad(square4k, 1, 0.9), {
+      maxLongSide: 4000,
+      maxPixels: 12_000_000,
+    });
+    expect(nearSquare.width * nearSquare.height).toBeLessThanOrEqual(12_000_000);
+    expect(nearSquare.width / nearSquare.height).toBeCloseTo(1 / 0.9, 2);
   });
 
   it('clamps to maxLongSide preserving aspect', () => {
