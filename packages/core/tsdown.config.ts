@@ -13,7 +13,7 @@ export default defineConfig({
     camera: 'src/camera/index.ts',
     controller: 'src/controller/index.ts',
     worker: 'src/worker/index.ts',
-    'worker-entry': 'src/worker/entry.ts',
+    'worker-entry': 'src/worker/worker-entry.ts',
   },
   format: 'esm',
   platform: 'browser',

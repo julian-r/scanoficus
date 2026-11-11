@@ -81,7 +81,7 @@
       "import": "./dist/worker.js"
     },
     "./worker-entry": {
-      "@scanoficus/source": "./src/worker/entry.ts",
+      "@scanoficus/source": "./src/worker/worker-entry.ts",
       "types": "./dist/worker-entry.d.ts",
       "import": "./dist/worker-entry.js"
     },
