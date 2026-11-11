@@ -184,15 +184,17 @@ createDetector: () => createNnDetectorWorker({ bundle: DOCQUADNET3 }),
   starts the refiner from the network's normalized corners times the work-image size and maps
   the result back per axis, as `verify.run_pipeline` does (round 2: frame pixels times one
   scale, as `pipeline.py`); `RefinerSettings.coordinates` selects this.
-- **Precision.** float32 render targets (the default where available) reproduce the NumPy
-  score within 0.05. With float16 activations the corner logits move by up to 0.03 and the
-  score shifts: float16 − float32 was −0.14 on average (sd 0.22; clear pages −0.06 ± 0.10,
-  faint near-threshold pages −0.23 ± 0.27; 21 scenes, M5 Pro). The decision adds
-  `FLOAT16_SCORE_OFFSET` (+0.14) to float16 scores, which removes the mean; the spread
-  remains, so float16 decisions within about ±0.7 of the threshold can still differ from
-  float32 (2 of the 8 near-threshold test scenes flipped, at margins 0.06 and 0.31). On
-  scanoficus-ml's validation sets 0.3 % of the frames lie within 0.05 of the threshold, 1.0 %
-  within 0.15, 2.2 % within 0.3 and 4.3 % within 0.66 (0–11 % by set).
+- **Precision: prefer float32.** float32 render targets (the default where available) reproduce
+  the NumPy score within 0.05 on clear pages (0.1 on faint near-threshold pages). With float16
+  activations the corner logits move by up to 0.05 and the score shifts by an amount that
+  depends on the GPU: float16 − float32 averaged −0.14 (sd 0.22) on Apple M5 / Metal and about
+  −0.02 (sd 0.13) on SwiftShader (21 test scenes each), so no constant correction fits and
+  float16 decisions near the threshold vary by GPU (on Metal 2 of the 8 near-threshold test
+  scenes flipped). On scanoficus-ml's validation sets 0.3 % of the frames lie within 0.05 of
+  the threshold, 1.0 % within 0.15, 2.2 % within 0.3 and 4.3 % within 0.66 (0–11 % by set);
+  those are the frames whose float16 decision may differ. `PresenceSignals.precision` tells a
+  custom rule which precision a frame ran with. `pnpm check:nn` prints the float16 shift of the
+  GPU it runs on.
 
 ### Options (`createNnDetector`, `createNnDetectorWorker`)
 
@@ -338,16 +340,24 @@ it is still needed, for example in the demo's `public/` folder, loaded with
 **Round 3** (`test/round3.test.ts`, `pnpm check:nn`; fixtures from
 `scripts/make_round3_fixtures.py`: `verify.run_pipeline` + `features` + the decision with the
 NumPy interpreter as main network and refiner, and `OwnPipeline3` itself with the fp32 ONNX
-exports, on the 12 scenes of the round-2 fixtures):
+exports, on the 12 scenes of the round-2 fixtures, 8 faint near-threshold blends and a white page on a light table):
 
-| path                                                      | result                                                        |
-| --------------------------------------------------------- | ------------------------------------------------------------- |
-| CPU: crops from Python's pass inputs                      | bit-exact (SHA-256)                                           |
-| CPU / WebGL2 float32: 3 refiner outputs from those inputs | 6.2·10⁻⁶ / 9.5·10⁻⁶                                           |
-| CPU, end to end: corner-logit features / score vs NumPy   | 0.031 / 0.020 (score vs ONNX: 0.10, incl. no-document frames) |
-| WebGL2 float32, end to end: score vs NumPy / ONNX         | 0.011 / 0.052 (documents); quad 0.020 px / 0.23 px            |
-| WebGL2 float16, end to end: score vs NumPy                | 0.26                                                          |
-| accept / reject (12 scenes, CPU, float32, float16)        | all equal to NumPy and ONNX                                   |
+| path (clear pages unless noted)                                 | Apple M5 / Metal    | SwiftShader (CI)    |
+| --------------------------------------------------------------- | ------------------- | ------------------- |
+| CPU: crops from Python's pass inputs                            | bit-exact (SHA-256) | bit-exact           |
+| WebGL2 crops: values differing by one level from the CPU        | 0 of 2,064,384      | 24                  |
+| WebGL2 float32 network on the CPU crops: offsets / corner logit | 1.3·10⁻⁷ / 8.1·10⁻⁶ | 1.0·10⁻⁷ / 6.2·10⁻⁶ |
+| WebGL2 float32 end to end (own crops): offsets / corner logit   | 1.9·10⁻⁷ / 6.2·10⁻⁶ | 7.0·10⁻⁶ / 1.1·10⁻³ |
+| WebGL2 float32 score vs NumPy: clear / faint pages              | 0.011 / 0.042       | 0.005 / 0.061       |
+| WebGL2 float16 score vs NumPy: clear / faint pages              | 0.26 / 0.66         | 0.04 / 0.30         |
+| float16 − float32 score: mean (sd)                              | −0.14 (0.22)        | −0.02 (0.13)        |
+| CPU end to end: score vs NumPy, clear / faint pages             | 0.020 / 0.040       | (same)              |
+| accept / reject where the margin exceeds the tolerance          | all equal to NumPy  | all equal to NumPy  |
+
+Tolerances in `check:nn` (float32): the network on identical crops 10⁻⁴; end to end offsets
+10⁻³ and corner logit 4·10⁻³ (GLSL ES 3.00 has no fma, so a GPU may round a few crop pixels
+differently from OpenCV, and the corner logit reacts to single pixels; 3.5× SwiftShader's
+1.1·10⁻³); score 0.05 on clear and 0.1 on faint pages.
 
 End to end, the main network's 10⁻⁶ differences move the crops by about 10⁻³ px, which flips
 a few 8-bit crop levels and moves the corner logits by up to a few hundredths; from identical
@@ -391,7 +401,8 @@ the presence threshold rejects them anyway.
 
 **Round 1:**
 
-Checked with `pnpm check:nn` (headless Chrome; it also passes with SwiftShader, as on CI). The
+Checked with `pnpm check:nn` (headless Chrome; `pnpm check:nn:swiftshader` forces the
+SwiftShader software renderer that CI uses). The
 reference is the NumPy interpreter `scanoficus_ml.rawgraph.run_graph`. The 10 synthetic test
 frames (160×120 to 1280×720, including 384×173 and 173×384 from 20:9 streams, 768×192, an
 empty and a noise frame) are generated bit-identically in Python and TypeScript, so the
@@ -516,6 +527,7 @@ scanoficus-ml repository. `models/LICENSE.md` carries this notice next to the fi
 ```sh
 pnpm --filter @scanoficus/detector-nn test            # CPU parity, preprocessing, refinement, hybrid
 pnpm build && pnpm check:nn                           # WebGL2 parity and robustness in headless Chrome
+pnpm check:nn:swiftshader                             # the same on SwiftShader (as on CI)
 pnpm bench:nn                                         # also cold start and warm timings
 # regenerate models/ and the fixtures (needs the scanoficus-ml checkout and its virtualenv):
 PY="env PYTHONDONTWRITEBYTECODE=1 $HOME/src/scanoficus-ml/.venv/bin/python"

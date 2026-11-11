@@ -303,6 +303,7 @@ pnpm bench:fetch # download SmartDoc 2015 / MIDV-500 / MIDV-2019 to ~/datasets/s
 pnpm bench       # real-data detector benchmark; then pnpm bench:report, pnpm bench:montage
 pnpm dev:demo    # demo dev server (use https or localhost for camera access)
 pnpm check:nn    # detector-nn WebGL2 parity and robustness in headless Chrome (after pnpm build)
+pnpm check:nn:swiftshader  # the same with the SwiftShader software renderer, as on CI
 pnpm bench:nn    # detector-nn cold start and per-frame timings
 ```
 
