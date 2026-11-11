@@ -8,6 +8,19 @@ import { FrameGrabber, startFrameLoop } from '../camera/frames.ts';
 import type { RgbaImage } from '../image.ts';
 import type { PageSource } from '../render/renderer.ts';
 
+/** A still from {@link ScannerCamera.captureStill}. */
+export interface ScannerStill {
+  image: PageSource;
+  width: number;
+  height: number;
+  /**
+   * True if the still shows exactly the preview's field of view (e.g. a video frame), so that
+   * preview coordinates can be scaled onto it. False for stills that may be cropped or
+   * framed differently (Image Capture photos).
+   */
+  matchesPreview: boolean;
+}
+
 /**
  * What the {@link ScannerController} needs from a live camera. The default implementation
  * ({@link openScannerCamera}) wraps `openCamera`, `startFrameLoop` and `FrameGrabber`; tests and
@@ -23,7 +36,7 @@ export interface ScannerCamera {
   /** Current frame downscaled to at most `maxSide`, or `null` if no frame is available. */
   grabFrame(maxSide: number): RgbaImage | null;
   /** Captures a still at the best available resolution. */
-  captureStill(): Promise<{ image: PageSource; width: number; height: number }>;
+  captureStill(): Promise<ScannerStill>;
   setTorch(on: boolean): Promise<boolean>;
   /** Registers a callback for the camera ending unexpectedly (track ended, device lost). */
   onEnded(callback: () => void): void;
@@ -47,7 +60,10 @@ export async function openScannerCamera(
     features: session.features,
     onFrame: (callback) => startFrameLoop(video, callback),
     grabFrame: (maxSide) => grabber.grab(video, maxSide),
-    captureStill: (): Promise<StillCapture> => session.captureStill(),
+    async captureStill() {
+      const still: StillCapture = await session.captureStill();
+      return { ...still, matchesPreview: still.method === 'video-frame' };
+    },
     setTorch: (on) => session.setTorch(on),
     onEnded(callback) {
       session.track.addEventListener('ended', callback);

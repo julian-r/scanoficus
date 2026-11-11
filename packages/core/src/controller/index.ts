@@ -4,7 +4,7 @@
  *
  * @module
  */
-export { openScannerCamera, type ScannerCamera } from './camera-source.ts';
+export { openScannerCamera, type ScannerCamera, type ScannerStill } from './camera-source.ts';
 export {
   type LiveDetection,
   type PageChanges,

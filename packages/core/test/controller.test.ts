@@ -1,107 +1,20 @@
-import { readFileSync } from 'node:fs';
 import { PDFDocument } from 'pdf-lib';
 import { describe, expect, it } from 'vitest';
 import { CameraError, type CameraOptions } from '../src/camera/index.ts';
 import {
   type ScannerCamera,
   ScannerController,
-  type ScannerOptions,
-  type ScannerState,
+  type ScannerStill,
 } from '../src/controller/index.ts';
-import { convexIoU, type Quad, scaleQuad } from '../src/geometry/index.ts';
-import type { PageRenderer } from '../src/render/index.ts';
-import { createMainThreadDetector } from '../src/worker/index.ts';
+import { convexIoU, scaleQuad } from '../src/geometry/index.ts';
+import {
+  createDetectorWorker,
+  createMainThreadDetector,
+  type DocumentDetector,
+} from '../src/worker/index.ts';
+import { FakeWorker } from './support/fake-worker.ts';
+import { FakeCamera, flush, jpeg, setup } from './support/scanner-fakes.ts';
 import { generateScene } from './support/synthetic.ts';
-
-const jpeg = new Uint8Array(readFileSync(new URL('./fixtures/rgb.jpg', import.meta.url)));
-
-/** Camera serving a synthetic scene: 384×288 preview frames, 768×576 stills. */
-class FakeCamera implements ScannerCamera {
-  readonly width = 768;
-  readonly height = 576;
-  readonly features = { torch: true, photo: false };
-  torch = false;
-  stopped = false;
-  private callback: ((t: number) => void) | null = null;
-  private ended: (() => void) | null = null;
-  readonly frame;
-  readonly still;
-  readonly quad: Quad;
-
-  constructor(seed = 2) {
-    this.frame = generateScene('easy', seed, 384, 288);
-    this.still = generateScene('easy', seed, 768, 576);
-    this.quad = this.still.quad as Quad;
-  }
-
-  onFrame(callback: (t: number) => void) {
-    this.callback = callback;
-    return () => {
-      this.callback = null;
-    };
-  }
-  tick() {
-    this.callback?.(0);
-  }
-  grabFrame() {
-    return this.frame.image;
-  }
-  async captureStill() {
-    return { image: this.still.image, width: 768, height: 576 };
-  }
-  async setTorch(on: boolean) {
-    this.torch = on;
-    return on;
-  }
-  onEnded(callback: () => void) {
-    this.ended = callback;
-  }
-  end() {
-    this.ended?.();
-  }
-  stop() {
-    this.stopped = true;
-  }
-}
-
-/** Renderer recording its calls and returning a real (tiny) JPEG. */
-function fakeRenderer() {
-  const calls: Parameters<PageRenderer['render']>[1][] = [];
-  const renderer: PageRenderer = {
-    backend: 'cpu',
-    async render(_source, options) {
-      calls.push(options);
-      return new Blob([jpeg], { type: 'image/jpeg' });
-    },
-    dispose() {},
-  };
-  return { renderer, calls };
-}
-
-const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
-
-function setup(options: Partial<ScannerOptions> = {}, camera = new FakeCamera()) {
-  let time = 0;
-  const { renderer, calls } = fakeRenderer();
-  const controller = new ScannerController({
-    detector: createMainThreadDetector(),
-    renderer,
-    openCamera: async () => camera,
-    now: () => time,
-    ...options,
-  });
-  const states: ScannerState[] = [];
-  controller.on('state', ({ state }) => states.push(state));
-  /** Delivers `n` frames, advancing the clock by `ms` per frame. */
-  const frames = async (n: number, ms = 100) => {
-    for (let i = 0; i < n; i++) {
-      time += ms;
-      camera.tick();
-      await flush();
-    }
-  };
-  return { controller, camera, calls, states, frames };
-}
 
 const video = {} as HTMLVideoElement;
 
@@ -321,5 +234,132 @@ describe('ScannerController', () => {
     expect(camera.stopped).toBe(true);
     expect(controller.state).toBe('idle');
     expect(controller.getSnapshot()).toMatchObject({ error: null, cameraStage: null });
+  });
+
+  it('replaces a failed worker detector by the main-thread detector and reports why', async () => {
+    // A worker whose script fails to load: it never answers, then reports a bare error event.
+    const worker = new FakeWorker({ ready: false });
+    worker.responsive = false;
+    let created = 0;
+    const { controller, camera, frames } = setup({
+      detector: undefined,
+      createDetector: () => {
+        created++;
+        const detector = createDetectorWorker({ worker });
+        setTimeout(() => worker.error());
+        return detector;
+      },
+      autoCapture: false,
+    });
+    const errors: string[] = [];
+    controller.on('error', ({ error }) => errors.push(error.message));
+    await controller.start(video);
+    await frames(3);
+    expect(created).toBe(1);
+    expect(worker.terminated).toBe(true);
+    expect(errors).toEqual([
+      expect.stringContaining(
+        'Falling back to main-thread detection: Detector worker failed to load',
+      ),
+    ]);
+    expect(convexIoU(controller.getSnapshot().detection!.quad!, camera.quad)).toBeGreaterThan(0.95);
+  });
+
+  it('disposes detectors it created, but not injected ones', async () => {
+    const disposed: string[] = [];
+    const tracked = (name: string): DocumentDetector => {
+      const inner = createMainThreadDetector();
+      return {
+        detect: (frame, options) => inner.detect(frame, options),
+        dispose: () => disposed.push(name),
+      };
+    };
+    const owned = setup({ detector: undefined, createDetector: () => tracked('owned') });
+    await owned.controller.start(video);
+    await owned.frames(1);
+    owned.controller.dispose();
+    const injected = setup({ detector: tracked('injected') });
+    await injected.controller.start(video);
+    await injected.frames(1);
+    injected.controller.dispose();
+    expect(disposed).toEqual(['owned']);
+  });
+
+  it('discards a capture that completes after stop() and releases its still', async () => {
+    const { controller, camera, frames } = setup({ autoCapture: false });
+    await controller.start(video);
+    await frames(2);
+    let release: (still: ScannerStill) => void = () => {};
+    let closed = false;
+    const image = {
+      width: 768,
+      height: 576,
+      close: () => (closed = true),
+    } as unknown as ImageBitmap;
+    camera.nextStill = () => new Promise((resolve) => (release = resolve));
+    const pending = controller.capture();
+    controller.stop();
+    release({ image, width: 768, height: 576, matchesPreview: true });
+    expect(await pending).toBeNull();
+    expect(closed).toBe(true);
+    expect(controller.pages).toHaveLength(0);
+    expect(controller.state).toBe('idle');
+  });
+
+  it('does not add pages whose rendering finishes after dispose()', async () => {
+    let finish: (blob: Blob) => void = () => {};
+    const revoked: string[] = [];
+    const originalRevoke = URL.revokeObjectURL;
+    URL.revokeObjectURL = (url: string) => {
+      revoked.push(url);
+      originalRevoke(url);
+    };
+    try {
+      const controller = new ScannerController({
+        detector: createMainThreadDetector(),
+        renderer: {
+          backend: 'cpu',
+          render: () => new Promise<Blob>((resolve) => (finish = resolve)),
+          dispose() {},
+        },
+      });
+      const pending = controller.addImage(generateScene('easy', 8, 320, 240).image);
+      await flush();
+      controller.dispose();
+      finish(new Blob([jpeg], { type: 'image/jpeg' }));
+      await expect(pending).rejects.toThrow('disposed');
+      expect(controller.pages).toHaveLength(0);
+      expect(revoked).toHaveLength(1);
+    } finally {
+      URL.revokeObjectURL = originalRevoke;
+    }
+  });
+
+  it('trusts the still detection of a differently framed photo', async () => {
+    const { controller, camera, frames } = setup({ autoCapture: false });
+    await controller.start(video);
+    await frames(3); // preview quad tracked for scene 2
+    // The photo shows a different crop (here: a different scene) than the preview.
+    const photo = generateScene('easy', 9, 1024, 768);
+    camera.nextStill = async () => ({
+      image: photo.image,
+      width: 1024,
+      height: 768,
+      matchesPreview: false,
+    });
+    const page = (await controller.capture())!;
+    expect(convexIoU(page.quad, photo.quad!)).toBeGreaterThan(0.95);
+    expect(page.detected).toBe(true);
+  });
+
+  it('caps rendered pages at 12 MP by default', async () => {
+    const { controller, calls } = setup();
+    // A blank 4000×4000 image: no document, so the whole (square) image is the page.
+    const blank = { width: 4000, height: 4000, data: new Uint8ClampedArray(4000 * 4000 * 4) };
+    const page = await controller.addImage(blank);
+    expect(page.detected).toBe(false);
+    expect(page.width * page.height).toBeLessThanOrEqual(12_000_000);
+    expect(page.width).toBe(page.height);
+    expect(calls.at(-1)).toMatchObject({ width: page.width, height: page.height });
   });
 });

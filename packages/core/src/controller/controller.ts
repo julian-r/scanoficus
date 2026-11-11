@@ -107,8 +107,17 @@ export interface ScannerEvents extends Record<string, unknown> {
 
 /** Options for {@link ScannerController}. */
 export interface ScannerOptions {
-  /** Detector to use. Default: a Web Worker detector, falling back to the main thread. */
+  /**
+   * Detector to use, owned by the caller (not disposed by the controller, no fallback on
+   * failure). Prefer `createDetector` unless the detector is shared.
+   */
   detector?: DocumentDetector;
+  /**
+   * Factory for a detector owned by the controller: created on first use, disposed with the
+   * controller, and replaced by the main-thread detector if it fails (e.g. a worker that cannot
+   * load). Default: `createDetectorWorker()` (main thread where workers are unavailable).
+   */
+  createDetector?: () => DocumentDetector;
   /** Page renderer. Default: `createPageRenderer()` (WebGL2 with CPU fallback). */
   renderer?: PageRenderer;
   /** Camera constraints for the default camera. */
@@ -132,6 +141,8 @@ export interface ScannerOptions {
    * ≤ 12 MP output budget of docs/platform-notes.md.
    */
   maxOutputSide?: number;
+  /** Pixel-area cap of rendered pages. Default 12 000 000 (12 MP). */
+  maxOutputPixels?: number;
   /** JPEG quality of rendered pages. Default 0.9. */
   jpegQuality?: number;
   /** Switch to `reviewing` after every capture (single-shot flows). Default false. */
@@ -175,6 +186,8 @@ export class ScannerController {
   /** Quad of the last capture; auto-capture waits until the document changes. */
   private capturedQuad: Quad | null = null;
   private replaceIndex: number | null = null;
+  /** Incremented by stop() and dispose(): pending captures of an older epoch are discarded. */
+  private captureEpoch = 0;
   private nextPageId = 1;
   private detectTimes: number[] = [];
   private snapshot: ScannerSnapshot;
@@ -300,6 +313,7 @@ export class ScannerController {
 
   /** Releases the camera and returns to `idle`. Pages are kept. */
   stop(): void {
+    this.captureEpoch++;
     this.releaseCamera();
     this.unwatchVisibility?.();
     this.unwatchVisibility = null;
@@ -339,13 +353,27 @@ export class ScannerController {
     const camera = this.camera;
     if (!camera || this.state !== 'scanning') return null;
     const previewQuad = this.snapshot.detection?.quad ?? null;
+    const previewWidth = camera.width;
+    const previewHeight = camera.height;
+    const epoch = this.captureEpoch;
     this.setState('capturing');
     try {
       const still = await camera.captureStill();
+      if (epoch !== this.captureEpoch || this.disposed) {
+        closeSource(still.image);
+        return null;
+      }
+      // Preview corners map to the still only when both show the same framing (video frames);
+      // a photo may be cropped differently, so it relies on its own detection.
       const preview =
-        previewQuad &&
-        scaleQuad(previewQuad, still.width / camera.width, still.height / camera.height);
+        still.matchesPreview && previewQuad
+          ? scaleQuad(previewQuad, still.width / previewWidth, still.height / previewHeight)
+          : null;
       const page = await this.createPage(still.image, still.width, still.height, preview);
+      if (epoch !== this.captureEpoch || this.disposed) {
+        discardPage(page);
+        return null;
+      }
       this.capturedQuad = previewQuad;
       this.stableSince = null;
       const replacing = this.replaceIndex;
@@ -377,7 +405,16 @@ export class ScannerController {
         : image;
     const width = 'naturalWidth' in source ? source.naturalWidth : source.width;
     const height = 'naturalHeight' in source ? source.naturalHeight : source.height;
+    if (this.disposed) {
+      if (image instanceof Blob) closeSource(source);
+      throw new Error('The scanner controller was disposed while adding an image');
+    }
     const page = await this.createPage(source, width, height, null);
+    if (this.disposed) {
+      URL.revokeObjectURL(page.url);
+      if (image instanceof Blob) closeSource(source);
+      throw new Error('The scanner controller was disposed while adding an image');
+    }
     this.insertPage(page);
     return page;
   }
@@ -457,6 +494,7 @@ export class ScannerController {
   /** Releases everything: camera, detector and renderer (if created by the controller), pages. */
   dispose(): void {
     if (this.disposed) return;
+    this.captureEpoch++;
     this.releaseCamera();
     this.unwatchVisibility?.();
     this.clear();
@@ -496,14 +534,21 @@ export class ScannerController {
   }
 
   private async detectWithFallback(frame: RgbaImage): Promise<Detection | null> {
-    this.detector ??= createDefaultDetector();
+    this.detector ??= (this.options.createDetector ?? createDefaultDetector)();
+    const detector = this.detector;
     try {
-      return await this.detector.detect(frame, this.options.detection);
+      return await detector.detect(frame, this.options.detection);
     } catch (error) {
-      // A worker that cannot load (CSP, bundling) is replaced by the main-thread detector.
+      // A worker that cannot load (CSP, bundling, 404) or crashed is replaced by the
+      // main-thread detector; the reason is reported once as a (non-fatal) error event.
       if (!this.ownsDetector || this.disposed) throw error;
-      this.detector.dispose();
-      this.detector = createMainThreadDetector();
+      if (this.detector === detector) {
+        detector.dispose();
+        this.detector = createMainThreadDetector();
+        this.emitter.emit('error', {
+          error: new Error(`Falling back to main-thread detection: ${asError(error).message}`),
+        });
+      }
       return this.detector.detect(frame, this.options.detection);
     }
   }
@@ -613,6 +658,7 @@ export class ScannerController {
     return estimateOutputSize(quad, {
       imageSize: { width, height },
       maxLongSide: this.options.maxOutputSide ?? 4000,
+      maxPixels: this.options.maxOutputPixels ?? 12_000_000,
     });
   }
 
@@ -658,7 +704,10 @@ export class ScannerController {
     // Release the camera while hidden (best effort; see platform notes) and resume on return.
     this.unwatchVisibility = watchPageVisibility(
       () => {
-        if (this.state === 'scanning' || this.state === 'starting') {
+        // A capture in progress keeps its still and finishes rendering, but it no longer
+        // returns to scanning (the state is no longer 'capturing'); scanning resumes on return.
+        const live = this.state;
+        if (live === 'scanning' || live === 'starting' || live === 'capturing') {
           this.resumeWhenVisible = true;
           this.releaseCamera();
           this.setState('idle');
@@ -754,6 +803,16 @@ function boundingBox(quad: Quad): { x: number; y: number; width: number; height:
   const x = Math.min(...xs);
   const y = Math.min(...ys);
   return { x, y, width: Math.max(...xs) - x, height: Math.max(...ys) - y };
+}
+
+/** Releases a page that was rendered but never added (cancelled capture). */
+function discardPage(page: ScanPage): void {
+  URL.revokeObjectURL(page.url);
+  closeSource(page.source);
+}
+
+function closeSource(source: PageSource): void {
+  if ('close' in source) source.close();
 }
 
 function asError(error: unknown): Error {
