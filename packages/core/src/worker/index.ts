@@ -12,6 +12,7 @@ export {
 } from './client.ts';
 export {
   type DetectorFrame,
+  type DetectorWorkerMessage,
   type DetectRequest,
   type DetectResponse,
   type DocumentDetector,

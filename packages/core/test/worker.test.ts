@@ -3,39 +3,11 @@ import { convexIoU } from '../src/geometry/index.ts';
 import {
   createDetectorWorker,
   createMainThreadDetector,
-  type DetectorWorkerLike,
-  type DetectRequest,
-  type DetectResponse,
   FrameProcessor,
   handleDetectRequest,
 } from '../src/worker/index.ts';
+import { FakeWorker } from './support/fake-worker.ts';
 import { generateScene } from './support/synthetic.ts';
-
-/** In-process stand-in for a Worker that runs the real request handler asynchronously. */
-class FakeWorker implements DetectorWorkerLike {
-  readonly processor = new FrameProcessor();
-  readonly transfers: Transferable[][] = [];
-  private readonly listeners: ((event: MessageEvent<DetectResponse>) => void)[] = [];
-  terminated = false;
-
-  postMessage(message: DetectRequest, transfer: Transferable[]): void {
-    this.transfers.push(transfer);
-    const cloned = structuredClone(message, { transfer });
-    setTimeout(() => {
-      const data = handleDetectRequest(this.processor, cloned);
-      for (const listener of this.listeners) listener(new MessageEvent('message', { data }));
-    });
-  }
-
-  addEventListener(type: string, listener: (event: never) => void): void {
-    if (type === 'message')
-      this.listeners.push(listener as (event: MessageEvent<DetectResponse>) => void);
-  }
-
-  terminate(): void {
-    this.terminated = true;
-  }
-}
 
 describe('handleDetectRequest', () => {
   it('answers with the detection for the request id', () => {
@@ -96,5 +68,40 @@ describe('createDetectorWorker', () => {
     detector.dispose();
     await expect(pending).rejects.toThrow('disposed');
     expect(worker.terminated).toBe(true);
+  });
+
+  it('fails permanently when the worker cannot load, even before the first request', async () => {
+    const worker = new FakeWorker({ ready: false });
+    const detector = createDetectorWorker({ worker });
+    worker.error(); // e.g. 404 for the worker script: browsers give no details
+    await expect(detector.detect(generateScene('easy', 1).image)).rejects.toThrow(
+      /failed to load: the browser gave no details \(worker: the provided worker\)/,
+    );
+    expect(worker.terminated).toBe(true);
+    await expect(detector.detect(generateScene('easy', 2).image)).rejects.toThrow('failed to load');
+  });
+
+  it('reports crashes between requests with their location and rejects later requests', async () => {
+    const worker = new FakeWorker();
+    const detector = createDetectorWorker({ worker });
+    await detector.detect(generateScene('easy', 3).image);
+    worker.error({ message: 'boom', filename: 'worker-entry.js', lineno: 3, colno: 7 });
+    await expect(detector.detect(generateScene('easy', 3).image)).rejects.toThrow(
+      'Detector worker crashed: boom at worker-entry.js:3:7',
+    );
+  });
+
+  it('fails on messageerror and on a worker that stops answering', async () => {
+    const broken = new FakeWorker();
+    const a = createDetectorWorker({ worker: broken });
+    broken.messageError();
+    await expect(a.detect(generateScene('easy', 4).image)).rejects.toThrow('deserialize');
+
+    const silent = new FakeWorker();
+    silent.responsive = false;
+    const b = createDetectorWorker({ worker: silent, timeoutMs: 20 });
+    await expect(b.detect(generateScene('easy', 4).image)).rejects.toThrow('did not answer');
+    expect(silent.terminated).toBe(true);
+    await expect(b.detect(generateScene('easy', 4).image)).rejects.toThrow('did not answer');
   });
 });

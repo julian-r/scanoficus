@@ -43,6 +43,9 @@ export type DetectResponse =
   | { id: number; detection: Detection | null }
   | { id: number; error: string };
 
+/** Any message posted by the detector worker: `{ ready: true }` once loaded, then responses. */
+export type DetectorWorkerMessage = DetectResponse | { ready: true };
+
 type Canvas2D = OffscreenCanvas | HTMLCanvasElement;
 
 /**

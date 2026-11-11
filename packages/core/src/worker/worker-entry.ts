@@ -6,15 +6,15 @@
  * @module
  */
 import {
+  type DetectorWorkerMessage,
   type DetectRequest,
-  type DetectResponse,
   FrameProcessor,
   handleDetectRequest,
 } from './processor.ts';
 
 interface DetectorWorkerScope {
   onmessage: ((event: MessageEvent<DetectRequest>) => void) | null;
-  postMessage(message: DetectResponse): void;
+  postMessage(message: DetectorWorkerMessage): void;
 }
 
 const scope = globalThis as unknown as DetectorWorkerScope;
@@ -22,3 +22,5 @@ const processor = new FrameProcessor();
 scope.onmessage = (event) => {
   scope.postMessage(handleDetectRequest(processor, event.data));
 };
+// Tells the client that the module loaded: errors after this are crashes, not load failures.
+scope.postMessage({ ready: true });
