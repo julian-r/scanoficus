@@ -32,15 +32,16 @@ const pdf = await scanner.exportPdf({ pageSize: 'a4' });
 
 By default, `ScannerController` creates and owns a module worker started with
 `new Worker(new URL('./worker-entry.js', import.meta.url), { type: 'module' })`, using the
-entry shipped next to the package files. This works in the following setups, which are checked
-by `pnpm check:browser` where noted:
+entry shipped next to the package files. Coverage by setup:
 
-| Setup                                                                                | Works by default?                                                                     |
-| ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
-| Serving `dist/` unbundled (import map or plain ESM)                                  | yes (checked)                                                                         |
-| Vite dev and build, from the package or from source (`@scanoficus/source` condition) | yes (checked); the worker is bundled                                                  |
-| webpack 5 / Next.js                                                                  | expected: both recognize `new Worker(new URL(…, import.meta.url))` (not checked here) |
-| esbuild, or bundlers or dependency pre-bundling that do not handle the pattern       | no: use `workerUrl` or `worker`                                                       |
+| Setup                                                                                         | Works by default?                                                                |
+| --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| Serving `dist/` unbundled (import map or plain ESM)                                           | yes, checked by `pnpm check:browser`                                             |
+| Vite 8 dev (with dependency pre-bundling) and build, consuming the installed package          | yes, checked by `pnpm check:pack` (packed tarball fixture)                       |
+| Vite 8 dev and build from source through the `@scanoficus/source` export condition (the demo) | yes, checked by `pnpm check:browser`                                             |
+| Other Vite versions                                                                           | expected, not checked                                                            |
+| webpack 5 / Next.js                                                                           | expected (both recognize `new Worker(new URL(…, import.meta.url))`), not checked |
+| esbuild, and bundlers or pre-bundling that do not handle the pattern                          | no: use `workerUrl` or `worker`                                                  |
 
 To control the worker yourself, use one of these:
 

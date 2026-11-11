@@ -130,8 +130,9 @@ The strategy and its evidence are documented in
   the `error` state, where the user can retry or import a photo.
 - **Frames:** `requestVideoFrameCallback` (Safari 15.4+, Chrome 83+) with a
   `requestAnimationFrame` fallback. Detection runs in a module Web Worker, falling back to the
-  main thread. The default worker URL works unbundled, with Vite and with webpack 5 / Next.js.
-  For other bundlers, pass `workerUrl` or `worker` (see the
+  main thread. The default worker URL is checked unbundled and with Vite 8 (dev and build,
+  both as an installed package and from source). webpack 5 / Next.js are expected to work but
+  are not checked. For other bundlers, pass `workerUrl` or `worker` (see the
   [core README](packages/core/README.md#the-detection-worker)).
 - **Stills:** by default, the current video frame at stream resolution. On iPhone,
   `takePhoto()` returned only preview-sized images and failed with maximum photo settings.
@@ -156,13 +157,13 @@ min+gzip, as measured by `pnpm size` (budget: 40 KB for core):
 
 | Entry                                                            |                     Size |
 | ---------------------------------------------------------------- | -----------------------: |
-| `@scanoficus/core` (all exports)                                 |                  22.3 KB |
-| `@scanoficus/core/controller` (camera, detection, render, PDF)   |                  21.1 KB |
+| `@scanoficus/core` (all exports)                                 |                  22.5 KB |
+| `@scanoficus/core/controller` (camera, detection, render, PDF)   |                  21.3 KB |
 | `@scanoficus/core/detect`                                        |                   6.6 KB |
 | `@scanoficus/core/render` (WebGL2 + CPU filters)                 |                   6.5 KB |
 | `@scanoficus/core/worker-entry` (detector worker)                |                   6.5 KB |
 | `@scanoficus/core/warp` · `/filters` · `/camera` · `/pdf`        | 3.0 · 2.2 · 2.6 · 1.7 KB |
-| `@scanoficus/elements/define` (including core)                   |                  28.9 KB |
+| `@scanoficus/elements/define` (including core)                   |                  29.1 KB |
 | `@scanoficus/react` (own code, without elements, core and React) |                   1.4 KB |
 
 ## Detector quality (synthetic benchmark)
