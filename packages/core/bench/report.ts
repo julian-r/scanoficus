@@ -60,7 +60,7 @@ if (values.runs) {
   process.exit(0);
 }
 /** `detectDocument`'s default `minArea` (fraction of the frame). */
-const DEFAULT_MIN_AREA = 0.08;
+const DEFAULT_MIN_AREA = 0.04;
 const TITLES: Record<DatasetName, string> = {
   smartdoc: 'SmartDoc 2015 Challenge 1',
   midv500: 'MIDV-500',

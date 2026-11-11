@@ -4,6 +4,8 @@
  * @module
  */
 export {
+  CONFIDENT_SCORE,
+  DEFAULT_MIN_SCORE,
   type Detection,
   type DetectOptions,
   DetectorContext,
