@@ -27,30 +27,58 @@
     {
       "name": "@scanoficus/core (all exports)",
       "path": "packages/core/dist/index.js",
-      "import": "*",
       "gzip": true,
-      "limit": "40 KB"
+      "limit": "40 KB",
+      "import": "*"
+    },
+    {
+      "name": "@scanoficus/core/controller",
+      "path": "packages/core/dist/controller.js",
+      "gzip": true,
+      "limit": "25 KB",
+      "import": "*"
     },
     {
       "name": "@scanoficus/core/detect",
       "path": "packages/core/dist/detect.js",
-      "import": "*",
       "gzip": true,
-      "limit": "10 KB"
+      "limit": "10 KB",
+      "import": "*"
+    },
+    {
+      "name": "@scanoficus/core/render",
+      "path": "packages/core/dist/render.js",
+      "gzip": true,
+      "limit": "10 KB",
+      "import": "*"
     },
     {
       "name": "@scanoficus/core/warp",
       "path": "packages/core/dist/warp.js",
-      "import": "*",
       "gzip": true,
-      "limit": "5 KB"
+      "limit": "5 KB",
+      "import": "*"
     },
     {
       "name": "@scanoficus/core/filters",
       "path": "packages/core/dist/filters.js",
-      "import": "*",
       "gzip": true,
-      "limit": "5 KB"
+      "limit": "5 KB",
+      "import": "*"
+    },
+    {
+      "name": "@scanoficus/core/pdf",
+      "path": "packages/core/dist/pdf.js",
+      "gzip": true,
+      "limit": "3 KB",
+      "import": "*"
+    },
+    {
+      "name": "@scanoficus/core/camera",
+      "path": "packages/core/dist/camera.js",
+      "gzip": true,
+      "limit": "3 KB",
+      "import": "*"
     },
     {
       "name": "@scanoficus/core/worker-entry",
