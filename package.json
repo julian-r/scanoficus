@@ -47,10 +47,20 @@
       "import": "*"
     },
     {
-      "name": "@scanoficus/core/controller",
+      "name": "@scanoficus/core/controller (loaded on import; without the lazy chunks)",
       "path": "packages/core/dist/controller.js",
       "gzip": true,
-      "limit": "25 KB",
+      "limit": "18 kB",
+      "import": "*",
+      "entry": [
+        "index"
+      ]
+    },
+    {
+      "name": "@scanoficus/core/controller (incl. lazy main-thread detector and PDF writer)",
+      "path": "packages/core/dist/controller.js",
+      "gzip": true,
+      "limit": "27 kB",
       "import": "*"
     },
     {
@@ -112,10 +122,13 @@
       "limit": "12 KB"
     },
     {
-      "name": "@scanoficus/elements/define (incl. core)",
+      "name": "@scanoficus/elements/define (incl. core, without lazy chunks)",
       "path": "packages/elements/dist/define.js",
       "gzip": true,
-      "limit": "40 KB"
+      "limit": "26 kB",
+      "entry": [
+        "define"
+      ]
     },
     {
       "name": "@scanoficus/react (own code)",

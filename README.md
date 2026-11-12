@@ -3,7 +3,7 @@
 A document scanner for progressive web apps on iOS Safari and Android Chrome, modeled on Apple
 VisionKit's `VNDocumentCameraViewController`. Runtime dependencies are limited to the
 workspace's own packages (React is an optional peer), and there is no OpenCV. The whole
-scanner, UI included, is about 29 KB min+gzip.
+scanner, UI included, loads about 25 KB min+gzip (plus 9 KB loaded on demand, see [Size](#size)).
 
 - **Live edge detection** at camera frame rate, run in a Web Worker on a downscaled frame.
 - **Quad tracking**: an animated outline that is smoothed over time and reports when it is
@@ -156,17 +156,24 @@ The strategy and its evidence are documented in
 
 min+gzip, as measured by `pnpm size` (budget: 40 KB for core):
 
-| Entry                                                            |                     Size |
-| ---------------------------------------------------------------- | -----------------------: |
-| `@scanoficus/core` (all exports)                                 |                  24.0 KB |
-| `@scanoficus/core/controller` (camera, detection, render, PDF)   |                  22.7 KB |
-| `@scanoficus/core/detect`                                        |                   8.1 KB |
-| `@scanoficus/core/render` (WebGL2 + CPU filters)                 |                   6.5 KB |
-| `@scanoficus/core/worker-entry` (detector worker)                |                   7.9 KB |
-| `@scanoficus/core/warp` · `/filters` · `/camera` · `/pdf`        | 3.0 · 2.2 · 2.6 · 1.7 KB |
-| `@scanoficus/elements/define` (including core)                   |                  30.5 KB |
-| `@scanoficus/react` (own code, without elements, core and React) |                   1.4 KB |
-| `@scanoficus/detector-nn` (optional; own code, without weights)  |                  18.4 KB |
+The controller loads two parts with `import()` only when they are needed: the main-thread
+detector (the whole classic detector, about 7 KB; only without a detection worker or after the
+worker failed) and the PDF writer (`exportPdf()`, about 1.7 KB). Bundlers emit them as separate
+chunks. The "loaded on import" rows count only the code loaded statically (size-limit's
+`entry` option); the "including" row also counts the lazy chunks.
+
+| Entry                                                                                    |                     Size |
+| ---------------------------------------------------------------------------------------- | -----------------------: |
+| `@scanoficus/core` (all exports)                                                         |                  26.6 KB |
+| `@scanoficus/core/controller` (camera, tracking, auto-capture, render; loaded on import) |                  17.0 KB |
+| `@scanoficus/core/controller` including its lazy chunks                                  |                  26.0 KB |
+| `@scanoficus/core/detect`                                                                |                   8.9 KB |
+| `@scanoficus/core/render` (WebGL2 + CPU filters)                                         |                   6.5 KB |
+| `@scanoficus/core/worker-entry` (detector worker)                                        |                   7.9 KB |
+| `@scanoficus/core/warp` · `/filters` · `/camera` · `/pdf`                                | 3.0 · 2.2 · 2.7 · 1.7 KB |
+| `@scanoficus/elements/define` (including core; loaded on import)                         |                  25.0 KB |
+| `@scanoficus/react` (own code, without elements, core and React)                         |                   1.4 KB |
+| `@scanoficus/detector-nn` (optional; own code, without weights)                          |                  18.4 KB |
 
 ## Detector quality (synthetic benchmark)
 

@@ -1,10 +1,9 @@
 import type { Detection, DetectOptions } from '../detect/detector.ts';
-import {
-  type DetectorFrame,
-  type DetectorWorkerMessage,
-  type DetectRequest,
-  type DocumentDetector,
-  FrameProcessor,
+import type {
+  DetectorFrame,
+  DetectorWorkerMessage,
+  DetectRequest,
+  DocumentDetector,
 } from './processor.ts';
 
 /** The subset of the `Worker` API used by {@link createDetectorWorker}. */
@@ -58,7 +57,7 @@ export interface DetectorWorkerOptions {
  * Failures are terminal and descriptive: if the worker script cannot be loaded, crashes,
  * cannot deserialize a message or stops answering, the worker is terminated and the pending
  * and all later `detect()` calls reject with an error naming the cause and the worker URL
- * (when known). Fall back to {@link createMainThreadDetector} in that case (the
+ * (when known). Fall back to `createMainThreadDetector` in that case (the
  * `ScannerController` does this automatically for detectors it creates).
  */
 export function createDetectorWorker(options: DetectorWorkerOptions = {}): DocumentDetector {
@@ -166,28 +165,6 @@ export function createDetectorWorker(options: DetectorWorkerOptions = {}): Docum
     },
     dispose() {
       fail(new Error('Detector disposed'));
-    },
-  };
-}
-
-/**
- * {@link DocumentDetector} running on the calling thread, for environments without module
- * workers or `OffscreenCanvas` (and for Node). Same results as the worker, but detection
- * (≈5 ms at 384 px on a laptop, more on phones) blocks the thread; run it at a reduced rate.
- */
-export function createMainThreadDetector(): DocumentDetector {
-  let processor: FrameProcessor | null = new FrameProcessor();
-  return {
-    detect(frame: DetectorFrame, detectOptions?: DetectOptions) {
-      if (!processor) return Promise.reject(new Error('Detector disposed'));
-      try {
-        return Promise.resolve(processor.process(frame, detectOptions));
-      } catch (error) {
-        return Promise.reject(error);
-      }
-    },
-    dispose() {
-      processor = null;
     },
   };
 }

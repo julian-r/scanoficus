@@ -28,6 +28,10 @@ scanner.finish();
 const pdf = await scanner.exportPdf({ pageSize: 'a4' });
 ```
 
+`ScannerController` loads two parts on demand with `import()`, as separate chunks of `dist/`:
+the main-thread detector (only without a working detection worker) and the PDF writer (on the
+first `exportPdf()`). Serve the whole `dist/` folder (bundlers do this automatically).
+
 ### Auto-capture
 
 Auto-capture fires when the document has been steady and sharp for `stableMs` (600 ms) in

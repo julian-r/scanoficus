@@ -6,10 +6,10 @@
  */
 export {
   createDetectorWorker,
-  createMainThreadDetector,
   type DetectorWorkerLike,
   type DetectorWorkerOptions,
 } from './client.ts';
+export { createMainThreadDetector } from './main-thread.ts';
 export {
   type DetectorFrame,
   type DetectorWorkerMessage,

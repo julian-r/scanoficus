@@ -14,10 +14,10 @@ import { convexIoU } from '../geometry/polygon.ts';
 import { type Quad, scaleQuad } from '../geometry/quad.ts';
 import { estimateOutputSize } from '../geometry/size.ts';
 import { type RgbaImage, rgbaToGray } from '../image.ts';
-import { createPdf, type PdfOptions } from '../pdf/pdf.ts';
+import type { PdfOptions } from '../pdf/pdf.ts';
 import { normalizeRotation, type Rotation } from '../render/cpu.ts';
 import { createPageRenderer, type PageRenderer, type PageSource } from '../render/renderer.ts';
-import { createDetectorWorker, createMainThreadDetector } from '../worker/client.ts';
+import { createDetectorWorker } from '../worker/client.ts';
 import type { DocumentDetector } from '../worker/processor.ts';
 import { openScannerCamera, type ScannerCamera, type ScannerStill } from './camera-source.ts';
 import { Emitter } from './emitter.ts';
@@ -622,6 +622,8 @@ export class ScannerController {
     const jpegs = await Promise.all(
       this.pages.map(async (p) => new Uint8Array(await p.image.arrayBuffer())),
     );
+    // The PDF writer is loaded on first export.
+    const { createPdf } = await import('../pdf/pdf.ts');
     return new Blob([createPdf(jpegs, options) as Uint8Array<ArrayBuffer>], {
       type: 'application/pdf',
     });
@@ -709,7 +711,7 @@ export class ScannerController {
       if (!this.ownsDetector || this.disposed) throw error;
       if (this.detector === detector) {
         detector?.dispose();
-        this.detector = createMainThreadDetector();
+        this.detector = createLazyMainThreadDetector();
         this.emitter.emit('error', {
           error: new Error(`Falling back to main-thread detection: ${asError(error).message}`),
         });
@@ -1082,12 +1084,33 @@ export class ScannerController {
 }
 
 function createDefaultDetector(): DocumentDetector {
-  if (typeof Worker === 'undefined') return createMainThreadDetector();
+  if (typeof Worker === 'undefined') return createLazyMainThreadDetector();
   try {
     return createDetectorWorker();
   } catch {
-    return createMainThreadDetector();
+    return createLazyMainThreadDetector();
   }
+}
+
+/**
+ * The main-thread detector (the whole classic detector), loaded with `import()` on first use:
+ * most sessions use the worker and never need it on the main thread.
+ */
+function createLazyMainThreadDetector(): DocumentDetector {
+  let loading: Promise<DocumentDetector> | null = null;
+  let disposed = false;
+  const load = () =>
+    (loading ??= import('../worker/main-thread.ts').then((m) => m.createMainThreadDetector()));
+  return {
+    async detect(frame, options) {
+      if (disposed) throw new Error('Detector disposed');
+      return (await load()).detect(frame, options);
+    },
+    dispose() {
+      disposed = true;
+      void loading?.then((detector) => detector.dispose());
+    },
+  };
 }
 
 /** Revokes the page URL and closes its source unless another page still uses it. */
