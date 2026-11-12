@@ -21,6 +21,8 @@
     "bench:montage": "pnpm --filter @scanoficus/core bench:montage",
     "bench:tune": "pnpm --filter @scanoficus/core bench:tune",
     "bench:import": "pnpm --filter @scanoficus/core bench:import",
+    "bench:autocapture": "pnpm --filter @scanoficus/core bench:autocapture",
+    "bench:autocapture:features": "pnpm --filter @scanoficus/core bench:autocapture:features",
     "dev:demo": "pnpm --filter @scanoficus/demo dev",
     "preview:demo": "pnpm --filter @scanoficus/demo preview",
     "check:browser": "node scripts/browser-check.mjs",
