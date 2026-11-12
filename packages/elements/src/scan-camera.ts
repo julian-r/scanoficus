@@ -290,14 +290,14 @@ export class ScanCameraElement extends BaseElement {
     if (s.state !== 'scanning') return '';
     if (!s.autoCapture) return m.manual;
     if (!s.detection?.quad) return m.searching;
-    return s.detection.progress > 0 ? m.capturing : m.holdStill;
+    return isReady(s.detection) ? m.capturing : m.holdStill;
   }
 
   private renderDetection(d: LiveDetection | null): void {
     const svg = this.$('svg');
     if (d) svg.setAttribute('viewBox', `0 0 ${d.frameWidth} ${d.frameHeight}`);
     this.target = d?.quad ?? null;
-    this.$('polygon').classList.toggle('ready', (d?.progress ?? 0) > 0);
+    this.$('polygon').classList.toggle('ready', d !== null && isReady(d));
     if (!this.outlineFrame) this.outlineFrame = requestAnimationFrame(() => this.stepOutline());
   }
 
@@ -334,6 +334,11 @@ export class ScanCameraElement extends BaseElement {
   private $(selector: string): HTMLElement {
     return this.root.querySelector(selector) as HTMLElement;
   }
+}
+
+/** Auto-capture is counting down (progress may also linger while it decays). */
+function isReady(d: LiveDetection): boolean {
+  return d.autoCapture ? d.autoCapture.ready : d.progress > 0;
 }
 
 function lerp(a: Point, b: Point, t: number): Point {

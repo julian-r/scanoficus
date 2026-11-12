@@ -1,4 +1,4 @@
-import { CameraError } from '@scanoficus/core/camera';
+import { CameraError, requestDeviceMotionPermission } from '@scanoficus/core/camera';
 import { ScannerController, type ScannerOptions, type ScanPage } from '@scanoficus/core/controller';
 import type { ScanFilter } from '@scanoficus/core/filters';
 import { BASE_STYLES, BaseElement, emit, escapeHtml } from './base.ts';
@@ -31,7 +31,10 @@ type View = 'camera' | 'review' | 'crop' | 'error';
  * and importing a photo instead.
  *
  * Attributes: `auto-capture` (`"false"` starts in manual mode), `filter` (default filter of new
- * pages: `color` | `grayscale` | `bw` | `photo`), `page-size` (PDF: `image` | `a4` | `letter`).
+ * pages: `color` | `grayscale` | `bw` | `photo`), `page-size` (PDF: `image` | `a4` | `letter`),
+ * `device-motion` (opt-in: auto-capture also waits while the motion sensor reports fast
+ * rotation; read on connect like `filter`. iOS asks for permission on the first tap inside the
+ * element, or call `requestDeviceMotionPermission()` from your own earlier tap).
  * Properties: `controller` (created on first connect unless set; `options` configures it).
  * Events (all bubbling, composed): `scan-complete` ({ pages, pdf }), `scan-export-images`,
  * `scan-cancel`, `scan-error`.
@@ -47,6 +50,7 @@ export class ScanDocumentElement extends BaseElement {
   private unsubscribe: (() => void) | null = null;
   private cropping: ScanPage | null = null;
   private view: View | null = null;
+  private motionRequested = false;
 
   constructor() {
     super();
@@ -87,6 +91,12 @@ export class ScanDocumentElement extends BaseElement {
       const file = input.files?.[0];
       input.value = '';
       if (file) void this.importImage(file);
+    });
+    // iOS grants motion-sensor access only from a user gesture.
+    this.addEventListener('click', () => {
+      if (!this.hasAttribute('device-motion') || this.motionRequested) return;
+      this.motionRequested = true;
+      void requestDeviceMotionPermission();
     });
     this.$('.retry').addEventListener('click', () => {
       this._controller?.retry().catch((error) => this.fail(error));
@@ -155,6 +165,7 @@ export class ScanDocumentElement extends BaseElement {
       this._controller = new ScannerController({
         autoCapture,
         ...(filter ? { defaultFilter: filter } : {}),
+        ...(this.hasAttribute('device-motion') ? { deviceMotion: true } : {}),
         ...this.options,
       });
       this.ownsController = true;
