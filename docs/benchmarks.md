@@ -251,7 +251,9 @@ area-downscaled RGBA frame, which the live worker also does since round 2. `cand
 ranked runner-ups (at most 5) for the analysis below and does not change the result.
 
 **Tracked variant.** The library's `QuadTracker` (default options) runs over the per-frame
-detections of each clip in order, and its smoothed or held quad is evaluated. Frame timestamps
+detections of each clip in order, and its smoothed or held quad is evaluated. (Since the
+auto-capture rework the tracker ignores a single jump of more than 20 % of the diagonal, so
+tracked numbers of newer reports can differ slightly from the ones below.) Frame timestamps
 are nominal: 50 ms per SmartDoc frame (the clips run at about 17–20 fps with a variable frame
 rate) and 100 ms per MIDV frame (MIDV frames were extracted at 10 fps).
 
@@ -424,8 +426,9 @@ right quad (recall), in %. Calibration rules (fixed before looking at held-out d
 `DEFAULT_MIN_SCORE` is the lowest threshold with at most 6 % of the calibration negatives and at
 least 98 % right among the returned SmartDoc tuning quads (0.74). `CONFIDENT_SCORE` is the lowest
 threshold with at least 99.9 % right on SmartDoc tuning and 95 % on MIDV-500 tuning (0.80). The
-rates are per frame. Live, the `QuadTracker` and the auto-capture stability window (8 stable
-frames, then 1 s stable and sharp) suppress isolated false quads further.
+rates are per frame. Live, the `QuadTracker` and the auto-capture rule (a 500-ms stability
+window, then 600 ms stable and sharp; see [autocapture.md](autocapture.md)) suppress isolated
+false quads further.
 
 The video sets confirm the calibration; the single-photo sets do not: on Dizaj and RWMD, only
 61 % / 42 % of the default quads and 65 % / 48 % of the confident ones are right. Their wrong

@@ -28,6 +28,19 @@ scanner.finish();
 const pdf = await scanner.exportPdf({ pageSize: 'a4' });
 ```
 
+### Auto-capture
+
+Auto-capture fires when the document has been steady and sharp for `stableMs` (600 ms) in
+total. Steady means that, over the last 500 ms, the corners move at most 0.1 diagonals/s
+(`tracker.maxSpeed`) and scatter at most 1.5 % around that motion (`tracker.stabilityThreshold`),
+with the worst quarter of the detections ignored. Sharp means at least `minRelativeSharpness`
+(0.6) of the recent 75th percentile. The progress decays instead of resetting. A re-framing
+restarts it. The sharpest ready full-resolution frame of the last `bestFrameMs` (300 ms)
+becomes the page. `deviceMotion: true` also uses the motion sensor (call
+`requestDeviceMotionPermission()` from a tap on iOS). `detection.autoCapture` tells which
+criterion fails, with values and limits. See [docs/autocapture.md](../../docs/autocapture.md)
+for the evaluation on hand-held video.
+
 ### The detection worker
 
 By default, `ScannerController` creates and owns a module worker started with
