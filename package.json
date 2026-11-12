@@ -26,6 +26,7 @@
     "dev:demo": "pnpm --filter @scanoficus/demo dev",
     "preview:demo": "pnpm --filter @scanoficus/demo preview",
     "check:browser": "node scripts/browser-check.mjs",
+    "check:browser:swiftshader": "SWIFTSHADER=1 node scripts/browser-check.mjs",
     "check:pack": "node scripts/pack-smoke.mjs",
     "check:nn": "pnpm --filter @scanoficus/detector-nn check:browser",
     "check:nn:swiftshader": "SWIFTSHADER=1 pnpm --filter @scanoficus/detector-nn check:browser",

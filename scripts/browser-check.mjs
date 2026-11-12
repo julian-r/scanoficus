@@ -118,6 +118,8 @@ const browser = await chromium.launch({
     // Without a GPU (CI), WebGL (the demo's neural detectors) needs SwiftShader.
     '--enable-unsafe-swiftshader',
     `--use-file-for-fake-video-capture=${videoFile}`,
+    // SWIFTSHADER=1 forces the software renderer CI uses (ubuntu without a GPU).
+    ...(process.env.SWIFTSHADER === '1' ? ['--use-angle=swiftshader'] : []),
   ],
 });
 
@@ -355,6 +357,143 @@ async function checkDefaultChoice(label, url) {
   check(`${label}: a stored detector choice is kept`, kept === 'nn', kept);
 }
 
+/** Detection rate from which Neural v4 must auto-capture (override: NN_AUTOCAPTURE_MIN_RATE). */
+const NN_AUTOCAPTURE_MIN_RATE = Number(process.env.NN_AUTOCAPTURE_MIN_RATE ?? 6);
+
+/** Auto-capture lines of the demo's debug overlay, joined for a log line. */
+const overlayLines = (panel) =>
+  panel
+    .split('\n')
+    .filter((l) => /auto-capture|rate|frames|speed|jitter|sharpness|time/.test(l))
+    .map((l) => l.replace(/ +/g, ' ').trim())
+    .join(' | ');
+
+/** Waits until the controller has measured its detection rate; returns it and the overlay. */
+async function measureRate(page) {
+  return page
+    .waitForFunction(
+      () => {
+        const d = document.querySelector('scan-document')?.controller?.getSnapshot().detection;
+        const rate = d?.autoCapture?.detectionRate;
+        if (rate == null) return null;
+        return {
+          rate,
+          min: d.autoCapture.minDetectionRate,
+          panel: document.querySelector('.debug-panel pre')?.textContent ?? '',
+        };
+      },
+      null,
+      { timeout: 15000, polling: 200 },
+    )
+    .then((h) => h.jsonValue())
+    .catch(async () => ({
+      rate: null,
+      min: null,
+      panel: await page.evaluate(
+        () => document.querySelector('.debug-panel pre')?.textContent ?? '',
+      ),
+    }));
+}
+
+/**
+ * The fake camera shows a still page, so auto-capture must fire (with the best-frame buffer
+ * grabbing full-resolution video frames). Required with Classic (fast everywhere); with Neural v4
+ * only if this machine detects at ≥ 6/s (CI without a GPU runs it on SwiftShader at a few
+ * frames per second), else skipped with a note. Classic then exports the page as a PDF (the
+ * controller's lazy chunk).
+ */
+async function checkAutoCapture(label, choice, page, errors) {
+  const measured = await measureRate(page);
+  const rate = measured.rate === null ? 'not measured' : `${measured.rate.toFixed(1)} detections/s`;
+  if (choice !== 'classic' && !(measured.rate >= NN_AUTOCAPTURE_MIN_RATE)) {
+    console.log(
+      `skip ${label}: auto-capture with "${choice}" not required: ${rate} on this machine ` +
+        `(< ${NN_AUTOCAPTURE_MIN_RATE}/s, e.g. SwiftShader without a GPU) — ${overlayLines(measured.panel)}`,
+    );
+    if (measured.rate !== null && measured.rate < measured.min) {
+      check(
+        `${label}: a too slow detector says so in the overlay ("${choice}")`,
+        /detection rate too low for auto-capture: [\d.]+\/s/.test(measured.panel),
+        overlayLines(measured.panel),
+      );
+    }
+    return;
+  }
+  const started = Date.now();
+  const captured = await page
+    .waitForFunction(
+      () => (document.querySelector('scan-document')?.controller?.pages.length ?? 0) > 0,
+      null,
+      { timeout: 15000, polling: 100 },
+    )
+    .then(() => true)
+    .catch(() => false);
+  const panel = await page.evaluate(
+    () => document.querySelector('.debug-panel pre')?.textContent ?? '',
+  );
+  check(
+    `${label}: auto-capture fires on a steady page ("${choice}")`,
+    captured && errors.length === 0,
+    `${captured ? `captured after ≤ ${Date.now() - started} ms more` : 'no capture'} at ${rate}; ${
+      errors.join('; ') || overlayLines(captured ? measured.panel : panel)
+    }`,
+  );
+  if (choice !== 'classic') return;
+  const pdf = captured
+    ? await page
+        .evaluate(async () => {
+          const blob = await document.querySelector('scan-document').controller.exportPdf();
+          const head = new TextDecoder().decode(await blob.slice(0, 5).arrayBuffer());
+          return { size: blob.size, head };
+        })
+        .catch((e) => ({ failed: String(e) }))
+    : { failed: 'no page (auto-capture did not fire)' };
+  check(
+    `${label}: PDF export loads its lazy chunk ("${choice}")`,
+    pdf.head === '%PDF-' && pdf.size > 1000,
+    pdf.failed ?? `${pdf.size} bytes`,
+  );
+}
+
+/**
+ * A slow device (Classic slowed down to about 2.5 detections/s through the demo's delay hook):
+ * auto-capture cannot fill its stability window, and the overlay must say why.
+ */
+async function checkSlowDetector(label, url) {
+  const page = await browser.newPage();
+  await page.addInitScript(() => {
+    localStorage.setItem('scanoficus-detector', 'classic');
+    localStorage.setItem('scanoficus-debug', '1');
+    window.__scanoficusDemoDelayMs = 400;
+  });
+  await page.goto(`${url}#/live`);
+  await page.getByText('Start scanning').click();
+  const measured = await measureRate(page);
+  const shown = await page
+    .waitForFunction(
+      () =>
+        /detection rate too low for auto-capture: [\d.]+\/s/.test(
+          document.querySelector('.debug-panel pre')?.textContent ?? '',
+        ),
+      null,
+      { timeout: 10000, polling: 200 },
+    )
+    .then(() => true)
+    .catch(() => false);
+  const panel = await page.evaluate(
+    () => document.querySelector('.debug-panel pre')?.textContent ?? '',
+  );
+  const pages = await page.evaluate(
+    () => document.querySelector('scan-document')?.controller?.pages.length ?? -1,
+  );
+  check(
+    `${label}: a too slow detector shows "detection rate too low" and does not capture`,
+    shown && pages === 0 && measured.rate !== null && measured.rate < 4,
+    `${measured.rate?.toFixed(1)} detections/s, pages ${pages}; ${overlayLines(panel)}`,
+  );
+  await page.close();
+}
+
 /** Live scanner and photo import with every detector choice find the synthetic page. */
 async function checkDetectorChoices(label, url) {
   for (const choice of CHOICES) {
@@ -496,48 +635,8 @@ async function checkDetectorChoices(label, url) {
           .filter((l) => /auto-capture|speed|jitter|frames|sharpness|gyro|time/.test(l))
           .join(' | '),
       );
-      if (choice === 'nn4') {
-        // The fake camera shows a still page: auto-capture must fire (with the best-frame
-        // buffer grabbing full-resolution video frames).
-        const started = Date.now();
-        const captured = await page
-          .waitForFunction(
-            () => (document.querySelector('scan-document')?.controller?.pages.length ?? 0) > 0,
-            null,
-            { timeout: 15000, polling: 100 },
-          )
-          .then(() => true)
-          .catch(() => false);
-        const panel = await page.evaluate(
-          () => document.querySelector('.debug-panel pre')?.textContent ?? '',
-        );
-        // The PDF writer is a lazy chunk of the controller: export the captured page.
-        const pdf = captured
-          ? await page
-              .evaluate(async () => {
-                const blob = await document.querySelector('scan-document').controller.exportPdf();
-                const head = new TextDecoder().decode(await blob.slice(0, 5).arrayBuffer());
-                return { size: blob.size, head };
-              })
-              .catch((e) => ({ failed: String(e) }))
-          : { failed: 'no page' };
-        check(
-          `${label}: PDF export loads its lazy chunk ("${choice}")`,
-          pdf.head === '%PDF-' && pdf.size > 1000,
-          pdf.failed ?? `${pdf.size} bytes`,
-        );
-        check(
-          `${label}: auto-capture fires on a steady page ("${choice}")`,
-          captured && errors.length === 0,
-          `${captured ? `captured after ≤ ${Date.now() - started} ms more` : 'no capture'}; ${
-            errors.join('; ') ||
-            panel
-              .split('\n')
-              .filter((l) => /auto-capture/.test(l))
-              .join('')
-          }`,
-        );
-      }
+      if (choice === 'classic' || choice === 'nn4')
+        await checkAutoCapture(label, choice, page, errors);
     }
 
     // Photo import: the detected quad is shown in the crop editor.
@@ -606,6 +705,7 @@ async function checkDetectorChoices(label, url) {
   await checkDemo('vite dev', url);
   await checkDefaultChoice('vite dev', url);
   await checkDetectorChoices('vite dev', url);
+  await checkSlowDetector('vite dev', url);
   await server.close();
 }
 
@@ -659,6 +759,7 @@ async function checkDetectorChoices(label, url) {
     [...hashed(/^docquadnet/), ...hashed(/^LICENSE/), ...hashed(/^coco-credits/)].join(', '),
   );
   await checkDetectorChoices('vite build /scanoficus/', url);
+  await checkSlowDetector('vite build /scanoficus/', url);
   // Fallback: without the weights, the network choice falls back to Classic and says why.
   {
     const page = await browser.newPage();
