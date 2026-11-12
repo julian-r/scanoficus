@@ -14,7 +14,7 @@ export interface QuadTrackerOptions {
    * Minimum number of observations in the stability window before the quad can be stable.
    * Default 4. At low detection rates the window keeps the newest `minWindowFrames`
    * observations even if they are older than `windowMs`, up to `2 × windowMs`; so the default
-   * works down to about 2–3 detections per second. Missed detections (holding frames) add no
+   * works down to about 4 detections per second. Missed detections (holding frames) add no
    * observation, so they shrink the window.
    */
   minWindowFrames?: number;
