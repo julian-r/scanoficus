@@ -484,6 +484,45 @@ async function checkDetectorChoices(label, url) {
           .filter((l) => /detector|cold|p50|fallback|decision/.test(l))
           .join(' | '),
       );
+      check(
+        `${label}: debug overlay explains auto-capture ("${choice}")`,
+        /auto-capture (READY|waiting: )/.test(live.panel) &&
+          /[✓✗·] speed .*diag\/s/.test(live.panel) &&
+          /[✓✗·] jitter /.test(live.panel) &&
+          /[✓✗] sharpness .*of ref/.test(live.panel) &&
+          /[✓✗] time .* ms ready/.test(live.panel),
+        live.panel
+          .split('\n')
+          .filter((l) => /auto-capture|speed|jitter|frames|sharpness|gyro|time/.test(l))
+          .join(' | '),
+      );
+      if (choice === 'nn4') {
+        // The fake camera shows a still page: auto-capture must fire (with the best-frame
+        // buffer grabbing full-resolution video frames).
+        const started = Date.now();
+        const captured = await page
+          .waitForFunction(
+            () => (document.querySelector('scan-document')?.controller?.pages.length ?? 0) > 0,
+            null,
+            { timeout: 15000, polling: 100 },
+          )
+          .then(() => true)
+          .catch(() => false);
+        const panel = await page.evaluate(
+          () => document.querySelector('.debug-panel pre')?.textContent ?? '',
+        );
+        check(
+          `${label}: auto-capture fires on a steady page ("${choice}")`,
+          captured && errors.length === 0,
+          `${captured ? `captured after ≤ ${Date.now() - started} ms more` : 'no capture'}; ${
+            errors.join('; ') ||
+            panel
+              .split('\n')
+              .filter((l) => /auto-capture/.test(l))
+              .join('')
+          }`,
+        );
+      }
     }
 
     // Photo import: the detected quad is shown in the crop editor.

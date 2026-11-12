@@ -1,3 +1,4 @@
+import { requestDeviceMotionPermission } from '@scanoficus/core/camera';
 import type { ScanDocumentElement } from '@scanoficus/elements';
 import { attachDebugOverlay } from './debug.ts';
 import { createDemoDetector, type DetectorChoice, detectionMaxSide } from './detector.ts';
@@ -19,6 +20,8 @@ change filters, crop, rotate and save a PDF.</p>`;
   let clearResults = () => {};
 
   const open = () => {
+    // iOS only grants motion-sensor access from a user gesture: ask in this tap handler.
+    if (motion.checked) void requestDeviceMotionPermission();
     const overlay = document.createElement('div');
     overlay.className = 'scanner-overlay';
     const scanner = document.createElement('scan-document') as ScanDocumentElement;
@@ -31,6 +34,7 @@ change filters, crop, rotate and save a PDF.</p>`;
       camera: { resolution: highRes.checked ? 'max' : 'hd' },
       createDetector: () => createDemoDetector(detector),
       detection: { maxSide: detectionMaxSide(detector) },
+      deviceMotion: motion.checked,
     };
     overlay.append(scanner);
     document.body.append(overlay);
@@ -57,7 +61,16 @@ change filters, crop, rotate and save a PDF.</p>`;
   highResLabel.innerHTML =
     '<input type="checkbox"> High-resolution stream (sharper pages, more battery and memory)';
   const highRes = highResLabel.querySelector('input') as HTMLInputElement;
-  intro.append(highResLabel, button('Start scanning', open, 'primary'));
+  const motionLabel = document.createElement('label');
+  motionLabel.className = 'option';
+  motionLabel.innerHTML =
+    '<input type="checkbox"> Motion sensor: also wait while the phone rotates (asks for permission on iOS)';
+  const motion = motionLabel.querySelector('input') as HTMLInputElement;
+  motion.checked = localStorage.getItem('scanoficus-motion') === '1';
+  motion.addEventListener('change', () => {
+    localStorage.setItem('scanoficus-motion', motion.checked ? '1' : '0');
+  });
+  intro.append(highResLabel, motionLabel, button('Start scanning', open, 'primary'));
   main.replaceChildren(intro, results);
   return () => {
     close?.();

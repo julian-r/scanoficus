@@ -1,12 +1,17 @@
-import type { LiveDetection, ScannerController } from '@scanoficus/core/controller';
+import type {
+  AutoCaptureInfo,
+  LiveDetection,
+  ScannerController,
+} from '@scanoficus/core/controller';
 import { DetectorContext, detectDocument } from '@scanoficus/core/detect';
 import { type DetectorStatus, onDetectorStatus } from './detector.ts';
 
 /**
  * Debug overlay for a live scanner: the classic detector's edge map at processing resolution
  * with its quad (blue) and the active detector's quad (orange), plus the active detector and
- * its backend, cold start and median detect time, detection rate, latency, stability and
- * sharpness. The edge map comes from re-running the classic detector on the main thread with an
+ * its backend, cold start and median detect time, detection rate, latency, and why auto-capture
+ * does (not) fire: every criterion with its value, limit and ✓/✗, and the first failing one. The
+ * edge map comes from re-running the classic detector on the main thread with an
  * inspectable `DetectorContext` (debug only; the scanner itself detects with the chosen
  * detector).
  */
@@ -62,8 +67,7 @@ export function attachDebugOverlay(controller: ScannerController, host: HTMLElem
     stats.textContent = [
       `detections/s ${d.fps}`,
       `detect ms    ${d.detectMs.toFixed(1)}`,
-      `stable       ${d.stable ? 'yes' : 'no'}  progress ${(d.progress * 100).toFixed(0)}%`,
-      `sharpness    ${d.sharpness.toFixed(0)} (${(d.relativeSharpness * 100).toFixed(0)}% of peak)`,
+      ...autoCaptureLines(d),
       `frame        ${d.frameWidth}×${d.frameHeight}`,
       ...detectorLines(status),
       detectorNote,
@@ -83,6 +87,50 @@ export function attachDebugOverlay(controller: ScannerController, host: HTMLElem
     panel.remove();
   };
 }
+
+/** Auto-capture criteria: value vs limit with ✓/✗, the blocker, and the progress. */
+function autoCaptureLines(d: LiveDetection): string[] {
+  const a: AutoCaptureInfo | undefined = d.autoCapture;
+  if (!a) return [`progress     ${(d.progress * 100).toFixed(0)}%`];
+  const mark = (ok: boolean | null) => (ok === null ? '·' : ok ? '✓' : '✗');
+  const pct = (v: number) => `${(v * 100).toFixed(1)}%`;
+  const relative = d.relativeSharpness;
+  return [
+    `auto-capture ${a.ready ? 'READY' : `waiting: ${BLOCKER_TEXT[a.blocker ?? 'settling']}`}`,
+    `${mark(a.speed === null ? null : a.speed <= a.maxSpeed)} speed      ${
+      a.speed === null ? '–' : a.speed.toFixed(3)
+    } ≤ ${a.maxSpeed} diag/s`,
+    `${mark(a.jitter === null ? null : a.jitter <= a.maxJitter)} jitter     ${
+      a.jitter === null ? '–' : pct(a.jitter)
+    } ≤ ${pct(a.maxJitter)} of diag`,
+    `${mark(a.windowFrames >= a.minFrames && a.windowSpanMs >= a.minWindowSpanMs)} frames     ${
+      a.windowFrames
+    } ≥ ${a.minFrames} over ${a.windowSpanMs.toFixed(0)} ≥ ${a.minWindowSpanMs} ms`,
+    `${mark(relative >= a.minRelativeSharpness)} sharpness  ${(relative * 100).toFixed(0)}% ≥ ${(
+      a.minRelativeSharpness * 100
+    ).toFixed(0)}% of ref ${a.sharpnessReference.toFixed(0)} (now ${d.sharpness.toFixed(0)})`,
+    a.rotationRate === null
+      ? `· gyro       off (no motion samples)`
+      : `${mark(a.rotationRate <= a.maxRotationRate)} gyro       ${a.rotationRate.toFixed(1)} ≤ ${
+          a.maxRotationRate
+        } °/s`,
+    `${mark(a.readyMs >= a.stableMs)} time       ${a.readyMs.toFixed(0)} / ${a.stableMs} ms ready (${(
+      d.progress * 100
+    ).toFixed(0)}%)${a.bestFrame ? ', best frame kept' : ''}`,
+  ];
+}
+
+const BLOCKER_TEXT: Record<NonNullable<AutoCaptureInfo['blocker']>, string> = {
+  disabled: 'auto-capture off',
+  'no-document': 'no document',
+  holding: 'detection missed (holding last quad)',
+  captured: 'already captured, show the next page',
+  settling: 'collecting frames',
+  moving: 'moving too fast',
+  jitter: 'detections scatter',
+  'device-motion': 'device rotating (gyro)',
+  blurry: 'blurry vs recent frames',
+};
 
 function detectorLines(status: DetectorStatus | null): string[] {
   if (!status) return [];
