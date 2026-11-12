@@ -511,6 +511,21 @@ async function checkDetectorChoices(label, url) {
         const panel = await page.evaluate(
           () => document.querySelector('.debug-panel pre')?.textContent ?? '',
         );
+        // The PDF writer is a lazy chunk of the controller: export the captured page.
+        const pdf = captured
+          ? await page
+              .evaluate(async () => {
+                const blob = await document.querySelector('scan-document').controller.exportPdf();
+                const head = new TextDecoder().decode(await blob.slice(0, 5).arrayBuffer());
+                return { size: blob.size, head };
+              })
+              .catch((e) => ({ failed: String(e) }))
+          : { failed: 'no page' };
+        check(
+          `${label}: PDF export loads its lazy chunk ("${choice}")`,
+          pdf.head === '%PDF-' && pdf.size > 1000,
+          pdf.failed ?? `${pdf.size} bytes`,
+        );
         check(
           `${label}: auto-capture fires on a steady page ("${choice}")`,
           captured && errors.length === 0,
