@@ -20,6 +20,12 @@ import { createDetectorWorker, createMainThreadDetector } from '../worker/client
 import type { DocumentDetector } from '../worker/processor.ts';
 import { openScannerCamera, type ScannerCamera, type ScannerStill } from './camera-source.ts';
 import { Emitter } from './emitter.ts';
+import {
+  type CaptureBlocker,
+  CaptureTrigger,
+  type CaptureTriggerOptions,
+  type CaptureTriggerStatus,
+} from './trigger.ts';
 
 /**
  * Scanner lifecycle. `idle` → `starting` (opening the camera) → `scanning` (live detection) →
@@ -66,18 +72,53 @@ export interface LiveDetection {
   frameHeight: number;
   /** The tracker reports the quad as stable. */
   stable: boolean;
-  /** Auto-capture progress in [0, 1] (stable and sharp time / required time). */
+  /**
+   * Auto-capture progress in [0, 1]: fills while the document is ready (stable and sharp) for
+   * `stableMs`, decays while it is not.
+   */
   progress: number;
   /**
    * Laplacian-variance sharpness of the document region (whole frame without a detection) and
-   * its ratio to the recent maximum; only the ratio is used for auto-capture, because absolute
-   * values depend on scene and scale.
+   * its ratio to the recent reference (a percentile of the last 1.5 s); only the ratio is used
+   * for auto-capture, because absolute values depend on scene and scale.
    */
   sharpness: number;
   relativeSharpness: number;
   /** Duration of the last detection and detection rate. */
   detectMs: number;
   fps: number;
+  /** Why auto-capture is (not) ready, with the measured values and their limits. */
+  autoCapture?: AutoCaptureInfo;
+}
+
+/** Auto-capture criteria of the latest frame: measured values and limits (for debug overlays). */
+export interface AutoCaptureInfo {
+  /** The first criterion that fails, or `null` if the frame is ready. */
+  blocker: CaptureBlocker | null;
+  ready: boolean;
+  /** Fastest corner of the tracked motion (diagonals/s; `null`: too few frames) and the limit. */
+  speed: number | null;
+  maxSpeed: number;
+  /** Scatter of the detections around that motion (diagonals) and the limit. */
+  jitter: number | null;
+  maxJitter: number;
+  /** Detections in the stability window and the minimum. */
+  windowFrames: number;
+  minFrames: number;
+  /** Sharpness reference and the minimum ratio to it. */
+  sharpnessReference: number;
+  minRelativeSharpness: number;
+  /** Ready time accumulated so far (progress × `stableMs`) and the required time. */
+  readyMs: number;
+  stableMs: number;
+  /**
+   * Device rotation rate (°/s, opt-in motion sensor; `null` without recent samples) and the
+   * limit.
+   */
+  rotationRate: number | null;
+  maxRotationRate: number;
+  /** A sharper recent frame is kept as the still for the next auto-capture. */
+  bestFrame: boolean;
 }
 
 /** Immutable view of the controller, replaced on every change (for `useSyncExternalStore`). */
@@ -130,10 +171,37 @@ export interface ScannerOptions {
   tracker?: QuadTrackerOptions;
   /** Capture automatically when the document is stable and sharp. Default true. */
   autoCapture?: boolean;
-  /** How long the document must be stable and sharp before auto-capture. Default 1000 ms. */
+  /**
+   * How long the document must be stable and sharp before auto-capture. Default 600 ms (was
+   * 1000 ms with the earlier consecutive-frame rule).
+   */
   stableMs?: number;
-  /** Minimum sharpness relative to the recent maximum for auto-capture. Default 0.6. */
+  /**
+   * Minimum sharpness relative to the recent reference (75th percentile of the last 1.5 s) for
+   * auto-capture. Default 0.6.
+   */
   minRelativeSharpness?: number;
+  /**
+   * Further auto-capture rule options (progress decay, sharpness reference); `stableMs` and
+   * `minRelativeSharpness` above take precedence.
+   */
+  trigger?: CaptureTriggerOptions;
+  /**
+   * Best-frame window (ms) of auto-capture: during the last part of the progress, each analyzed
+   * video frame is also grabbed at full resolution and the sharpest ready one of this period is
+   * kept (at most one, plus one being compared); auto-capture uses it as the still instead of
+   * the frame after the decision. Only with video-frame stills (not `stillCapture: 'photo'`) and
+   * cameras that implement `grabStill`. 0 disables it. Default 300.
+   */
+  bestFrameMs?: number;
+  /**
+   * Opt-in motion sensor: listen to `devicemotion` while scanning and hold auto-capture while
+   * the device rotates faster than `maxRotationRate`. On iOS, call
+   * `requestDeviceMotionPermission()` from a user gesture first. Default false.
+   */
+  deviceMotion?: boolean;
+  /** Rotation-rate limit (°/s) of the motion sensor. Default 10. */
+  maxRotationRate?: number;
   /** Filter of new pages. Default `'color'`. */
   defaultFilter?: ScanFilter;
   /**
@@ -183,8 +251,22 @@ export class ScannerController {
   private lastFrameAt = 0;
   /** Consecutive failures of `detectStill` (reported once, at the second). */
   private stillFailures = 0;
-  private peakSharpness = 0;
-  private stableSince: number | null = null;
+  private readonly trigger: CaptureTrigger;
+  /** Progress of the last analyzed frame (decides whether to grab best-frame stills). */
+  private lastProgress = 0;
+  /** Best-frame candidate: a full-resolution video frame with its sharpness and preview quad. */
+  private bestStill: {
+    still: ScannerStill;
+    sharpness: number;
+    time: number;
+    quad: Quad | null;
+    width: number;
+    height: number;
+  } | null = null;
+  private stopMotion: (() => void) | null = null;
+  private rotationRate: number | null = null;
+  private lastMotionAt = Number.NEGATIVE_INFINITY;
+  private lastFastMotionAt = Number.NEGATIVE_INFINITY;
   /** Quad of the last capture; auto-capture waits until the document changes. */
   private capturedQuad: Quad | null = null;
   private replaceIndex: number | null = null;
@@ -206,6 +288,13 @@ export class ScannerController {
     this.ownsRenderer = !options.renderer;
     this.renderer = options.renderer ?? null;
     this.tracker = new QuadTracker(options.tracker);
+    this.trigger = new CaptureTrigger({
+      ...options.trigger,
+      ...(options.stableMs !== undefined && { stableMs: options.stableMs }),
+      ...(options.minRelativeSharpness !== undefined && {
+        minRelativeSharpness: options.minRelativeSharpness,
+      }),
+    });
     this.snapshot = {
       state: 'idle',
       pages: [],
@@ -298,8 +387,10 @@ export class ScannerController {
       });
       this.update({ features: camera.features, torch: false, error: null, cameraStage: null });
       this.tracker.reset();
-      this.stableSince = null;
+      this.trigger.reset();
+      this.lastProgress = 0;
       this.lastFrameAt = this.now();
+      this.watchMotion();
       this.stopFrames = camera.onFrame(() => this.onFrame());
       this.startStallWatchdog();
       this.setState('scanning');
@@ -333,7 +424,9 @@ export class ScannerController {
 
   /** Enables or disables auto-capture. */
   setAutoCapture(enabled: boolean): void {
-    this.stableSince = null;
+    this.trigger.restart();
+    this.lastProgress = 0;
+    this.dropBestStill();
     this.update({ autoCapture: enabled });
   }
 
@@ -354,12 +447,21 @@ export class ScannerController {
    * fails the tracked preview quad is scaled to the still, and without any quad the whole
    * image is used. Resolves with the new page, or `null` if not scanning.
    */
-  async capture(): Promise<ScanPage | null> {
+  capture(): Promise<ScanPage | null> {
+    this.dropBestStill();
+    return this.captureWith(null);
+  }
+
+  /** Captures with `kept` (a best-frame still, owned by this call) or a fresh still. */
+  private async captureWith(kept: ScannerController['bestStill']): Promise<ScanPage | null> {
     const camera = this.camera;
-    if (!camera || this.state !== 'scanning') return null;
-    const previewQuad = this.snapshot.detection?.quad ?? null;
-    const previewWidth = camera.width;
-    const previewHeight = camera.height;
+    if (!camera || this.state !== 'scanning') {
+      if (kept) closeSource(kept.still.image);
+      return null;
+    }
+    const previewQuad = kept ? kept.quad : (this.snapshot.detection?.quad ?? null);
+    const previewWidth = kept ? kept.width : camera.width;
+    const previewHeight = kept ? kept.height : camera.height;
     // `epoch` decides whether the result is still wanted (stop/dispose discard it); `token`
     // decides whether this capture still owns the live session (hide, finish or a newer
     // session take that away): only the owner may change state or the duplicate guard.
@@ -371,7 +473,7 @@ export class ScannerController {
     this.setState('capturing');
     let still: ScannerStill | null = null;
     try {
-      still = await camera.captureStill();
+      still = kept ? kept.still : await camera.captureStill();
       // Preview corners map to the still only when both show the same framing (video frames);
       // a photo may be cropped differently, so it relies on its own detection.
       const preview =
@@ -389,8 +491,9 @@ export class ScannerController {
       this.emitter.emit('capture', { page });
       if (owns()) {
         this.activeCapture = 0;
-        this.capturedQuad = previewQuad;
-        this.stableSince = null;
+        this.capturedQuad = this.snapshot.detection?.quad ?? previewQuad;
+        this.trigger.restart();
+        this.lastProgress = 0;
         if (this.options.reviewAfterCapture || replacing !== null) this.finish();
         else this.setState('scanning');
       }
@@ -539,19 +642,38 @@ export class ScannerController {
     const gray = rgbaToGray(frame);
     this.busy = true;
     const started = this.now();
+    // Best frame: near the end of the progress, grab the full-resolution frame as well.
+    const bestFrameMs = this.options.bestFrameMs ?? 300;
+    const grabStill =
+      bestFrameMs > 0 &&
+      this.snapshot.autoCapture &&
+      this.capturedQuad === null &&
+      this.lastProgress >= 1 - bestFrameMs / this.stableMs() &&
+      camera.grabStill
+        ? camera.grabStill().catch(() => null)
+        : null;
+    const size = { width: camera.width, height: camera.height };
     this.detectWithFallback(frame)
-      .then((detection) => {
+      .then(async (detection) => {
+        const still = grabStill ? await grabStill : null;
         this.busy = false;
-        if (this.camera !== camera || this.state !== 'scanning') return;
+        if (this.camera !== camera || this.state !== 'scanning') {
+          if (still) closeSource(still.image);
+          return;
+        }
         if (this.emitter.has('frame')) this.emitter.emit('frame', { image: frame, detection });
         // Focus is judged on the document region, so the background does not dominate.
         const frameSharpness = sharpness(gray, detection ? boundingBox(detection.quad) : undefined);
-        this.handleDetection(camera, frame, detection, frameSharpness, this.now() - started);
+        this.handleDetection(camera, frame, detection, frameSharpness, started, still, size);
       })
       .catch((error) => {
         this.busy = false;
         this.emitter.emit('error', { error: asError(error) });
       });
+  }
+
+  private stableMs(): number {
+    return this.options.stableMs ?? this.options.trigger?.stableMs ?? 600;
   }
 
   private async detectWithFallback(frame: RgbaImage): Promise<Detection | null> {
@@ -584,15 +706,15 @@ export class ScannerController {
     frame: RgbaImage,
     detection: Detection | null,
     frameSharpness: number,
-    detectMs: number,
+    frameTime: number,
+    still: ScannerStill | null,
+    size: { width: number; height: number },
   ): void {
     const now = this.now();
     const observed =
       detection &&
       scaleQuad(detection.quad, camera.width / frame.width, camera.height / frame.height);
-    const tracked = this.tracker.update(observed, now);
-    this.peakSharpness = Math.max(this.peakSharpness * 0.98, frameSharpness);
-    const relativeSharpness = this.peakSharpness > 0 ? frameSharpness / this.peakSharpness : 0;
+    const tracked = this.tracker.update(observed, frameTime);
     this.detectTimes.push(now);
     while (this.detectTimes.length > 1 && now - this.detectTimes[0] > 1000)
       this.detectTimes.shift();
@@ -600,17 +722,17 @@ export class ScannerController {
     if (this.capturedQuad && (!tracked.quad || convexIoU(tracked.quad, this.capturedQuad) < 0.8)) {
       this.capturedQuad = null; // a different document (or none) is in view now
     }
-    const ready =
-      this.snapshot.autoCapture &&
-      tracked.stable &&
-      !tracked.holding &&
-      this.capturedQuad === null &&
-      relativeSharpness >= (this.options.minRelativeSharpness ?? 0.6);
-    if (!ready) this.stableSince = null;
-    else this.stableSince ??= now;
-    const stableMs = this.options.stableMs ?? 1000;
-    const progress =
-      this.stableSince === null ? 0 : Math.min(1, (now - this.stableSince) / stableMs);
+    const maxRotationRate = this.options.maxRotationRate ?? 10;
+    const motionFresh = frameTime - this.lastMotionAt <= 1000;
+    let outside: CaptureBlocker | null = null;
+    if (!this.snapshot.autoCapture) outside = 'disabled';
+    else if (this.capturedQuad) outside = 'captured';
+    else if (motionFresh && frameTime - this.lastFastMotionAt < 300) outside = 'device-motion';
+    const status = this.trigger.update(tracked, frameSharpness, frameTime, outside);
+    if (outside === 'disabled' || outside === 'captured') this.trigger.restart();
+    const progress = outside === 'disabled' || outside === 'captured' ? 0 : status.progress;
+    this.lastProgress = progress;
+    this.keepBestStill(still, status, frameSharpness, frameTime, tracked.quad, size);
 
     const live: LiveDetection = {
       quad: tracked.quad,
@@ -619,13 +741,85 @@ export class ScannerController {
       stable: tracked.stable,
       progress,
       sharpness: frameSharpness,
-      relativeSharpness,
-      detectMs,
+      relativeSharpness: status.relativeSharpness,
+      detectMs: now - frameTime,
       fps: this.detectTimes.length,
+      autoCapture: {
+        blocker: status.blocker,
+        ready: status.ready,
+        speed: tracked.speed ?? null,
+        maxSpeed: this.tracker.maxSpeed,
+        jitter: tracked.jitter ?? null,
+        maxJitter: this.tracker.stabilityThreshold,
+        windowFrames: tracked.windowFrames ?? 0,
+        minFrames: this.tracker.stableFrames,
+        sharpnessReference: status.sharpnessReference,
+        minRelativeSharpness: this.trigger.minRelativeSharpness,
+        readyMs: progress * this.trigger.stableMs,
+        stableMs: this.trigger.stableMs,
+        rotationRate: motionFresh ? this.rotationRate : null,
+        maxRotationRate,
+        bestFrame: this.bestStill !== null,
+      },
     };
     this.update({ detection: live });
     this.emitter.emit('detection', live);
-    if (progress >= 1) void this.capture();
+    if (status.fire && outside === null) {
+      const kept = this.bestStill;
+      this.bestStill = null;
+      void this.captureWith(kept);
+    }
+  }
+
+  /**
+   * Best-frame buffer: keeps the sharpest ready full-resolution frame of the last
+   * `bestFrameMs` (one slot); everything else is closed at once.
+   */
+  private keepBestStill(
+    still: ScannerStill | null,
+    status: CaptureTriggerStatus,
+    frameSharpness: number,
+    frameTime: number,
+    quad: Quad | null,
+    size: { width: number; height: number },
+  ): void {
+    const bestFrameMs = this.options.bestFrameMs ?? 300;
+    const kept = this.bestStill;
+    if (kept && (kept.time < frameTime - bestFrameMs || (!status.ready && status.progress === 0))) {
+      this.dropBestStill();
+    }
+    if (!still) return;
+    const current = this.bestStill;
+    if (status.ready && (!current || frameSharpness >= current.sharpness)) {
+      this.dropBestStill();
+      this.bestStill = { still, sharpness: frameSharpness, time: frameTime, quad, ...size };
+    } else {
+      closeSource(still.image);
+    }
+  }
+
+  private dropBestStill(): void {
+    if (this.bestStill) closeSource(this.bestStill.still.image);
+    this.bestStill = null;
+  }
+
+  /** Opt-in `devicemotion` listener (see {@link ScannerOptions.deviceMotion}). */
+  private watchMotion(): void {
+    this.stopMotion?.();
+    this.stopMotion = null;
+    if (!this.options.deviceMotion || typeof window === 'undefined') return;
+    const limit = this.options.maxRotationRate ?? 10;
+    const listener = (event: Event) => {
+      const rate = (event as DeviceMotionEvent).rotationRate;
+      if (!rate) return;
+      const value = Math.hypot(rate.alpha ?? 0, rate.beta ?? 0, rate.gamma ?? 0);
+      const now = this.now();
+      this.rotationRate = value;
+      this.lastMotionAt = now;
+      if (value > limit) this.lastFastMotionAt = now;
+    };
+    window.addEventListener('devicemotion', listener);
+    this.stopMotion = () => window.removeEventListener('devicemotion', listener);
   }
 
   // ---- pages -----------------------------------------------------------------------------
@@ -811,9 +1005,16 @@ export class ScannerController {
     this.camera?.stop();
     this.camera = null;
     this.busy = false;
-    this.stableSince = null;
     this.capturedQuad = null;
     this.tracker.reset();
+    this.trigger.reset();
+    this.lastProgress = 0;
+    this.dropBestStill();
+    this.stopMotion?.();
+    this.stopMotion = null;
+    this.rotationRate = null;
+    this.lastMotionAt = Number.NEGATIVE_INFINITY;
+    this.lastFastMotionAt = Number.NEGATIVE_INFINITY;
     if (this.snapshot.detection || this.snapshot.torch || this.snapshot.cameraStage) {
       this.update({ detection: null, torch: false, cameraStage: null });
     }

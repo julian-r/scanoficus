@@ -51,6 +51,84 @@ describe('ScannerController', () => {
     expect(captures).toHaveLength(1);
   });
 
+  it('reports which auto-capture criterion fails', async () => {
+    const { controller, frames } = setup({ stableMs: 500 });
+    const blockers: (string | null | undefined)[] = [];
+    controller.on('detection', (d) => blockers.push(d.autoCapture?.blocker));
+    await controller.start(video);
+    await frames(6);
+    const info = controller.getSnapshot().detection?.autoCapture;
+    expect(blockers[0]).toBe('settling');
+    expect(blockers.at(-1)).toBeNull();
+    expect(info).toMatchObject({
+      ready: true,
+      maxSpeed: 0.1,
+      maxJitter: 0.015,
+      minFrames: 4,
+      minRelativeSharpness: 0.6,
+      stableMs: 500,
+      rotationRate: null,
+      maxRotationRate: 10,
+    });
+    expect(info?.speed).toBeLessThan(0.01);
+    expect(info?.readyMs).toBeGreaterThan(0);
+  });
+
+  it('auto-captures the sharpest recent full-resolution frame and closes the others', async () => {
+    class BufferingCamera extends FakeCamera {
+      grabbed: { id: number; closed: boolean }[] = [];
+      captureStills = 0;
+      async grabStill(): Promise<ScannerStill> {
+        const entry = { id: this.grabbed.length, closed: false };
+        this.grabbed.push(entry);
+        const image = { ...this.still.image, id: entry.id, close: () => (entry.closed = true) };
+        return { image, width: 768, height: 576, matchesPreview: true };
+      }
+      override async captureStill(): Promise<ScannerStill> {
+        this.captureStills++;
+        return super.captureStill();
+      }
+    }
+    const camera = new BufferingCamera();
+    const { controller, frames } = setup({ stableMs: 500 }, camera);
+    const captures: unknown[] = [];
+    controller.on('capture', ({ page }) => captures.push(page.source));
+    await controller.start(video);
+    await frames(16);
+    expect(captures).toHaveLength(1);
+    expect(camera.captureStills).toBe(0);
+    expect(camera.grabbed.length).toBeGreaterThanOrEqual(2);
+    // The page owns the kept frame; every other grabbed frame was closed.
+    const kept = (captures[0] as { id: number }).id;
+    expect(camera.grabbed.filter((g) => !g.closed).map((g) => g.id)).toEqual([kept]);
+  });
+
+  it('holds auto-capture while the opt-in motion sensor reports fast rotation', async () => {
+    const target = new EventTarget();
+    vi.stubGlobal('window', target);
+    const { controller, frames } = setup({ stableMs: 300, deviceMotion: true });
+    const captures: string[] = [];
+    controller.on('capture', ({ page }) => captures.push(page.id));
+    await controller.start(video);
+    const shake = () => {
+      const event = new Event('devicemotion');
+      Object.defineProperty(event, 'rotationRate', { value: { alpha: 20, beta: 5, gamma: 0 } });
+      target.dispatchEvent(event);
+    };
+    for (let i = 0; i < 12; i++) {
+      shake();
+      await frames(1);
+    }
+    const info = controller.getSnapshot().detection?.autoCapture;
+    expect(info?.blocker).toBe('device-motion');
+    expect(info?.rotationRate).toBeCloseTo(Math.hypot(20, 5), 6);
+    expect(captures).toHaveLength(0);
+    await frames(12); // the device is still now
+    expect(captures).toHaveLength(1);
+    controller.dispose();
+    vi.unstubAllGlobals();
+  });
+
   it('captures manually and can switch to review after capture', async () => {
     const { controller, frames, states } = setup({ autoCapture: false, reviewAfterCapture: true });
     await controller.start(video);

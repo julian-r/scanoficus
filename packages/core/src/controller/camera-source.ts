@@ -1,6 +1,7 @@
 import {
   type CameraFeatures,
   type CameraOptions,
+  captureVideoFrame,
   openCamera,
   type StillCapture,
 } from '../camera/camera.ts';
@@ -37,6 +38,12 @@ export interface ScannerCamera {
   grabFrame(maxSide: number): RgbaImage | null;
   /** Captures a still at the best available resolution. */
   captureStill(): Promise<ScannerStill>;
+  /**
+   * Optional: the current video frame at full stream resolution, grabbed at call time (no
+   * photo), for the best-frame buffer of auto-capture. Omit it when stills are not video
+   * frames.
+   */
+  grabStill?(): Promise<ScannerStill>;
   setTorch(on: boolean): Promise<boolean>;
   /** Registers a callback for the camera ending unexpectedly (track ended, device lost). */
   onEnded(callback: () => void): void;
@@ -50,7 +57,12 @@ export async function openScannerCamera(
 ): Promise<ScannerCamera> {
   const session = await openCamera(video, options);
   const grabber = new FrameGrabber();
+  const grabStill = async (): Promise<ScannerStill> => {
+    const image = await captureVideoFrame(video);
+    return { image, width: image.width, height: image.height, matchesPreview: true };
+  };
   return {
+    ...(options.stillCapture !== 'photo' && { grabStill }),
     get width() {
       return session.width;
     },

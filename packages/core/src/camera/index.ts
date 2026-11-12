@@ -24,3 +24,4 @@ export {
   startFrameLoop,
   watchPageVisibility,
 } from './frames.ts';
+export { requestDeviceMotionPermission } from './motion.ts';

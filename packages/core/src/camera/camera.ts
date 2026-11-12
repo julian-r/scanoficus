@@ -305,7 +305,8 @@ export async function openCamera(
 }
 
 /** The current video frame at stream resolution as an ImageBitmap (canvas fallback). */
-async function captureVideoFrame(video: HTMLVideoElement): Promise<ImageBitmap> {
+/** The current frame of `video` as a bitmap at full resolution (internal). */
+export async function captureVideoFrame(video: HTMLVideoElement): Promise<ImageBitmap> {
   try {
     return await createImageBitmap(video);
   } catch {

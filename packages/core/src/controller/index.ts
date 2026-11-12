@@ -6,6 +6,7 @@
  */
 export { openScannerCamera, type ScannerCamera, type ScannerStill } from './camera-source.ts';
 export {
+  type AutoCaptureInfo,
   type LiveDetection,
   type PageChanges,
   ScannerController,
@@ -15,3 +16,9 @@ export {
   type ScannerState,
   type ScanPage,
 } from './controller.ts';
+export {
+  type CaptureBlocker,
+  CaptureTrigger,
+  type CaptureTriggerOptions,
+  type CaptureTriggerStatus,
+} from './trigger.ts';
