@@ -10,8 +10,21 @@ export async function requestDeviceMotionPermission(): Promise<boolean> {
     .requestPermission;
   if (typeof request !== 'function') return true;
   try {
-    return (await request.call(DeviceMotionEvent)) === 'granted';
+    const granted = (await request.call(DeviceMotionEvent)) === 'granted';
+    if (granted) for (const listener of [...grantedListeners]) listener();
+    return granted;
   } catch {
     return false;
   }
+}
+
+const grantedListeners = new Set<() => void>();
+
+/**
+ * Calls `listener` whenever {@link requestDeviceMotionPermission} gets a grant (internal: the
+ * scanner controller re-arms its `devicemotion` listener). Returns an unsubscribe function.
+ */
+export function onDeviceMotionGranted(listener: () => void): () => void {
+  grantedListeners.add(listener);
+  return () => grantedListeners.delete(listener);
 }

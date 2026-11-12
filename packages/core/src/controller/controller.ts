@@ -5,6 +5,7 @@ import {
   type CameraStartStage,
 } from '../camera/camera.ts';
 import { FrameGrabber, watchPageVisibility } from '../camera/frames.ts';
+import { onDeviceMotionGranted } from '../camera/motion.ts';
 import type { Detection, DetectOptions } from '../detect/detector.ts';
 import { sharpness } from '../detect/sharpness.ts';
 import { QuadTracker, type QuadTrackerOptions } from '../detect/tracker.ts';
@@ -201,8 +202,9 @@ export interface ScannerOptions {
   bestFrameMs?: number;
   /**
    * Opt-in motion sensor: listen to `devicemotion` while scanning and hold auto-capture while
-   * the device rotates faster than `maxRotationRate`. On iOS, call
-   * `requestDeviceMotionPermission()` from a user gesture first. Default false.
+   * the device rotates faster than `maxRotationRate` (the last 300 ms). On iOS, call
+   * `requestDeviceMotionPermission()` from a user gesture, before or during scanning (a grant
+   * re-arms the listener). The listener is attached only in the `scanning` state. Default false.
    */
   deviceMotion?: boolean;
   /** Rotation-rate limit (°/s) of the motion sensor. Default 10. */
@@ -395,7 +397,6 @@ export class ScannerController {
       this.trigger.reset();
       this.lastProgress = 0;
       this.lastFrameAt = this.now();
-      this.watchMotion();
       this.stopFrames = camera.onFrame(() => this.onFrame());
       this.startStallWatchdog();
       this.setState('scanning');
@@ -453,7 +454,13 @@ export class ScannerController {
    * image is used. Resolves with the new page, or `null` if not scanning.
    */
   capture(): Promise<ScanPage | null> {
-    this.dropBestStill();
+    // A best-frame still younger than bestFrameMs is as good as a fresh one, and sharp.
+    const kept = this.bestStill;
+    this.bestStill = null;
+    if (kept && this.now() - kept.time <= (this.options.bestFrameMs ?? 300)) {
+      return this.captureWith(kept);
+    }
+    if (kept) closeSource(kept.still.image);
     return this.captureWith(null);
   }
 
@@ -653,7 +660,8 @@ export class ScannerController {
       bestFrameMs > 0 &&
       this.snapshot.autoCapture &&
       this.capturedQuad === null &&
-      this.lastProgress >= 1 - bestFrameMs / this.stableMs() &&
+      this.lastProgress > 0 &&
+      this.lastProgress >= Math.max(0.01, 1 - bestFrameMs / this.stableMs()) &&
       camera.grabStill
         ? camera.grabStill().catch(() => null)
         : null;
@@ -816,8 +824,7 @@ export class ScannerController {
 
   /** Opt-in `devicemotion` listener (see {@link ScannerOptions.deviceMotion}). */
   private watchMotion(): void {
-    this.stopMotion?.();
-    this.stopMotion = null;
+    this.unwatchMotion();
     if (!this.options.deviceMotion || typeof window === 'undefined') return;
     const limit = this.options.maxRotationRate ?? 10;
     const listener = (event: Event) => {
@@ -829,8 +836,24 @@ export class ScannerController {
       this.lastMotionAt = now;
       if (value > limit) this.lastFastMotionAt = now;
     };
-    window.addEventListener('devicemotion', listener);
-    this.stopMotion = () => window.removeEventListener('devicemotion', listener);
+    const target = window;
+    target.addEventListener('devicemotion', listener);
+    // iOS: a permission granted later (requestDeviceMotionPermission) re-arms the listener.
+    const offGranted = onDeviceMotionGranted(() => {
+      if (this.state === 'scanning') this.watchMotion();
+    });
+    this.stopMotion = () => {
+      target.removeEventListener('devicemotion', listener);
+      offGranted();
+    };
+  }
+
+  private unwatchMotion(): void {
+    this.stopMotion?.();
+    this.stopMotion = null;
+    this.rotationRate = null;
+    this.lastMotionAt = Number.NEGATIVE_INFINITY;
+    this.lastFastMotionAt = Number.NEGATIVE_INFINITY;
   }
 
   // ---- pages -----------------------------------------------------------------------------
@@ -1021,11 +1044,7 @@ export class ScannerController {
     this.trigger.reset();
     this.lastProgress = 0;
     this.dropBestStill();
-    this.stopMotion?.();
-    this.stopMotion = null;
-    this.rotationRate = null;
-    this.lastMotionAt = Number.NEGATIVE_INFINITY;
-    this.lastFastMotionAt = Number.NEGATIVE_INFINITY;
+    this.unwatchMotion();
     if (this.snapshot.detection || this.snapshot.torch || this.snapshot.cameraStage) {
       this.update({ detection: null, torch: false, cameraStage: null });
     }
@@ -1041,6 +1060,9 @@ export class ScannerController {
   private setState(state: ScannerState): void {
     const previous = this.snapshot.state;
     if (previous === state) return;
+    // The motion sensor is only listened to while scanning.
+    if (state === 'scanning') this.watchMotion();
+    else this.unwatchMotion();
     this.update({ state });
     this.emitter.emit('state', { state, previous });
   }

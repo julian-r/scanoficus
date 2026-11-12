@@ -18,6 +18,22 @@ import { generateScene } from './support/synthetic.ts';
 
 const video = {} as HTMLVideoElement;
 
+/** Fake camera with `grabStill` (best-frame buffer) that records grabs and closes. */
+class BufferingCamera extends FakeCamera {
+  grabbed: { id: number; closed: boolean }[] = [];
+  captureStills = 0;
+  async grabStill(): Promise<ScannerStill> {
+    const entry = { id: this.grabbed.length, closed: false };
+    this.grabbed.push(entry);
+    const image = { ...this.still.image, id: entry.id, close: () => (entry.closed = true) };
+    return { image, width: 768, height: 576, matchesPreview: true };
+  }
+  override async captureStill(): Promise<ScannerStill> {
+    this.captureStills++;
+    return super.captureStill();
+  }
+}
+
 describe('ScannerController', () => {
   it('starts scanning and reports smoothed detections in video coordinates', async () => {
     const { controller, camera, states, frames } = setup({ autoCapture: false });
@@ -75,20 +91,6 @@ describe('ScannerController', () => {
   });
 
   it('auto-captures the sharpest recent full-resolution frame and closes the others', async () => {
-    class BufferingCamera extends FakeCamera {
-      grabbed: { id: number; closed: boolean }[] = [];
-      captureStills = 0;
-      async grabStill(): Promise<ScannerStill> {
-        const entry = { id: this.grabbed.length, closed: false };
-        this.grabbed.push(entry);
-        const image = { ...this.still.image, id: entry.id, close: () => (entry.closed = true) };
-        return { image, width: 768, height: 576, matchesPreview: true };
-      }
-      override async captureStill(): Promise<ScannerStill> {
-        this.captureStills++;
-        return super.captureStill();
-      }
-    }
     const camera = new BufferingCamera();
     const { controller, frames } = setup({ stableMs: 500 }, camera);
     const captures: unknown[] = [];
@@ -101,6 +103,66 @@ describe('ScannerController', () => {
     // The page owns the kept frame; every other grabbed frame was closed.
     const kept = (captures[0] as { id: number }).id;
     expect(camera.grabbed.filter((g) => !g.closed).map((g) => g.id)).toEqual([kept]);
+  });
+
+  it('grabs best-frame stills only once the progress has started, even if stableMs < bestFrameMs', async () => {
+    const camera = new BufferingCamera();
+    const { controller, frames } = setup({ stableMs: 100, bestFrameMs: 300 }, camera);
+    await controller.start(video);
+    await frames(3); // settling: progress 0
+    expect(controller.getSnapshot().detection?.progress).toBe(0);
+    expect(camera.grabbed).toHaveLength(0);
+    controller.setAutoCapture(false);
+    await frames(5);
+    expect(camera.grabbed).toHaveLength(0);
+  });
+
+  it('a manual capture uses a recent best frame', async () => {
+    const camera = new BufferingCamera();
+    const { controller, frames } = setup({ stableMs: 1000, bestFrameMs: 900 }, camera);
+    await controller.start(video);
+    await frames(7); // ready for a while, not yet captured
+    expect(controller.pages).toHaveLength(0);
+    expect(camera.grabbed.length).toBeGreaterThan(0);
+    const page = await controller.capture();
+    expect(camera.captureStills).toBe(0);
+    expect((page?.source as unknown as { id?: number } | undefined)?.id).toBeTypeOf('number');
+    expect(camera.grabbed.filter((g) => !g.closed)).toHaveLength(1);
+  });
+
+  it('listens to the motion sensor only while scanning and re-arms after a permission grant', async () => {
+    class CountingTarget extends EventTarget {
+      active = 0;
+      added = 0;
+      override addEventListener(...args: Parameters<EventTarget['addEventListener']>) {
+        if (args[0] === 'devicemotion') {
+          this.active++;
+          this.added++;
+        }
+        super.addEventListener(...args);
+      }
+      override removeEventListener(...args: Parameters<EventTarget['removeEventListener']>) {
+        if (args[0] === 'devicemotion') this.active--;
+        super.removeEventListener(...args);
+      }
+    }
+    const target = new CountingTarget();
+    vi.stubGlobal('window', target);
+    vi.stubGlobal('DeviceMotionEvent', { requestPermission: async () => 'granted' });
+    const { requestDeviceMotionPermission } = await import('../src/camera/index.ts');
+    const { controller, frames } = setup({ autoCapture: false, deviceMotion: true });
+    expect(target.active).toBe(0);
+    await controller.start(video);
+    expect([target.active, target.added]).toEqual([1, 1]);
+    expect(await requestDeviceMotionPermission()).toBe(true);
+    expect([target.active, target.added]).toEqual([1, 2]);
+    await frames(1);
+    controller.finish();
+    expect(target.active).toBe(0);
+    expect(await requestDeviceMotionPermission()).toBe(true);
+    expect(target.active).toBe(0); // not scanning: not re-armed
+    controller.dispose();
+    vi.unstubAllGlobals();
   });
 
   it('holds auto-capture while the opt-in motion sensor reports fast rotation', async () => {
