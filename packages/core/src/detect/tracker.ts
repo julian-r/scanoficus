@@ -61,6 +61,8 @@ export interface TrackerState {
   jitter?: number | null;
   /** Observations in the stability window. */
   windowFrames?: number;
+  /** Time (ms) from the oldest observation in the window to this update. */
+  windowSpanMs?: number;
   /**
    * Why a tracked, not held quad is not stable: too few observations yet (`settling`), too fast
    * (`moving`) or scattered (`jitter`); `null` otherwise.
@@ -209,6 +211,7 @@ export class QuadTracker {
       speed,
       jitter,
       windowFrames: window.length,
+      windowSpanMs: window.length > 0 ? timeMs - window[0].t : 0,
       instability,
     };
   }

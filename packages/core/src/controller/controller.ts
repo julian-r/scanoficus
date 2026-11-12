@@ -102,9 +102,14 @@ export interface AutoCaptureInfo {
   /** Scatter of the detections around that motion (diagonals) and the limit. */
   jitter: number | null;
   maxJitter: number;
-  /** Detections in the stability window and the minimum. */
+  /**
+   * Detections in the stability window and the minimum; time they span and the minimum (half
+   * the window).
+   */
   windowFrames: number;
   minFrames: number;
+  windowSpanMs: number;
+  minWindowSpanMs: number;
   /** Sharpness reference and the minimum ratio to it. */
   sharpnessReference: number;
   minRelativeSharpness: number;
@@ -753,6 +758,8 @@ export class ScannerController {
         maxJitter: this.tracker.stabilityThreshold,
         windowFrames: tracked.windowFrames ?? 0,
         minFrames: this.tracker.stableFrames,
+        windowSpanMs: tracked.windowSpanMs ?? 0,
+        minWindowSpanMs: this.tracker.windowMs / 2,
         sharpnessReference: status.sharpnessReference,
         minRelativeSharpness: this.trigger.minRelativeSharpness,
         readyMs: progress * this.trigger.stableMs,
