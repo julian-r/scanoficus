@@ -658,6 +658,7 @@ export class ScannerController {
         ? camera.grabStill().catch(() => null)
         : null;
     const size = { width: camera.width, height: camera.height };
+    let handedOver = false;
     this.detectWithFallback(frame)
       .then(async (detection) => {
         const still = grabStill ? await grabStill : null;
@@ -669,10 +670,13 @@ export class ScannerController {
         if (this.emitter.has('frame')) this.emitter.emit('frame', { image: frame, detection });
         // Focus is judged on the document region, so the background does not dominate.
         const frameSharpness = sharpness(gray, detection ? boundingBox(detection.quad) : undefined);
+        handedOver = true;
         this.handleDetection(camera, frame, detection, frameSharpness, started, still, size);
       })
       .catch((error) => {
         this.busy = false;
+        // A best-frame still grabbed for a failed detection is nobody's: close it.
+        if (!handedOver) void grabStill?.then((still) => still && closeSource(still.image));
         this.emitter.emit('error', { error: asError(error) });
       });
   }
