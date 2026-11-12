@@ -95,8 +95,16 @@ function autoCaptureLines(d: LiveDetection): string[] {
   const mark = (ok: boolean | null) => (ok === null ? '·' : ok ? '✓' : '✗');
   const pct = (v: number) => `${(v * 100).toFixed(1)}%`;
   const relative = d.relativeSharpness;
+  const rate = a.detectionRate;
+  const waiting =
+    a.blocker === 'slow-detection' && rate !== null
+      ? `detection rate too low for auto-capture: ${rate.toFixed(1)}/s (needs ≥ ${a.minDetectionRate}/s)`
+      : BLOCKER_TEXT[a.blocker ?? 'settling'];
   return [
-    `auto-capture ${a.ready ? 'READY' : `waiting: ${BLOCKER_TEXT[a.blocker ?? 'settling']}`}`,
+    `auto-capture ${a.ready ? 'READY' : `waiting: ${waiting}`}`,
+    `${mark(rate === null ? null : rate >= a.minDetectionRate)} rate       ${
+      rate === null ? '–' : rate.toFixed(1)
+    } ≥ ${a.minDetectionRate} detections/s`,
     `${mark(a.speed === null ? null : a.speed <= a.maxSpeed)} speed      ${
       a.speed === null ? '–' : a.speed.toFixed(3)
     } ≤ ${a.maxSpeed} diag/s`,
@@ -130,6 +138,7 @@ const BLOCKER_TEXT: Record<NonNullable<AutoCaptureInfo['blocker']>, string> = {
   jitter: 'detections scatter',
   'device-motion': 'device rotating (gyro)',
   blurry: 'blurry vs recent frames',
+  'slow-detection': 'detection rate too low for auto-capture',
 };
 
 function detectorLines(status: DetectorStatus | null): string[] {

@@ -291,6 +291,9 @@ export function createDemoDetector(choice: DetectorChoice): DocumentDetector {
         const hook = globalThis as { __scanoficusDemoFault?: string };
         const fault = hook.__scanoficusDemoFault;
         if (fault) delete hook.__scanoficusDemoFault;
+        // Test hook: slow every detection down by this many milliseconds (a slow device).
+        const delay = (globalThis as { __scanoficusDemoDelayMs?: number }).__scanoficusDemoDelayMs;
+        if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
         const result = await (fault ? Promise.reject(new Error(fault)) : d.detect(frame, options));
         times.push(performance.now() - t);
         if (times.length > 60) times.shift();
