@@ -40,7 +40,12 @@ export type CaptureBlocker =
   /** The device's rotation rate is above the limit (motion sensor, opt-in). */
   | 'device-motion'
   /** The frame is less sharp than `minRelativeSharpness` × the reference. */
-  | 'blurry';
+  | 'blurry'
+  /**
+   * Still `settling` because detections come too slowly to fill the stability window (reported
+   * by `ScannerController` instead of `settling` when its measured rate is below the minimum).
+   */
+  | 'slow-detection';
 
 /** Result of {@link CaptureTrigger.update}. */
 export interface CaptureTriggerStatus {

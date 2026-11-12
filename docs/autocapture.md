@@ -26,8 +26,12 @@ policy copes with the real detection error, missed detections and blur of each f
 not show that real hands stay below 0.1/s.
 
 `LiveDetection.autoCapture` reports the first failing criterion (`blocker`: `no-document`,
-`holding`, `settling`, `moving`, `jitter`, `blurry`, `device-motion`, `captured`, `disabled`)
-together with each measured value and its limit. The demo's debug overlay shows these values.
+`holding`, `settling`, `slow-detection`, `moving`, `jitter`, `blurry`, `device-motion`,
+`captured`, `disabled`) together with each measured value and its limit. `slow-detection`
+replaces `settling` when the measured detection rate (`detectionRate`, over the last 2 s) is
+below `minDetectionRate` (`minWindowFrames` per `2 × windowMs`, 4/s by default): then the
+window cannot fill and auto-capture cannot fire. The demo's debug overlay shows these values,
+for example "detection rate too low for auto-capture: 2.1/s (needs ≥ 4/s)".
 
 ## Simulator
 

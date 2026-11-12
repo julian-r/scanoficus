@@ -125,6 +125,13 @@ export interface AutoCaptureInfo {
   maxRotationRate: number;
   /** A sharper recent frame is kept as the still for the next auto-capture. */
   bestFrame: boolean;
+  /**
+   * Detections per second over the last 2 s (`null` during the first second of scanning) and
+   * the rate below which the stability window cannot fill (`minFrames` per `2 × windowMs`);
+   * below it, a `settling` blocker is reported as `slow-detection`.
+   */
+  detectionRate: number | null;
+  minDetectionRate: number;
 }
 
 /** Immutable view of the controller, replaced on every change (for `useSyncExternalStore`). */
@@ -284,6 +291,9 @@ export class ScannerController {
   private activeCapture = 0;
   private nextPageId = 1;
   private detectTimes: number[] = [];
+  /** Detection times of the last 2 s and the start of this scanning period (detection rate). */
+  private rateTimes: number[] = [];
+  private rateSince = 0;
   private snapshot: ScannerSnapshot;
   private disposed = false;
 
@@ -748,6 +758,12 @@ export class ScannerController {
     else if (this.capturedQuad) outside = 'captured';
     else if (motionFresh && frameTime - this.lastFastMotionAt < 300) outside = 'device-motion';
     const status = this.trigger.update(tracked, frameSharpness, frameTime, outside);
+    const detectionRate = this.detectionRate(now);
+    const minDetectionRate = (this.tracker.minWindowFrames * 1000) / (2 * this.tracker.windowMs);
+    const blocker =
+      status.blocker === 'settling' && detectionRate !== null && detectionRate < minDetectionRate
+        ? 'slow-detection'
+        : status.blocker;
     if (outside === 'disabled' || outside === 'captured') this.trigger.restart();
     const progress = outside === 'disabled' || outside === 'captured' ? 0 : status.progress;
     this.lastProgress = progress;
@@ -764,7 +780,7 @@ export class ScannerController {
       detectMs: now - frameTime,
       fps: this.detectTimes.length,
       autoCapture: {
-        blocker: status.blocker,
+        blocker,
         ready: status.ready,
         speed: tracked.speed ?? null,
         maxSpeed: this.tracker.maxSpeed,
@@ -781,6 +797,8 @@ export class ScannerController {
         rotationRate: motionFresh ? this.rotationRate : null,
         maxRotationRate,
         bestFrame: this.bestStill !== null,
+        detectionRate,
+        minDetectionRate,
       },
     };
     this.update({ detection: live });
@@ -790,6 +808,15 @@ export class ScannerController {
       this.bestStill = null;
       void this.captureWith(kept);
     }
+  }
+
+  /** Detections per second over the last 2 s of this scanning period (after its first second). */
+  private detectionRate(now: number): number | null {
+    this.rateTimes.push(now);
+    while (this.rateTimes.length > 0 && now - this.rateTimes[0] >= 2000) this.rateTimes.shift();
+    const elapsed = now - this.rateSince;
+    if (elapsed < 1000) return null;
+    return this.rateTimes.length / (Math.min(2000, elapsed) / 1000);
   }
 
   /**
@@ -1065,6 +1092,11 @@ export class ScannerController {
     // The motion sensor is only listened to while scanning.
     if (state === 'scanning') this.watchMotion();
     else this.unwatchMotion();
+    // The detection rate is measured per scanning period (capturing pauses detection).
+    if (state === 'scanning') {
+      this.rateTimes = [];
+      this.rateSince = this.now();
+    }
     this.update({ state });
     this.emitter.emit('state', { state, previous });
   }

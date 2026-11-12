@@ -90,6 +90,26 @@ describe('ScannerController', () => {
     expect(info?.readyMs).toBeGreaterThan(0);
   });
 
+  it('reports a detection rate too low for auto-capture', async () => {
+    const slow = setup({ stableMs: 500 });
+    await slow.controller.start(video);
+    await slow.frames(8, 400); // 2.5 detections/s
+    const info = slow.controller.getSnapshot().detection?.autoCapture;
+    expect(info?.blocker).toBe('slow-detection');
+    expect(info?.detectionRate).toBeCloseTo(2.5, 6);
+    expect(info?.minDetectionRate).toBe(4);
+    expect(slow.controller.pages).toHaveLength(0);
+
+    const fast = setup({ stableMs: 500, autoCapture: false });
+    await fast.controller.start(video);
+    const rates: (number | null | undefined)[] = [];
+    fast.controller.on('detection', (d) => rates.push(d.autoCapture?.detectionRate));
+    await fast.frames(15, 100);
+    expect(rates[0]).toBeNull(); // first second: not measured yet
+    expect(rates.at(-1)).toBeCloseTo(10, 6);
+    expect(fast.controller.getSnapshot().detection?.autoCapture?.blocker).toBe('disabled');
+  });
+
   it('auto-captures the sharpest recent full-resolution frame and closes the others', async () => {
     const camera = new BufferingCamera();
     const { controller, frames } = setup({ stableMs: 500 }, camera);
