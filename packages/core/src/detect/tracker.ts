@@ -12,22 +12,37 @@ export interface QuadTrackerOptions {
   stabilityThreshold?: number;
   /**
    * Minimum number of observations in the stability window before the quad can be stable.
-   * Default 4. (Before the window rule, this was the number of consecutive still frames, 8.)
+   * Default 4. At low detection rates the window keeps the newest `minWindowFrames`
+   * observations even if they are older than `windowMs`, up to `2 × windowMs`; so the default
+   * works down to about 2–3 detections per second. Missed detections (holding frames) add no
+   * observation, so they shrink the window.
+   */
+  minWindowFrames?: number;
+  /**
+   * @deprecated Before the window rule, this was the number of consecutive still frames
+   * (default 8). It is mapped to `minWindowFrames = min(stableFrames, 4)`, so that existing
+   * settings never need more observations than the default; `minWindowFrames` wins if both are
+   * given.
    */
   stableFrames?: number;
   /**
    * Length (ms) of the stability window: the observations of this period are judged together,
-   * so single outlier frames do not reset stability. Stability needs observations spanning at
-   * least half of it. Default 500.
+   * so single outlier frames do not reset stability (see `minWindowFrames` for low rates).
+   * Stability needs observations spanning at least half of it. Default 500.
    */
   windowMs?: number;
   /**
    * Speed limit for stability, in quad diagonals per second: the fastest corner of the fitted
-   * motion. A steady hand drifts by about 0.02–0.05; at 0.1 a frame exposed for 1/30 s is blurred
-   * by 0.3 % of the document. Default 0.1.
+   * motion. At 0.1 a frame exposed for 1/30 s is blurred by 0.3 % of the document. The default
+   * assumes that a hand trying to hold still drifts by about 0.02–0.05 diagonals/s (not yet
+   * measured on phones; see docs/autocapture.md). Default 0.1.
    */
   maxSpeed?: number;
-  /** Share of the window's observations ignored as outliers (the largest residuals), [0, 0.5). Default 0.25. */
+  /**
+   * Share of the window's observations ignored as outliers (the largest residuals), [0, 0.5);
+   * at least `minWindowFrames` are always kept (no outliers are dropped at 5 detections/s).
+   * Default 0.25.
+   */
   outlierFraction?: number;
   /** How long (ms) the last quad is held when detections are missing. Default 500. */
   holdMs?: number;
@@ -35,7 +50,8 @@ export interface QuadTrackerOptions {
    * If any corner jumps farther than this fraction of the diagonal, the observation is a
    * re-framing or a different document: once the next observation confirms it (lies within half
    * this distance of it), the tracker restarts from it instead of smoothing towards it. A single
-   * far observation is ignored as an outlier (reported as `holding`). Default 0.2.
+   * far observation is ignored as an outlier (reported as `holding`); it is forgotten after
+   * `holdMs`. Default 0.2.
    */
   resetThreshold?: number;
 }
@@ -94,6 +110,8 @@ export class QuadTracker {
   private readonly smoothing: number;
   /** Resolved stability options (see {@link QuadTrackerOptions}). */
   readonly stabilityThreshold: number;
+  readonly minWindowFrames: number;
+  /** @deprecated Same as {@link QuadTracker.minWindowFrames}. */
   readonly stableFrames: number;
   readonly windowMs: number;
   readonly maxSpeed: number;
@@ -102,14 +120,16 @@ export class QuadTracker {
   private readonly resetThreshold: number;
   private quad: Quad | null = null;
   private window: Observation[] = [];
-  private pending: Quad | null = null;
+  private pending: { quad: Quad; t: number } | null = null;
   private stableCount = 0;
   private lastSeen = Number.NEGATIVE_INFINITY;
 
   constructor(options: QuadTrackerOptions = {}) {
     this.smoothing = options.smoothing ?? 0.5;
     this.stabilityThreshold = options.stabilityThreshold ?? 0.015;
-    this.stableFrames = Math.max(2, options.stableFrames ?? 4);
+    const legacy = options.stableFrames === undefined ? 4 : Math.min(options.stableFrames, 4);
+    this.minWindowFrames = Math.max(2, options.minWindowFrames ?? legacy);
+    this.stableFrames = this.minWindowFrames;
     this.windowMs = options.windowMs ?? 500;
     this.maxSpeed = options.maxSpeed ?? 0.1;
     this.outlierFraction = Math.min(0.49, Math.max(0, options.outlierFraction ?? 0.25));
@@ -134,7 +154,8 @@ export class QuadTracker {
     const aligned = alignCorners(observation, this.quad);
     const movement = maxCornerDistance(aligned, this.quad) / diagonalOf(this.quad);
     if (movement > this.resetThreshold) {
-      const pending = this.pending;
+      const pending =
+        this.pending && timeMs - this.pending.t <= this.holdMs ? this.pending.quad : null;
       if (
         pending &&
         maxCornerDistance(alignCorners(observation, pending), pending) / diagonalOf(pending) <=
@@ -142,7 +163,7 @@ export class QuadTracker {
       ) {
         return this.restart(observation, timeMs);
       }
-      this.pending = observation;
+      this.pending = { quad: observation, t: timeMs };
       return this.held(timeMs);
     }
     this.pending = null;
@@ -179,11 +200,18 @@ export class QuadTracker {
 
   private state(holding: boolean, restarted: boolean, timeMs: number): TrackerState {
     const window = this.window;
-    while (window.length > 0 && window[0].t <= timeMs - this.windowMs) window.shift();
+    // Older than windowMs: kept only while needed for minWindowFrames, and never beyond 2×.
+    while (
+      window.length > 0 &&
+      (window[0].t <= timeMs - 2 * this.windowMs ||
+        (window[0].t <= timeMs - this.windowMs && window.length > this.minWindowFrames))
+    ) {
+      window.shift();
+    }
     let speed: number | null = null;
     let jitter: number | null = null;
     if (this.quad && window.length >= 2) {
-      const fit = fitMotion(window, this.outlierFraction);
+      const fit = fitMotion(window, this.outlierFraction, this.minWindowFrames);
       speed = fit.speed;
       jitter = fit.jitter;
     }
@@ -192,7 +220,7 @@ export class QuadTracker {
       if (
         speed === null ||
         jitter === null ||
-        window.length < this.stableFrames ||
+        window.length < this.minWindowFrames ||
         timeMs - window[0].t < this.windowMs / 2
       ) {
         instability = 'settling';
@@ -219,15 +247,21 @@ export class QuadTracker {
 
 /**
  * Fits a straight-line motion (least squares over time) to every corner of the observations,
- * drops the `outlierFraction` with the largest residuals and fits again. Returns the speed of the
- * fastest corner (diagonals per second) and the largest remaining residual (diagonals).
+ * drops the `outlierFraction` with the largest residuals (but keeps at least `minKept`, so that
+ * a few sparse samples of a fast motion cannot be fitted by dropping one) and fits again. Returns
+ * the speed of the fastest corner (diagonals per second) and the largest remaining residual
+ * (diagonals).
  */
 function fitMotion(
   observations: readonly Observation[],
   outlierFraction: number,
+  minKept: number,
 ): { speed: number; jitter: number } {
   const first = fitLines(observations);
-  const drop = Math.floor(observations.length * outlierFraction);
+  const drop = Math.max(
+    0,
+    Math.min(Math.floor(observations.length * outlierFraction), observations.length - minKept),
+  );
   if (drop === 0) return { speed: first.speed, jitter: Math.max(...first.residuals) };
   const kept = first.residuals
     .map((r, i) => ({ r, i }))

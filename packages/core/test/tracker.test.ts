@@ -33,6 +33,51 @@ describe('QuadTracker', () => {
     expect(states[5].speed).toBeLessThan(0.01);
   });
 
+  it('becomes stable at 5 detections per second, also with missed detections', () => {
+    const run = (miss: (i: number) => boolean) => {
+      const tracker = new QuadTracker();
+      const states = [];
+      for (let i = 0; i <= 15; i++) {
+        states.push(tracker.update(miss(i) ? null : shift(base, (i % 3) * 0.5), i * 200));
+      }
+      return states;
+    };
+    const states = run(() => false);
+    // 4 observations: 0, 200, 400, 600 ms (older than the 500-ms window, kept up to 1000 ms).
+    expect(states.findIndex((s) => s.stable)).toBe(3);
+    expect(states[3].windowFrames).toBe(4);
+    expect(states[3].windowSpanMs).toBe(600);
+    expect(states.slice(3).every((s) => s.stable)).toBe(true);
+    // Every fourth detection missed: the 4 newest observations span at most 800 ms.
+    const missing = run((i) => i % 4 === 3);
+    expect(missing.slice(3).every((s) => s.holding || s.stable)).toBe(true);
+    // Too sparse (2.5/s with misses): never 4 observations within 1000 ms.
+    const sparse = run((i) => i % 2 === 1 || i % 4 === 2);
+    expect(sparse.some((s) => s.stable)).toBe(false);
+  });
+
+  it('maps the deprecated stableFrames to at most 4 observations', () => {
+    expect(new QuadTracker({ stableFrames: 8 }).minWindowFrames).toBe(4);
+    expect(new QuadTracker({ stableFrames: 3 }).minWindowFrames).toBe(3);
+    expect(new QuadTracker({ stableFrames: 8, minWindowFrames: 6 }).minWindowFrames).toBe(6);
+    // Old setting at 10 detections/s: still becomes stable.
+    const tracker = new QuadTracker({ stableFrames: 8 });
+    let state = tracker.update(base, 0);
+    for (let i = 1; i <= 10; i++) state = tracker.update(base, i * 100);
+    expect(state.stable).toBe(true);
+  });
+
+  it('forgets an unconfirmed far jump after holdMs', () => {
+    const tracker = new QuadTracker({ holdMs: 300 });
+    tracker.update(base, 0);
+    tracker.update(shift(base, 200, 50), 100); // pending outlier
+    for (let t = 150; t <= 600; t += 50) tracker.update(base, t);
+    // Another far observation much later is a new outlier, not a confirmation.
+    const late = tracker.update(shift(base, 201, 50), 700);
+    expect(late.restarted).toBe(false);
+    expect(late.holding).toBe(true);
+  });
+
   it('reports a steady drift as stable and panning as moving', () => {
     const run = (speed: number) => {
       const tracker = new QuadTracker();

@@ -761,7 +761,7 @@ export class ScannerController {
         jitter: tracked.jitter ?? null,
         maxJitter: this.tracker.stabilityThreshold,
         windowFrames: tracked.windowFrames ?? 0,
-        minFrames: this.tracker.stableFrames,
+        minFrames: this.tracker.minWindowFrames,
         windowSpanMs: tracked.windowSpanMs ?? 0,
         minWindowSpanMs: this.tracker.windowMs / 2,
         sharpnessReference: status.sharpnessReference,

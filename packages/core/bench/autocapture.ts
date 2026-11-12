@@ -167,6 +167,12 @@ export function handClip(clip: SimClip, scenario: HandScenario): SimClip {
   return { ...clip, frames };
 }
 
+/** The clip with an extra share `p` of detections removed at random (missed detections). */
+export function withMisses(clip: SimClip, p: number): SimClip {
+  const random = new Random(hashString(`${clip.id}misses`));
+  return { ...clip, frames: clip.frames.map((f) => (random.chance(p) ? { ...f, quad: null } : f)) };
+}
+
 function hashString(s: string): number {
   let h = 2166136261;
   for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
@@ -244,6 +250,20 @@ export function loadSimClips(detector: AutocaptureDetector, benchDir: string): S
   return clips;
 }
 
+/** Indices of the frames the live loop analyzes at `rate` detections per second. */
+export function analyzedFrames(clip: SimClip, rate: number): number[] {
+  const frames = clip.frames;
+  const interval = frames.length > 1 ? frames[1].t - frames[0].t : 1;
+  const tickMs = Math.max(1000 / rate, interval);
+  const end = frames[frames.length - 1].t;
+  const indices: number[] = [];
+  for (let tick = 0; tick <= end + 1e-6; tick += tickMs) {
+    const index = Math.min(frames.length - 1, Math.floor(tick / interval + 1e-9));
+    if (index !== indices.at(-1)) indices.push(index);
+  }
+  return indices;
+}
+
 export function simulate(
   clip: SimClip,
   policy: Policy,
@@ -252,13 +272,7 @@ export function simulate(
 ): ClipOutcome {
   const frames = clip.frames;
   const interval = frames.length > 1 ? frames[1].t - frames[0].t : 1;
-  const tickMs = Math.max(1000 / rate, interval);
-  const end = frames[frames.length - 1].t;
-  let last = -1;
-  for (let tick = 0; tick <= end + 1e-6; tick += tickMs) {
-    const index = Math.min(frames.length - 1, Math.floor(tick / interval + 1e-9));
-    if (index === last) continue;
-    last = index;
+  for (const index of analyzedFrames(clip, rate)) {
     const f = frames[index];
     const decision = policy.step({ t: f.t, frame: index, quad: f.quad, sharpness: f.sharpness });
     if (!decision.fire) continue;
@@ -349,9 +363,19 @@ if (process.argv[1] && import.meta.filename === process.argv[1]) {
       policies: { type: 'string', default: 'legacy;library' },
       fast: { type: 'string', default: '0.25' },
       json: { type: 'string' },
+      sweep: { type: 'string' },
     },
   });
   const clips = loadSimClips(values.detector as AutocaptureDetector, values['bench-dir']);
+  if (values.sweep) {
+    rateSweep(
+      clips,
+      values.sweep.split(',').map(Number),
+      values.policies.split(';'),
+      Number(values.latency),
+    );
+    process.exit(0);
+  }
   const rate = Number(values.rate);
   const latency = Number(values.latency);
   const fast = Number(values.fast);
@@ -431,4 +455,54 @@ if (process.argv[1] && import.meta.filename === process.argv[1]) {
     console.log(`- ${label}: ${parts.join(', ')}`);
   }
   if (values.json) writeFileSync(values.json, JSON.stringify(results, null, 2));
+}
+
+/**
+ * Detection-rate sweep: capture share (real replay; steady, pan and walk hand replays; tuning /
+ * held-out) per policy and rate, and the share of analyzed frames without a detection.
+ */
+function rateSweep(clips: SimClip[], rates: number[], policies: string[], latency: number): void {
+  console.log(
+    '| rate | policy | real: tune / held-out | steady: tune / held-out (median time) | steady, +20 % missed: tune / held-out | pan / walk | missed detections (as recorded / +20 %) |',
+  );
+  console.log('| ---: | --- | --- | --- | --- | --- | ---: |');
+  const splits = [clips.filter((c) => c.tuning), clips.filter((c) => !c.tuning)];
+  const hands = Object.fromEntries(
+    HAND_SCENARIOS.map((h) => [h, splits.map((set) => set.map((c) => handClip(c, h)))]),
+  ) as Record<HandScenario, SimClip[][]>;
+  const lossy = hands.steady.map((set) => set.map((c) => withMisses(c, 0.2)));
+  const pct = (v: number) => `${(v * 100).toFixed(0)} %`;
+  for (const rate of rates) {
+    const missedShare = (set: SimClip[]) => {
+      let analyzed = 0;
+      let missed = 0;
+      for (const c of set) {
+        for (const i of analyzedFrames(c, rate)) {
+          analyzed++;
+          if (!c.frames[i].quad) missed++;
+        }
+      }
+      return missed / analyzed;
+    };
+    const missed = `${pct(missedShare(clips))} / ${pct(missedShare(lossy.flat()))}`;
+    for (const name of policies) {
+      const make = policyFactory(name);
+      const stats = (set: SimClip[]) =>
+        aggregate(
+          set.map((c) => simulate(c, make(), rate, latency)),
+          0.25,
+        );
+      const real = splits.map(stats);
+      const steady = hands.steady.map(stats);
+      const steadyLossy = lossy.map(stats);
+      const moving = [...hands.pan, ...hands.walk].flat();
+      console.log(
+        `| ${rate} | ${name} | ${real.map((s) => pct(s.captured)).join(' / ')} | ${steady
+          .map((s) => `${pct(s.captured)} (${s.captured ? s.medianTime.toFixed(1) : '–'} s)`)
+          .join(' / ')} | ${steadyLossy
+          .map((s) => `${pct(s.captured)} (${s.captured ? s.medianTime.toFixed(1) : '–'} s)`)
+          .join(' / ')} | ${pct(stats(moving).captured)} | ${missed} |`,
+      );
+    }
+  }
 }
